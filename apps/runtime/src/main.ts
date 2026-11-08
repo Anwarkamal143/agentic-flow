@@ -58,16 +58,6 @@ const startedAt = new Date();
 let state: RuntimeStatus['state'] = 'running';
 let port = 0;
 
-database.db.transaction((tx) => {
-  appendEvent(tx, {
-    entityKind: 'runtime',
-    entityId: 'runtime',
-    type: 'runtime.started',
-    actor: ACTOR,
-    payload: { pid: process.pid, version },
-  });
-});
-
 const app = createApp({
   token,
   status: () => ({
@@ -90,6 +80,15 @@ const app = createApp({
 // No createServer option is passed, so serve() returns a plain node:http Server.
 const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requestedPort }, (info) => {
   port = info.port;
+  database.db.transaction((tx) => {
+    appendEvent(tx, {
+      entityKind: 'runtime',
+      entityId: 'runtime',
+      type: 'runtime.started',
+      actor: ACTOR,
+      payload: { pid: process.pid, version, port },
+    });
+  });
   writeRuntimeRecord(home, {
     pid: process.pid,
     host: RUNTIME_HOST,

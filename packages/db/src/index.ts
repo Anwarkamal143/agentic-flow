@@ -1,4 +1,3 @@
-import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
@@ -18,11 +17,6 @@ export interface DatabaseHandle {
 }
 
 const migrationsFolder = fileURLToPath(new URL('../drizzle', import.meta.url));
-
-/** Number of migrations shipped with this build. */
-export function shippedMigrationCount(): number {
-  return readdirSync(migrationsFolder).filter((f) => f.endsWith('.sql')).length;
-}
 
 /**
  * Opens (creating if needed) the factory database in WAL mode and applies every
@@ -70,7 +64,7 @@ export function appendEvent(db: FactoryDb, event: NewEvent): number {
       jobId: event.jobId ?? null,
       type: event.type,
       actor: event.actor,
-      payloadJson: JSON.stringify({ v: 1, ...event.payload }),
+      payloadJson: JSON.stringify({ ...event.payload, v: 1 }),
     })
     .returning({ seq: schema.events.seq })
     .get();

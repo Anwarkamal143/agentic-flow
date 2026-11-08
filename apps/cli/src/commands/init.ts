@@ -15,6 +15,16 @@ export async function init(opts: { workspaceRoot: string | undefined }): Promise
   const home = resolveHome();
   const existing = readConfig(home);
   if (existing !== undefined && readToken(home) !== undefined) {
+    if (
+      opts.workspaceRoot !== undefined &&
+      resolve(opts.workspaceRoot) !== existing.workspaceRoot
+    ) {
+      process.stderr.write(
+        `Factory home ${home.root} is already initialized with workspace root ` +
+          `${existing.workspaceRoot}; refusing to change it to ${resolve(opts.workspaceRoot)}.\n`,
+      );
+      return 1;
+    }
     process.stdout.write(
       `Factory home already initialized: ${home.root}\n` +
         `  workspace root: ${existing.workspaceRoot}\n` +

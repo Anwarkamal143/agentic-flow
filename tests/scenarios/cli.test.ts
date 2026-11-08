@@ -35,10 +35,21 @@ describe('factory init', () => {
   it('keeps the existing token when run again', async () => {
     const home = await initializedHome();
     const token = home.token();
-    const res = await home.cli(['init', '--workspace-root', '/somewhere/else']);
+    const res = await home.cli(['init', '--workspace-root', home.workspaceRoot]);
     expect(res.code).toBe(0);
     expect(res.stdout).toContain('already initialized');
     expect(home.token()).toBe(token);
+  });
+
+  it('refuses to silently change the workspace root of an initialized home', async () => {
+    const home = await initializedHome();
+    const res = await home.cli(['init', '--workspace-root', '/somewhere/else']);
+    expect(res.code, 'a different --workspace-root on re-init is an error').toBe(1);
+    expect(res.stderr).toContain('refusing to change it');
+    const config = JSON.parse(readFileSync(join(home.dir, 'config.json'), 'utf8')) as {
+      workspaceRoot: string;
+    };
+    expect(config.workspaceRoot).toBe(home.workspaceRoot);
   });
 });
 
