@@ -57,6 +57,7 @@ import { criteriaCoveredBy } from './criteria.js';
 import { buildDeliveryReport } from './delivery.js';
 import { changeJob, stepTask, type JobState, type StageRunStepper } from './engine.js';
 import { newId } from './ids.js';
+import { PassLoop } from './pass-loop.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 
 const ACTOR = 'system:scheduler';
@@ -134,11 +135,7 @@ interface Outcome {
 }
 
 export class TaskScheduler {
-  private timer: NodeJS.Timeout | undefined;
-  private wakeScheduled = false;
-  /** A wake arrived during a pass: run another one after it. */
-  private wokenWhileBusy = false;
-  private busy: Promise<void> | undefined;
+  private readonly loop = new PassLoop(() => this.pass(), POLL_MS);
   private currentRun: HarnessRun | undefined;
   private currentProc: GuardedProcess | undefined;
   private closed = false;
@@ -161,36 +158,12 @@ export class TaskScheduler {
 
   start(): void {
     if (this.opts.harness === undefined) return;
-    this.timer = setInterval(() => {
-      this.wake();
-    }, POLL_MS);
-    this.wake();
+    this.loop.start();
   }
 
   wake(): void {
-    if (this.wakeScheduled || this.closed || this.opts.harness === undefined) return;
-    this.wakeScheduled = true;
-    setImmediate(() => {
-      this.wakeScheduled = false;
-      if (this.busy !== undefined) {
-        this.wokenWhileBusy = true;
-        return;
-      }
-      if (!this.closed) {
-        // Another pass right away only after work, or when woken meanwhile; an
-        // empty pass waits for the poll timer (never a busy loop).
-        this.wokenWhileBusy = false;
-        let worked = false;
-        this.busy = this.pass()
-          .then((w) => {
-            worked = w;
-          })
-          .finally(() => {
-            this.busy = undefined;
-            if ((worked || this.wokenWhileBusy) && !this.closed) this.wake();
-          });
-      }
-    });
+    if (this.closed || this.opts.harness === undefined) return;
+    this.loop.wake();
   }
 
   /**
@@ -199,9 +172,9 @@ export class TaskScheduler {
    */
   async close(): Promise<void> {
     this.closed = true;
-    clearInterval(this.timer);
+    this.loop.halt();
     await Promise.all([this.currentRun?.cancel(), this.currentProc?.cancel()]);
-    await this.busy;
+    await this.loop.idle();
   }
 
   /** Runs at most one closure or one Attempt. `true` when it did some work. */
