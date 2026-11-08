@@ -14,6 +14,7 @@ import {
   StageIdSchema,
   StageRunStateSchema,
   type JobStatus,
+  type StageFailure,
   type StageRunState,
 } from '@factory/domain';
 import { and, asc, eq, sql } from 'drizzle-orm';
@@ -106,15 +107,22 @@ export function readJobState(tx: Tx | FactoryDb, jobId: string): JobState {
   return { job, stageRuns };
 }
 
-/** Moves one Stage Run of the Job being changed, writing its event. */
+/**
+ * Moves one Stage Run of the Job being changed, writing its event. A `failure`
+ * is stored on the Stage Run (only with `to: failed`).
+ */
 export type StageRunStepper = (
   run: typeof schema.stageRuns.$inferSelect,
   to: StageRunState,
-  reason?: string,
+  opts?: { reason?: string | undefined; failure?: StageFailure },
 ) => void;
 
 function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper {
-  return (run, to, reason) => {
+  return (run, to, opts = {}) => {
+    const { reason, failure } = opts;
+    if (failure !== undefined && to !== 'failed') {
+      throw new Error(`a failure is recorded only when a Stage Run fails (${run.id} → ${to})`);
+    }
     const from = StageRunStateSchema.parse(run.state);
     if (!canTransitionStageRun(from, to)) {
       throw new Error(`illegal Stage Run transition ${from} → ${to} (${run.id})`);
@@ -127,6 +135,7 @@ function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper 
         version: sql`${schema.stageRuns.version} + 1`,
         ...(to === 'running' ? { startedAt: now } : {}),
         ...(isFinished(to) ? { finishedAt: now } : {}),
+        ...(failure === undefined ? {} : { failureJson: JSON.stringify(failure) }),
       })
       .where(
         and(
@@ -146,7 +155,13 @@ function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper 
       jobId,
       type: `stage_run.${to}`,
       actor,
-      payload: { stageId: run.stageId, from, to, ...(reason === undefined ? {} : { reason }) },
+      payload: {
+        stageId: run.stageId,
+        from,
+        to,
+        ...(reason === undefined ? {} : { reason }),
+        ...(failure === undefined ? {} : { failure }),
+      },
     });
   };
 }

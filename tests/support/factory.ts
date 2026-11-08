@@ -238,3 +238,18 @@ export function git(cwd: string, args: string[]): string {
     },
   });
 }
+
+/**
+ * Selects the Fake Harness for this home through runtime configuration: writes
+ * `script` (YAML) next to the home and points `config.json` at it. Call before
+ * `startRuntime`.
+ */
+export function useFakeHarness(home: TestHome, script: string): string {
+  const path = join(home.dir, '..', 'fake-harness.yaml');
+  writeFileSync(path, script);
+  const configPath = join(home.dir, 'config.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+  config['harness'] = { id: 'fake', script: path };
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+  return path;
+}

@@ -10,6 +10,7 @@ import {
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
+import type { ArtifactStore } from './artifacts.js';
 import type { DoctorReport } from './doctor.js';
 import type { Outbox } from './outbox.js';
 import { MAX_EVENT_PAGE } from './events.js';
@@ -28,6 +29,8 @@ export interface RuntimeStatus {
   home: string;
   workspaceRoot: string;
   database: { journalMode: string; migrations: number };
+  /** The Harness chosen by runtime configuration, or `null` when none is. */
+  harness: { id: string; version: string | null; installed: boolean } | null;
 }
 
 export interface AppDeps {
@@ -37,6 +40,7 @@ export interface AppDeps {
   doctor(): Promise<DoctorReport>;
   repositories: RepositoryService;
   jobs: JobService;
+  artifacts: ArtifactStore;
   outbox: Outbox;
   /** Begins a graceful shutdown after the response is sent. */
   requestShutdown(): void;
@@ -83,6 +87,21 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(deps.jobs.create(input), 201);
   });
   app.get('/v1/jobs/:id', (c) => c.json(deps.jobs.get(c.req.param('id'))));
+  app.get('/v1/jobs/:id/artifacts', (c) => {
+    const id = c.req.param('id');
+    deps.jobs.get(id); // 404 for an unknown Job
+    return c.json(deps.artifacts.listForJob(id));
+  });
+  app.get('/v1/jobs/:id/acceptance-criteria', (c) =>
+    c.json(deps.jobs.acceptanceCriteria(c.req.param('id'))),
+  );
+  app.get('/v1/jobs/:id/tasks', (c) => c.json(deps.jobs.tasks(c.req.param('id'))));
+  app.get('/v1/artifacts/:id', (c) => c.json(deps.artifacts.get(c.req.param('id'))));
+  /** The exact bytes the content hash was computed over. */
+  app.get('/v1/artifacts/:id/content', (c) => {
+    const bytes = deps.artifacts.readContent(c.req.param('id'));
+    return c.body(new Uint8Array(bytes), 200, { 'content-type': 'application/json' });
+  });
   app.get('/v1/jobs/:id/events', (c) => {
     const id = c.req.param('id');
     deps.jobs.get(id); // 404 for an unknown Job

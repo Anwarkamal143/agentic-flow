@@ -23,6 +23,7 @@ interface StatusBody {
   port: number;
   workspaceRoot: string;
   database: { journalMode: string; migrations: number };
+  harness: { id: string; version: string | null } | null;
 }
 
 export async function start(): Promise<number> {
@@ -102,7 +103,8 @@ export async function status(opts: { json: boolean }): Promise<number> {
       `  version:        ${body.version}\n` +
       `  uptime:         ${formatUptime(body.uptimeMs)}\n` +
       `  workspace root: ${body.workspaceRoot}\n` +
-      `  database:       journal ${body.database.journalMode}, ${String(body.database.migrations)} migration(s) applied\n`,
+      `  database:       journal ${body.database.journalMode}, ${String(body.database.migrations)} migration(s) applied\n` +
+      `  harness:        ${body.harness === null ? 'none configured (queued Stages wait)' : `${body.harness.id} ${body.harness.version ?? '(version unknown)'}`}\n`,
   );
   return 0;
 }

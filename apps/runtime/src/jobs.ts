@@ -2,7 +2,7 @@
  * Jobs: creation (intake), reads, and the explicit operations on them. The
  * API never exposes a generic "set state" (ARCHITECTURE §4.5).
  */
-import { appendEvent, schema, type FactoryDb } from '@factory/db';
+import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   canTransitionStageRun,
   currentStageOf,
@@ -12,18 +12,23 @@ import {
   JobTypeSchema,
   ProjectConfigSchema,
   resolveEffectiveConfig,
+  StageFailureSchema,
   StageIdSchema,
   StageRunStateSchema,
+  TaskDefinitionSchema,
+  TaskStateSchema,
   TERMINAL_JOB_STATUSES,
   WorkflowSnapshotSchema,
+  type AcceptanceCriterion,
   type CancelJobInput,
   type CreateJobInput,
   type Job,
   type JobSummary,
   type StageRun,
+  type Task,
   type WorkflowSnapshot,
 } from '@factory/domain';
-import { asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { changeJob, changeJobIn, readJobState, type JobState } from './engine.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
@@ -187,9 +192,10 @@ export class JobService {
         }
         for (const run of state.stageRuns) {
           if (canTransitionStageRun(StageRunStateSchema.parse(run.state), 'cancelled')) {
-            step(run, 'cancelled', input.reason);
+            step(run, 'cancelled', { reason: input.reason });
           }
         }
+        cancelOpenTasks(tx, id, input.reason);
         appendEvent(tx, {
           entityKind: 'job',
           entityId: id,
@@ -204,6 +210,27 @@ export class JobService {
     return this.get(id);
   }
 
+  acceptanceCriteria(jobId: string): AcceptanceCriterion[] {
+    this.get(jobId); // 404 for an unknown Job
+    return this.db
+      .select()
+      .from(schema.acceptanceCriteria)
+      .where(eq(schema.acceptanceCriteria.jobId, jobId))
+      .orderBy(asc(sql`rowid`))
+      .all();
+  }
+
+  tasks(jobId: string): Task[] {
+    this.get(jobId); // 404 for an unknown Job
+    return this.db
+      .select()
+      .from(schema.tasks)
+      .where(eq(schema.tasks.jobId, jobId))
+      .orderBy(asc(sql`rowid`))
+      .all()
+      .map(toTask);
+  }
+
   private repositoryOf(jobId: string): string {
     const row = this.db
       .select()
@@ -215,6 +242,50 @@ export class JobService {
   }
 }
 
+/** Tasks that have not started are cancelled with their Job. */
+function cancelOpenTasks(tx: Tx, jobId: string, reason: string | undefined): void {
+  const open = tx
+    .select()
+    .from(schema.tasks)
+    .where(and(eq(schema.tasks.jobId, jobId), inArray(schema.tasks.state, ['pending', 'ready'])))
+    .all();
+  for (const task of open) {
+    tx.update(schema.tasks)
+      .set({ state: 'cancelled', version: sql`${schema.tasks.version} + 1` })
+      .where(and(eq(schema.tasks.id, task.id), eq(schema.tasks.version, task.version)))
+      .run();
+    appendEvent(tx, {
+      entityKind: 'task',
+      entityId: task.id,
+      jobId,
+      type: 'task.cancelled',
+      actor: OPERATOR,
+      payload: {
+        key: task.key,
+        from: task.state,
+        to: 'cancelled',
+        ...(reason === undefined ? {} : { reason }),
+      },
+    });
+  }
+}
+
+function toTask(row: typeof schema.tasks.$inferSelect): Task {
+  const definition = TaskDefinitionSchema.parse(JSON.parse(row.definitionJson));
+  return {
+    id: row.id,
+    jobId: row.jobId,
+    key: row.key,
+    title: row.title,
+    repositoryId: row.repositoryId,
+    state: TaskStateSchema.parse(row.state),
+    ...definition,
+    maxAttempts: row.maxAttempts,
+    planArtifactId: row.planArtifactId,
+    version: row.version,
+  };
+}
+
 function toStageRun(row: JobState['stageRuns'][number]): StageRun {
   return {
     id: row.id,
@@ -222,6 +293,8 @@ function toStageRun(row: JobState['stageRuns'][number]): StageRun {
     state: StageRunStateSchema.parse(row.state),
     startedAt: row.startedAt,
     finishedAt: row.finishedAt,
+    failure:
+      row.failureJson === null ? null : StageFailureSchema.parse(JSON.parse(row.failureJson)),
     version: row.version,
   };
 }
