@@ -22,6 +22,8 @@ import {
 } from '@factory/home';
 import { createApp, type RuntimeStatus } from './app.js';
 import { runDoctor } from './doctor.js';
+import { JobService } from './jobs.js';
+import { Outbox } from './outbox.js';
 import { RepositoryService } from './repositories.js';
 
 const ACTOR = 'system:runtime';
@@ -60,6 +62,11 @@ const startedAt = new Date();
 let state: RuntimeStatus['state'] = 'running';
 let port = 0;
 
+const outbox = new Outbox(database.db);
+const notify = () => {
+  outbox.notify();
+};
+
 const app = createApp({
   token,
   status: () => ({
@@ -75,7 +82,9 @@ const app = createApp({
     database: { journalMode: database.journalMode, migrations: database.appliedMigrations },
   }),
   doctor: () => runDoctor(process.env),
-  repositories: new RepositoryService(database.db, config.workspaceRoot),
+  repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
+  jobs: new JobService(database.db, notify),
+  outbox,
   requestShutdown: () => {
     shutdown('api');
   },
@@ -93,6 +102,7 @@ const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requested
       payload: { pid: process.pid, version, port },
     });
   });
+  outbox.start();
   writeRuntimeRecord(home, {
     pid: process.pid,
     host: RUNTIME_HOST,
@@ -118,6 +128,8 @@ function shutdown(reason: string): void {
     server.closeAllConnections();
   }, 3_000);
   force.unref();
+  // Ends every SSE stream; events written from here on are released at the next start.
+  outbox.close();
   server.close(() => {
     database.db.transaction((tx) => {
       appendEvent(tx, {

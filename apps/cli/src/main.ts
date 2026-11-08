@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import { doctor } from './commands/doctor.js';
 import { init } from './commands/init.js';
+import { jobCancel, jobCreate, jobList, jobShow } from './commands/job.js';
 import { repoAdd } from './commands/repo.js';
 import { start, status, stop } from './commands/lifecycle.js';
 
@@ -17,6 +18,12 @@ Commands:
            [--typecheck-command <cmd>] [--yes]
                                   Register a Repository: make its Factory Clone and save
                                   its confirmed commands (your checkout is never modified)
+  job create --repo <id|name> --title <text> [--description <text>]
+                                  Create a Job for a registered Repository
+  job list [--json]               List Jobs, newest first
+  job show <id> [--json]          Show a Job: status, Stages, Workflow Snapshot, config
+  job cancel <id> [--reason <text>]
+                                  Cancel a Job that has no running Stage
 
 Environment:
   FACTORY_HOME   factory home directory (default ~/.factory)
@@ -76,6 +83,8 @@ async function main(argv: string[]): Promise<number> {
         yes: values.yes === true,
       });
     }
+    case 'job':
+      return job(rest);
     case undefined:
     case 'help':
     case '--help':
@@ -84,6 +93,50 @@ async function main(argv: string[]): Promise<number> {
       return command === undefined ? 2 : 0;
     default:
       process.stderr.write(`factory: unknown command '${command}'\n\n${USAGE}`);
+      return 2;
+  }
+}
+
+function job(argv: string[]): Promise<number> | number {
+  const [sub, ...args] = argv;
+  switch (sub) {
+    case 'create': {
+      const { values } = parseArgs({
+        args,
+        options: {
+          repo: { type: 'string' },
+          title: { type: 'string' },
+          description: { type: 'string' },
+        },
+      });
+      if (values.repo === undefined || values.title === undefined) {
+        process.stderr.write(`factory: job create needs --repo and --title\n\n${USAGE}`);
+        return 2;
+      }
+      return jobCreate({ repo: values.repo, title: values.title, description: values.description });
+    }
+    case 'list': {
+      const { values } = parseArgs({ args, options: { json: { type: 'boolean' } } });
+      return jobList({ json: values.json === true });
+    }
+    case 'show':
+    case 'cancel': {
+      const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: { json: { type: 'boolean' }, reason: { type: 'string' } },
+      });
+      const [id, ...extra] = positionals;
+      if (id === undefined || extra.length > 0) {
+        process.stderr.write(`factory: job ${sub} takes exactly one Job id\n\n${USAGE}`);
+        return 2;
+      }
+      return sub === 'show'
+        ? jobShow(id, { json: values.json === true })
+        : jobCancel(id, { reason: values.reason });
+    }
+    default:
+      process.stderr.write(`factory: unknown job command '${sub ?? ''}'\n\n${USAGE}`);
       return 2;
   }
 }

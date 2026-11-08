@@ -66,7 +66,7 @@ pnpm test          # builds, then runs every Vitest scenario in tests/
 pnpm test:e2e      # only the scenario tests (tests/scenarios)
 pnpm format        # Prettier --write
 pnpm --filter @factory/db db:generate   # write a migration after editing packages/db/src/schema.ts
-pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | repo add
+pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | repo add | job create|list|show|cancel
 pnpm fixtures      # generate fixtures/repos/tiny-ts (gitignored; tests make their own)
 pnpm dev           # TODO(Phase A) — runtime + dashboard (dashboard not built yet)
 ```

@@ -8,6 +8,9 @@ export { schema };
 
 export type FactoryDb = BetterSQLite3Database<typeof schema>;
 
+/** The handle passed to a `FactoryDb.transaction` callback. */
+export type Tx = Parameters<Parameters<FactoryDb['transaction']>[0]>[0];
+
 export interface DatabaseHandle {
   readonly db: FactoryDb;
   readonly journalMode: string;
@@ -54,7 +57,7 @@ export interface NewEvent {
 }
 
 /** Appends one event. Callers run it inside the transaction of the state change. */
-export function appendEvent(db: FactoryDb, event: NewEvent): number {
+export function appendEvent(db: FactoryDb | Tx, event: NewEvent): number {
   const row = db
     .insert(schema.events)
     .values({

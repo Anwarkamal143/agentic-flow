@@ -30,9 +30,20 @@ export const RepositoryProfileSchema = z.object({
 });
 export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
 
+/** Operator-set Project configuration. Every field is optional: unset means inherit. */
+export const ProjectConfigSchema = z
+  .object({
+    /** Attempts per Task, Rework included (ARCHITECTURE §4.6). */
+    maxAttempts: z.number().int().min(1).max(10).optional(),
+  })
+  .strict();
+export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
+
 export const ProjectSchema = z.object({
   id: z.string(),
   name: z.string(),
+  /** Operator-set config. Jobs freeze it into their Effective Configuration at creation. */
+  config: ProjectConfigSchema,
   createdAt: z.string(),
 });
 export type Project = z.infer<typeof ProjectSchema>;
@@ -92,3 +103,214 @@ export type RegisterRepositoryResult = z.infer<typeof RegisterRepositoryResultSc
 /** Error body of every non-2xx API response. */
 export const ApiErrorSchema = z.object({ error: z.string(), message: z.string().optional() });
 export type ApiError = z.infer<typeof ApiErrorSchema>;
+
+// ---- Jobs, Stage Runs, Recipes (ARCHITECTURE §4.2, §4.3) -------------------
+
+/** The Stage IDs of the Phase A `feature` Recipe (PRODUCT_SPEC §4). */
+export const StageIdSchema = z.enum([
+  'intake',
+  'triage',
+  'discovery',
+  'specification',
+  'planning',
+  'execution',
+  'closure',
+]);
+export type StageId = z.infer<typeof StageIdSchema>;
+
+export const StageRunStateSchema = z.enum([
+  'pending',
+  'queued',
+  'running',
+  'succeeded',
+  'failed',
+  'blocked',
+  'waiting_human',
+  'skipped',
+  'cancelled',
+]);
+export type StageRunState = z.infer<typeof StageRunStateSchema>;
+
+/** Allowed Stage Run transitions. Everything else is refused by the engine. */
+export const STAGE_RUN_TRANSITIONS: Readonly<Record<StageRunState, readonly StageRunState[]>> = {
+  pending: ['queued', 'skipped', 'cancelled'],
+  queued: ['running', 'cancelled'],
+  running: ['succeeded', 'failed', 'blocked', 'waiting_human', 'cancelled'],
+  blocked: ['queued', 'cancelled'],
+  waiting_human: ['queued', 'cancelled'],
+  succeeded: [],
+  failed: [],
+  skipped: [],
+  cancelled: [],
+};
+
+/** States a Stage Run never leaves. */
+export const FINISHED_STAGE_RUN_STATES: readonly StageRunState[] = (
+  Object.keys(STAGE_RUN_TRANSITIONS) as StageRunState[]
+).filter((s) => STAGE_RUN_TRANSITIONS[s].length === 0);
+
+/** Finished without a problem: the Job can move past it. */
+const PASSED: readonly StageRunState[] = ['succeeded', 'skipped'];
+
+export function canTransitionStageRun(from: StageRunState, to: StageRunState): boolean {
+  return STAGE_RUN_TRANSITIONS[from].includes(to);
+}
+
+export const JobStatusSchema = z.enum([
+  'draft',
+  'active',
+  'waiting_human',
+  'blocked',
+  'completed',
+  'failed',
+  'cancelled',
+  'rejected',
+]);
+export type JobStatus = z.infer<typeof JobStatusSchema>;
+
+export const TERMINAL_JOB_STATUSES: readonly JobStatus[] = [
+  'completed',
+  'failed',
+  'cancelled',
+  'rejected',
+];
+
+export const JobTypeSchema = z.enum(['feature']);
+export type JobType = z.infer<typeof JobTypeSchema>;
+
+/** The frozen copy of a Recipe attached to a Job at creation. */
+export const WorkflowSnapshotSchema = z.object({
+  recipeId: z.string(),
+  recipeVersion: z.number().int().positive(),
+  stages: z.array(z.object({ id: StageIdSchema })).min(1),
+});
+export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
+
+/**
+ * The built-in `feature` Recipe, Phase A cut: without `plan_approval`,
+ * `integration`, `integration_review` and the delivery Stages (ROADMAP Phase A).
+ */
+export const FEATURE_RECIPE: WorkflowSnapshot = {
+  recipeId: 'feature',
+  recipeVersion: 1,
+  stages: StageIdSchema.options.map((id) => ({ id })),
+};
+
+/**
+ * A Job's status, derived from its Stage Runs (ARCHITECTURE §4.2; precedence
+ * from PROGRESS.md spec issue 9). Pure: the engine stores the result
+ * denormalized on the Job in the same transaction.
+ */
+type StageRunPosition = Pick<StageRun, 'stageId' | 'state'>;
+
+export function deriveJobStatus(stageRuns: readonly StageRunPosition[]): JobStatus {
+  const states = new Set(stageRuns.map((s) => s.state));
+  if (states.has('running') || states.has('queued')) return 'active';
+  if (states.has('blocked')) return 'blocked';
+  if (states.has('waiting_human')) return 'waiting_human';
+  if (states.has('failed')) return 'failed';
+  if (states.has('cancelled')) return 'cancelled';
+  if (stageRuns.length > 0 && stageRuns.every((s) => s.state === 'pending')) return 'draft';
+  if (stageRuns.length > 0 && stageRuns.every((s) => PASSED.includes(s.state))) return 'completed';
+  // Work remains but nothing is queued: only seen between two steps of the engine.
+  return 'active';
+}
+
+/** The first Stage that has not finished, or the last Stage when all have. */
+export function currentStageOf(stageRuns: readonly StageRunPosition[]): StageId {
+  const open = stageRuns.find((s) => !PASSED.includes(s.state));
+  const stage = open ?? stageRuns.at(-1);
+  if (stage === undefined) throw new Error('a Job has at least one Stage Run');
+  return stage.stageId;
+}
+
+// ---- Configuration (ARCHITECTURE §15, Phase A minimal) ---------------------
+
+export const ConfigSourceSchema = z.enum(['recipe', 'project']);
+export type ConfigSource = z.infer<typeof ConfigSourceSchema>;
+
+const effectiveValue = <T extends z.ZodType>(value: T) =>
+  z.object({ value, source: ConfigSourceSchema });
+
+/** The settings for one Job once every level is resolved; each value records its source level. */
+export const EffectiveConfigSchema = z.object({
+  maxAttempts: effectiveValue(z.number().int().positive()),
+});
+export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
+
+export const RECIPE_DEFAULTS: { readonly maxAttempts: number } = { maxAttempts: 3 };
+
+/** Resolves the Effective Configuration. Pure; frozen onto the Job at creation. */
+export function resolveEffectiveConfig(levels: { project: ProjectConfig }): EffectiveConfig {
+  const { project } = levels;
+  return {
+    maxAttempts:
+      project.maxAttempts === undefined
+        ? { value: RECIPE_DEFAULTS.maxAttempts, source: 'recipe' }
+        : { value: project.maxAttempts, source: 'project' },
+  };
+}
+
+// ---- Job API contracts ------------------------------------------------------
+
+export const StageRunSchema = z.object({
+  id: z.string(),
+  stageId: StageIdSchema,
+  state: StageRunStateSchema,
+  startedAt: z.string().nullable(),
+  finishedAt: z.string().nullable(),
+  version: z.number().int(),
+});
+export type StageRun = z.infer<typeof StageRunSchema>;
+
+export const JobSummarySchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  repositoryId: z.string(),
+  title: z.string(),
+  type: JobTypeSchema,
+  status: JobStatusSchema,
+  currentStage: StageIdSchema,
+  createdBy: z.string(),
+  createdAt: z.string(),
+  /** Bumped by every state change of the Job or its Stage Runs. Send it back on operations. */
+  version: z.number().int(),
+});
+export type JobSummary = z.infer<typeof JobSummarySchema>;
+
+export const JobSchema = JobSummarySchema.extend({
+  description: z.string(),
+  workflowSnapshot: WorkflowSnapshotSchema,
+  effectiveConfig: EffectiveConfigSchema,
+  stageRuns: z.array(StageRunSchema),
+});
+export type Job = z.infer<typeof JobSchema>;
+
+/** `POST /v1/jobs`. */
+export const CreateJobInputSchema = z.object({
+  repositoryId: z.string().min(1),
+  title: z.string().trim().min(1).max(200),
+  description: z.string().max(20_000).default(''),
+});
+export type CreateJobInput = z.infer<typeof CreateJobInputSchema>;
+
+/** `POST /v1/jobs/:id/cancel`. `expectedVersion` is the Job version the caller saw. */
+export const CancelJobInputSchema = z.object({
+  expectedVersion: z.number().int().nonnegative(),
+  reason: z.string().trim().max(1000).optional(),
+});
+export type CancelJobInput = z.infer<typeof CancelJobInputSchema>;
+
+// ---- Events (ARCHITECTURE §4.1, §17) ----------------------------------------
+
+export const FactoryEventSchema = z.object({
+  seq: z.number().int().positive(),
+  ts: z.string(),
+  entityKind: z.string(),
+  entityId: z.string(),
+  jobId: z.string().nullable(),
+  type: z.string(),
+  actor: z.string(),
+  payload: z.record(z.string(), z.unknown()),
+});
+export type FactoryEvent = z.infer<typeof FactoryEventSchema>;
