@@ -1,0 +1,138 @@
+/**
+ * The factory home directory (default `~/.factory`, overridable with FACTORY_HOME).
+ * Shared by the CLI and the runtime. Holds files only: the database inside it is
+ * owned by the runtime, which is its single writer.
+ *
+ *   token          API bearer token, mode 0600
+ *   config.json    operator config (workspace root, port)
+ *   runtime.json   pid record of the running runtime (pidfile)
+ *   factory.db     SQLite database (runtime only)
+ *   logs/runtime.log
+ */
+import { randomBytes } from 'node:crypto';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { z } from 'zod';
+
+export const DEFAULT_PORT = 7420;
+export const RUNTIME_HOST = '127.0.0.1';
+
+export interface FactoryHome {
+  readonly root: string;
+  readonly tokenPath: string;
+  readonly configPath: string;
+  readonly runtimeRecordPath: string;
+  readonly dbPath: string;
+  readonly logDir: string;
+  readonly runtimeLogPath: string;
+}
+
+export function resolveHome(env: NodeJS.ProcessEnv = process.env): FactoryHome {
+  const root = resolve(env['FACTORY_HOME'] ?? join(homedir(), '.factory'));
+  const logDir = join(root, 'logs');
+  return {
+    root,
+    tokenPath: join(root, 'token'),
+    configPath: join(root, 'config.json'),
+    runtimeRecordPath: join(root, 'runtime.json'),
+    dbPath: join(root, 'factory.db'),
+    logDir,
+    runtimeLogPath: join(logDir, 'runtime.log'),
+  };
+}
+
+export function ensureHomeDirs(home: FactoryHome): void {
+  mkdirSync(home.root, { recursive: true, mode: 0o700 });
+  chmodSync(home.root, 0o700);
+  mkdirSync(home.logDir, { recursive: true, mode: 0o700 });
+}
+
+// ---- config ---------------------------------------------------------------
+
+export const FactoryConfigSchema = z.object({
+  version: z.literal(1),
+  workspaceRoot: z.string().min(1),
+  port: z.number().int().min(0).max(65535),
+});
+export type FactoryConfig = z.infer<typeof FactoryConfigSchema>;
+
+export function readConfig(home: FactoryHome): FactoryConfig | undefined {
+  const raw = readIfExists(home.configPath);
+  if (raw === undefined) return undefined;
+  return FactoryConfigSchema.parse(JSON.parse(raw));
+}
+
+export function writeConfig(home: FactoryHome, config: FactoryConfig): void {
+  writeFileSync(
+    home.configPath,
+    JSON.stringify(FactoryConfigSchema.parse(config), null, 2) + '\n',
+    {
+      mode: 0o600,
+    },
+  );
+}
+
+// ---- token ----------------------------------------------------------------
+
+/** Creates the API token. Never overwrites an existing one. */
+export function createToken(home: FactoryHome): void {
+  writeFileSync(home.tokenPath, randomBytes(32).toString('hex') + '\n', {
+    mode: 0o600,
+    flag: 'wx',
+  });
+  chmodSync(home.tokenPath, 0o600);
+}
+
+export function readToken(home: FactoryHome): string | undefined {
+  const raw = readIfExists(home.tokenPath)?.trim();
+  return raw === undefined || raw === '' ? undefined : raw;
+}
+
+// ---- runtime record (pidfile) ---------------------------------------------
+
+export const RuntimeRecordSchema = z.object({
+  pid: z.number().int().positive(),
+  host: z.string(),
+  port: z.number().int().positive(),
+  startedAt: z.string(),
+  version: z.string(),
+});
+export type RuntimeRecord = z.infer<typeof RuntimeRecordSchema>;
+
+export function readRuntimeRecord(home: FactoryHome): RuntimeRecord | undefined {
+  const raw = readIfExists(home.runtimeRecordPath);
+  if (raw === undefined) return undefined;
+  const parsed = RuntimeRecordSchema.safeParse(JSON.parse(raw));
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function writeRuntimeRecord(home: FactoryHome, record: RuntimeRecord): void {
+  writeFileSync(home.runtimeRecordPath, JSON.stringify(record) + '\n', { mode: 0o600 });
+}
+
+export function removeRuntimeRecord(home: FactoryHome): void {
+  rmSync(home.runtimeRecordPath, { force: true });
+}
+
+export function runtimeUrl(record: RuntimeRecord): string {
+  return `http://${record.host}:${String(record.port)}`;
+}
+
+export function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function readIfExists(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw err;
+  }
+}

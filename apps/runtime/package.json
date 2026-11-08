@@ -1,0 +1,13 @@
+{
+  "name": "@factory/runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/main.js",
+  "dependencies": {
+    "@factory/db": "workspace:*",
+    "@factory/home": "workspace:*",
+    "@hono/node-server": "2.1.6",
+    "hono": "4.13.17"
+  }
+}

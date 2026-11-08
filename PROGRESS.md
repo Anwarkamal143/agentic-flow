@@ -4,7 +4,7 @@
 
 ## Current phase
 
-**Phase A — Walking skeleton** (not started)
+**Phase A — Walking skeleton** (in progress: #2 done)
 
 ## Human answers (from CLAUDE.md §7)
 
@@ -22,7 +22,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 | Phase | Status | Exit tests | Report |
 |---|---|---|---|
-| A — Walking skeleton | Not started | 0 / 7 | — |
+| A — Walking skeleton | In progress | 0 / 7 | — |
 | B — Human-in-the-loop + DAG | Not started | — | — |
 | C — GitHub delivery | Not started | — | — |
 | D — Multi-project, multi-repo, onboarding | Not started | — | — |
@@ -33,6 +33,8 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 <!-- newest first: date — what changed — tests run (pass/fail counts) -->
 
+- 2026-11-08 — #2 Runtime boots behind a token, with the scenario test harness. pnpm monorepo (TS 6 strict, ESLint, Prettier, Vitest); `packages/home` (factory home layout), `packages/db` (Drizzle + SQLite WAL, first migration: `events`, plus a migration drift check in lint); `apps/runtime` (Hono on 127.0.0.1, bearer token on every route, `GET /v1/status`, `POST /v1/shutdown`, clean SIGTERM); `apps/cli` (`factory init | start | status | stop`); scenario helper `tests/support/factory.ts`; MIT LICENSE; CLAUDE.md commands. Branch `phase-a/2-runtime-boot`. typecheck ✓, lint ✓, test 13/13 ✓.
+
 ## File ownership (active parallel workstreams)
 
 <!-- owner → globs; clear when the workstream is merged -->
@@ -40,8 +42,13 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 ## Decisions (ADR index)
 
 - ADR-0001 — The factory works in its own clone, never in the user's checkout — `docs/adr/0001-factory-owned-clones.md`
+- ADR-0002 — Runtime foundation defaults (TS 6.0 pin, Hono, tsc -b build, home layout, port, stop semantics) — `docs/adr/0002-runtime-foundation-defaults.md`
 
 ## Known limitations
+
+- `pnpm dev` isn't defined yet (no dashboard). The runtime runs through `factory start` or `node apps/runtime/dist/main.js`.
+- `factory stop` won't signal a runtime that doesn't answer its API. The operator must kill that pid by hand.
+- The localhost-only scenario checks a non-loopback IPv4 only when the machine has one.
 
 ## Blockers
 
@@ -63,4 +70,6 @@ Logged 2026-11-08, Round 2:
 7. **The `never_auto` and `human_approval` merge policies aren't distinguished** (PRODUCT_SPEC §9). Proposed reading: under `never_auto` the factory never merges; it waits for a human to merge on GitHub, which polling detects. Under `human_approval` the factory merges after an Inbox Approval. While it waits on the external merge, the Job is `waiting_human` with a human-kind Blocker. A PR closed without merging opens an Inbox Question and never auto-cancels the Job. Phase C scope.
 8. **No human-initiated replan during execution.** Today replanning happens only through the `fault_origin: plan` route or the pre-approval "replan" action. Proposed: a `requestReplan` API operation in Phase B. Each replan writes a new plan Artifact; Tasks in `approved`/`integrated` and unaffected pending Tasks carry over; the count is capped by `max_replans`. Not in Phase A.
 9. **Job status precedence (clarifies ARCHITECTURE §4.2).** `active` if any Stage Run or Task is running or queued; otherwise `blocked` if any non-human Blocker exists; otherwise `waiting_human` if any human Blocker exists. Hitting a rework or replan cap creates a human-kind Blocker, so the Job shows `waiting_human` and never loops. Blocker kinds: human, infrastructure, recovery, policy. An unmet dependency is the Task state `pending`, not a Blocker.
+11. **ARCHITECTURE §2 layout lacks `packages/home`** (added in #2, ADR-0002: the factory-home file layout shared by the CLI and runtime). Proposed fix: add `home/  # factory home layout: token, config, runtime record` to the §2 tree.
+
 10. **RESOLVED 2026-11-08: fault origin and Blocker kind `environment` renamed to `infrastructure`** (human decision), so "environment" stays free for deploy targets (Phase F). Applied in ARCHITECTURE §4.6 and `GLOSSARY.md`.

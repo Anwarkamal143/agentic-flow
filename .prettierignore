@@ -1,0 +1,8 @@
+dist/
+node_modules/
+pnpm-lock.yaml
+packages/db/drizzle/meta/
+SOFTWARE_FACTORY.md
+.claude/
+.agents/
+*.md

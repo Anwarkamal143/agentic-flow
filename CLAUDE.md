@@ -55,16 +55,23 @@ Node.js 22+, TypeScript strict, pnpm workspaces, SQLite (WAL mode) through Drizz
 
 ## 6. Commands
 
-These are filled in during Phase A. Keep this section accurate.
+Keep this section accurate.
 
 ```bash
 pnpm install
-pnpm typecheck     # TODO(Phase A)
-pnpm lint          # TODO(Phase A)
-pnpm test          # TODO(Phase A) — unit + integration with FakeHarness
-pnpm test:e2e      # TODO(Phase A) — scenario tests against fixture repos
-pnpm dev           # TODO(Phase A) — runtime + dashboard
+pnpm build         # tsc -b: compiles every package to dist/
+pnpm typecheck     # tsc -b, plus the tests/ project
+pnpm lint          # ESLint (strict, type-checked) + Prettier --check + migration drift check
+pnpm test          # builds, then runs every Vitest scenario in tests/
+pnpm test:e2e      # only the scenario tests (tests/scenarios)
+pnpm format        # Prettier --write
+pnpm --filter @factory/db db:generate   # write a migration after editing packages/db/src/schema.ts
+pnpm factory <cmd> # run the built CLI: init | start | status | stop
+pnpm dev           # TODO(Phase A) — runtime + dashboard (dashboard not built yet)
 ```
+
+Scenario tests spawn the built runtime and CLI as child processes against a temporary `FACTORY_HOME`
+(helper: `tests/support/factory.ts`). They never import runtime internals or open the database.
 
 ## 7. Questions for the human, before Phase A
 
