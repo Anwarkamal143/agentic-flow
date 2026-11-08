@@ -1,94 +1,22 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { parse, stringify } from 'yaml';
 import { initializedHome, startRuntime, useFakeHarness } from '../support/factory.js';
 import {
   createJob,
   json,
   post,
-  proposalStagesSettled,
+  jobSettled,
   registeredRepo,
   waitForJob,
   type EventBody,
 } from '../support/api.js';
-
-/** A Fake Harness script whose every proposal is valid. */
-const VALID_SCRIPT = `
-version: 1
-stages:
-  triage:
-    - output:
-        summary: Add a sum() helper to the math module.
-        type: feature
-        risk: low
-  discovery:
-    - output:
-        summary: math.ts exports add(); tests live in test/math.test.ts.
-        files:
-          - path: src/math.ts
-            reason: the module to extend
-          - path: test/math.test.ts
-            reason: where the new test goes
-  specification:
-    - output:
-        problem: There is no way to sum two numbers.
-        objective: Export sum(a, b) from src/math.ts.
-        scope: [src/math.ts, test/math.test.ts]
-        outOfScope: [other modules]
-        requirements:
-          - code: FR-01
-            text: sum(a, b) returns a + b.
-        acceptanceCriteria:
-          - code: AC-01
-            text: sum(2, 3) returns 5.
-            mandatory: true
-            verification: a Vitest test in test/math.test.ts
-          - code: AC-02
-            text: sum is documented with a JSDoc comment.
-            mandatory: false
-            verification: review
-        edgeCases: [negative numbers]
-        securityConsiderations: []
-        definitionOfDone: [AC-01 passes under the factory's own test run]
-  planning:
-    - output:
-        tasks:
-          - key: add-sum
-            title: Add sum() to math.ts
-            objective: Export sum(a, b) and test it.
-            repository: tiny-ts
-            role: developer
-            risk: low
-            scope:
-              writable: [src/math.ts, test/**]
-              forbidden: [package.json, .github/**]
-            dependsOn: []
-            acceptance: [AC-01]
-            verification:
-              - key: test
-                command: npm test
-                required: true
-              - key: typecheck
-                command: npm run typecheck
-                required: true
-`;
-
-/** The valid script with some Stages' responses replaced. */
-function scriptWith(stages: Record<string, unknown[]>): string {
-  const script = parse(VALID_SCRIPT) as { stages: Record<string, unknown[]> };
-  return stringify({ ...script, stages: { ...script.stages, ...stages } });
-}
-
-/** The valid response of a Stage, as an object to change. */
-function validOutput(stage: string): Record<string, unknown> {
-  const script = parse(VALID_SCRIPT) as { stages: Record<string, [{ output: object }]> };
-  return structuredClone(script.stages[stage]?.[0].output) as Record<string, unknown>;
-}
+import { scriptWith, validOutput, validTaskResponse, VALID_SCRIPT } from '../support/scripts.js';
 
 interface ArtifactBody {
   id: string;
   jobId: string;
   kind: string;
+  stageRunId: string | null;
   contentHash: string;
 }
 
@@ -121,11 +49,11 @@ async function proposalRuntime(script: string) {
 }
 
 describe('proposal Stages, driven by the Fake Harness', () => {
-  it('takes a Job through triage, discovery, specification and planning to one ready Task', async () => {
+  it('takes a Job through triage, discovery, specification and planning to one Task, which then runs', async () => {
     const { rt, repo } = await proposalRuntime(VALID_SCRIPT);
     const created = await createJob(rt, repo.id);
 
-    const job = await waitForJob(rt, created.id, proposalStagesSettled);
+    const job = await waitForJob(rt, created.id, jobSettled);
 
     expect(job.stageRuns.map((s) => [s.stageId, s.state])).toEqual([
       ['intake', 'succeeded'],
@@ -133,10 +61,10 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       ['discovery', 'succeeded'],
       ['specification', 'succeeded'],
       ['planning', 'succeeded'],
-      ['execution', 'queued'],
-      ['closure', 'pending'],
+      ['execution', 'succeeded'],
+      ['closure', 'succeeded'],
     ]);
-    expect(job).toMatchObject({ status: 'active', currentStage: 'execution' });
+    expect(job).toMatchObject({ status: 'completed', currentStage: 'closure' });
 
     const criteria = await json<CriterionBody[]>(
       rt.request(`/v1/jobs/${job.id}/acceptance-criteria`),
@@ -152,18 +80,20 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       key: 'add-sum',
       title: 'Add sum() to math.ts',
       repositoryId: repo.id,
-      state: 'ready',
+      state: 'approved',
       scope: { writable: ['src/math.ts', 'test/**'], forbidden: ['package.json', '.github/**'] },
       dependsOn: [],
       acceptance: ['AC-01'],
       verification: [
-        { key: 'test', command: 'npm test', required: true },
-        { key: 'typecheck', command: 'npm run typecheck', required: true },
+        { key: 'test', command: "grep -q 'export function sum' src/math.ts", criteria: ['AC-01'] },
+        { key: 'typecheck', command: 'test -f src/math.ts && echo typecheck ok', criteria: [] },
       ],
       maxAttempts: 3,
     });
 
-    const artifacts = await json<ArtifactBody[]>(rt.request(`/v1/jobs/${job.id}/artifacts`));
+    const artifacts = (
+      await json<ArtifactBody[]>(rt.request(`/v1/jobs/${job.id}/artifacts`))
+    ).filter((a) => a.stageRunId !== null);
     expect(artifacts.map((a) => a.kind)).toEqual(['triage', 'discovery', 'spec', 'plan']);
     for (const artifact of artifacts) {
       const res = await rt.request(`/v1/artifacts/${artifact.id}/content`);
@@ -182,7 +112,7 @@ describe('proposal Stages, driven by the Fake Harness', () => {
     const show = await rt.home.cli(['job', 'show', job.id]);
     expect(show.code, show.stderr).toBe(0);
     expect(show.stdout).toMatch(/AC-01 mandatory sum\(2, 3\) returns 5\./);
-    expect(show.stdout).toMatch(/add-sum +ready +Add sum\(\) to math\.ts/);
+    expect(show.stdout).toMatch(/add-sum +approved +Add sum\(\) to math\.ts/);
     expect(show.stdout).toContain('forbidden: package.json, .github/**');
 
     const events = await json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events`));
@@ -192,6 +122,7 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       ['discovery', 'fake'],
       ['specification', 'fake'],
       ['planning', 'fake'],
+      ['execution', 'fake'],
     ]);
   });
 
@@ -206,13 +137,13 @@ describe('proposal Stages, driven by the Fake Harness', () => {
     );
     const created = await createJob(rt, repo.id);
 
-    const job = await waitForJob(rt, created.id, proposalStagesSettled);
+    const job = await waitForJob(rt, created.id, jobSettled);
 
     expect(job.stageRuns.find((s) => s.stageId === 'specification')).toMatchObject({
       state: 'succeeded',
       failure: null,
     });
-    expect(job.currentStage).toBe('execution');
+    expect(job.currentStage).toBe('closure');
     const events = await json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events`));
     const specRuns = events.filter(
       (e) => e.type.startsWith('harness_run.') && e.payload['stageId'] === 'specification',
@@ -239,7 +170,7 @@ describe('proposal Stages, driven by the Fake Harness', () => {
     );
     const created = await createJob(rt, repo.id);
 
-    const job = await waitForJob(rt, created.id, proposalStagesSettled);
+    const job = await waitForJob(rt, created.id, jobSettled);
 
     expect(job.status).toBe('failed');
     expect(job.currentStage).toBe('specification');
@@ -286,6 +217,10 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       key: 'docs',
       acceptance: [],
       dependsOn: ['add-sum'],
+      verification: (first['verification'] as Record<string, unknown>[]).map((v) => ({
+        ...v,
+        criteria: [],
+      })),
     });
     change(plan.tasks);
     return plan;
@@ -315,13 +250,23 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       message:
         /writable glob 'src\/\[math\.ts' is not a valid glob.*forbidden glob '\.\.\/outside\/\*\*' has an empty, \. or \.\. path segment/,
     },
+    {
+      rule: 'plan.verification_criteria',
+      plan: brokenPlan((tasks) => {
+        (tasks[0] as { verification: { criteria: string[] }[] }).verification[1] = {
+          ...(tasks[0] as { verification: { criteria: string[] }[] }).verification[1],
+          criteria: ['AC-02'],
+        };
+      }),
+      message: /Task add-sum: verification typecheck verifies AC-02, which the Task does not cover/,
+    },
   ])('the Plan validator rejects a plan that breaks $rule, naming the rule', async (c) => {
     const { rt, repo } = await proposalRuntime(
       scriptWith({ planning: [{ output: c.plan }, { output: c.plan }] }),
     );
     const created = await createJob(rt, repo.id);
 
-    const job = await waitForJob(rt, created.id, proposalStagesSettled);
+    const job = await waitForJob(rt, created.id, jobSettled);
 
     const planning = job.stageRuns.find((s) => s.stageId === 'planning');
     expect(planning?.state, c.rule).toBe('failed');
@@ -339,7 +284,7 @@ describe('proposal Stages, driven by the Fake Harness', () => {
   it('keeps Artifacts immutable: no way to change them, and a restart never regenerates them', async () => {
     const { rt, repo } = await proposalRuntime(VALID_SCRIPT);
     const created = await createJob(rt, repo.id);
-    const job = await waitForJob(rt, created.id, proposalStagesSettled);
+    const job = await waitForJob(rt, created.id, jobSettled);
     const artifacts = await json<ArtifactBody[]>(rt.request(`/v1/jobs/${job.id}/artifacts`));
     const contents = await Promise.all(
       artifacts.map(async (a) => (await rt.request(`/v1/artifacts/${a.id}/content`)).text()),
@@ -371,9 +316,19 @@ describe('proposal Stages, driven by the Fake Harness', () => {
   });
 
   it('cancels the ready Task with its Job', async () => {
-    const { rt, repo } = await proposalRuntime(VALID_SCRIPT);
+    // The first Job's Task holds the single execution slot, so the second Job's Task stays ready.
+    const busy = { ...validTaskResponse(), delayMs: 60_000 };
+    const { rt, repo } = await proposalRuntime(scriptWith({}, { 'add-sum': [busy, busy] }));
+    const first = await createJob(rt, repo.id);
+    await waitForJob(rt, first.id, (j) =>
+      j.stageRuns.some((s) => s.stageId === 'execution' && s.state === 'running'),
+    );
     const created = await createJob(rt, repo.id);
-    const job = await waitForJob(rt, created.id, proposalStagesSettled);
+    const job = await waitForJob(rt, created.id, (j) =>
+      j.stageRuns.some((s) => s.stageId === 'planning' && s.state === 'succeeded'),
+    );
+    const [ready] = await json<TaskBody[]>(rt.request(`/v1/jobs/${job.id}/tasks`));
+    expect(ready?.state, 'waiting for the busy slot').toBe('ready');
 
     const res = await post(rt, `/v1/jobs/${job.id}/cancel`, { expectedVersion: job.version });
 
@@ -386,6 +341,10 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       from: 'ready',
       to: 'cancelled',
     });
+    await new Promise((r) => setTimeout(r, 1_200)); // past a scheduler poll
+    expect(await json<unknown[]>(rt.request(`/v1/jobs/${job.id}/attempts`)), 'never run').toEqual(
+      [],
+    );
   });
 });
 

@@ -4,6 +4,10 @@
  */
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
+  AttemptSchema,
+  WorktreeSchema,
+  type Attempt,
+  type Worktree,
   canTransitionStageRun,
   currentStageOf,
   EffectiveConfigSchema,
@@ -29,7 +33,7 @@ import {
   type WorkflowSnapshot,
 } from '@factory/domain';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
-import { changeJob, changeJobIn, readJobState, type JobState } from './engine.js';
+import { changeJob, changeJobIn, readJobState, stepTask, type JobState } from './engine.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 
@@ -231,6 +235,114 @@ export class JobService {
       .map(toTask);
   }
 
+  /** Every Attempt of the Job's Tasks, oldest first, with its verification runs and Evidence. */
+  attempts(jobId: string): Attempt[] {
+    this.get(jobId); // 404 for an unknown Job
+    const rows = this.db
+      .select({ attempt: schema.attempts })
+      .from(schema.attempts)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.attempts.taskId))
+      .where(eq(schema.tasks.jobId, jobId))
+      .orderBy(asc(schema.attempts.startedAt), asc(schema.attempts.n))
+      .all()
+      .map((r) => r.attempt);
+    if (rows.length === 0) return [];
+    const ids = rows.map((r) => r.id);
+    const runs = this.db
+      .select()
+      .from(schema.verificationRuns)
+      .where(inArray(schema.verificationRuns.attemptId, ids))
+      .orderBy(asc(sql`rowid`))
+      .all();
+    const evidence = this.db
+      .select({ e: schema.evidence, code: schema.acceptanceCriteria.code })
+      .from(schema.evidence)
+      .leftJoin(
+        schema.acceptanceCriteria,
+        eq(schema.acceptanceCriteria.id, schema.evidence.criterionId),
+      )
+      .where(inArray(schema.evidence.attemptId, ids))
+      .orderBy(asc(sql`"evidence"."rowid"`))
+      .all();
+    return rows.map((a) => {
+      const own = runs.filter((r) => r.attemptId === a.id);
+      return AttemptSchema.parse({
+        id: a.id,
+        taskId: a.taskId,
+        n: a.n,
+        state: a.state,
+        exitReason: a.exitReason,
+        exitDetail: a.exitDetail,
+        harness: { id: a.harnessId, version: a.harnessVersion },
+        sessionRef: a.sessionRef,
+        promptTemplate: { id: a.promptTemplateId, hash: a.promptTemplateHash },
+        packet: JSON.parse(a.packetJson) as unknown,
+        worktreeId: a.worktreeId,
+        baseSha: a.baseSha,
+        headSha: a.headSha,
+        commits: JSON.parse(a.commitsJson) as unknown,
+        wipCommit: a.wipCommit,
+        protocolViolations: JSON.parse(a.protocolViolationsJson) as unknown,
+        usage: a.usageJson === null ? null : (JSON.parse(a.usageJson) as unknown),
+        startedAt: a.startedAt,
+        finishedAt: a.finishedAt,
+        verificationRuns: own.map((r) => ({
+          id: r.id,
+          attemptId: r.attemptId,
+          key: r.commandKey,
+          command: r.command,
+          required: r.required,
+          exitCode: r.exitCode,
+          timedOut: r.timedOut,
+          headSha: r.headSha,
+          baseSha: r.baseSha,
+          startedAt: r.startedAt,
+          durationMs: r.durationMs,
+          outputArtifactId: r.outputArtifactId,
+        })),
+        evidence: evidence
+          .filter((x) => x.e.attemptId === a.id)
+          .map(({ e, code }) => ({
+            id: e.id,
+            attemptId: e.attemptId,
+            kind: e.kind,
+            verificationKey: own.find((r) => r.id === e.verificationRunId)?.commandKey ?? null,
+            verificationRunId: e.verificationRunId,
+            criterionId: e.criterionId,
+            criterionCode: code,
+            verdict: e.verdict,
+            detail: e.detail,
+            headSha: e.headSha,
+            baseSha: e.baseSha,
+          })),
+      } satisfies Record<keyof Attempt, unknown>);
+    });
+  }
+
+  worktrees(jobId: string): Worktree[] {
+    this.get(jobId); // 404 for an unknown Job
+    return this.db
+      .select()
+      .from(schema.worktrees)
+      .where(eq(schema.worktrees.jobId, jobId))
+      .orderBy(asc(schema.worktrees.createdAt))
+      .all()
+      .map((w) =>
+        WorktreeSchema.parse({
+          id: w.id,
+          jobId: w.jobId,
+          taskId: w.taskId,
+          repositoryId: w.repositoryId,
+          path: w.path,
+          branch: w.branch,
+          baseSha: w.baseSha,
+          state: w.state,
+          portBase: w.portBase,
+          createdAt: w.createdAt,
+        } satisfies Record<keyof Worktree, unknown>),
+      );
+  }
+
   private repositoryOf(jobId: string): string {
     const row = this.db
       .select()
@@ -254,34 +366,7 @@ function cancelOpenTasks(tx: Tx, jobId: string, reason: string | undefined): voi
     .where(and(eq(schema.tasks.jobId, jobId), inArray(schema.tasks.state, ['pending', 'ready'])))
     .all();
   for (const task of open) {
-    const updated = tx
-      .update(schema.tasks)
-      .set({ state: 'cancelled', version: sql`${schema.tasks.version} + 1` })
-      .where(
-        and(
-          eq(schema.tasks.id, task.id),
-          eq(schema.tasks.state, task.state),
-          eq(schema.tasks.version, task.version),
-        ),
-      )
-      .run();
-    if (updated.changes !== 1) {
-      // Read in this same transaction, so unreachable unless a writer bypassed it.
-      throw new Error(`Task ${task.id} changed under a versioned Job operation`);
-    }
-    appendEvent(tx, {
-      entityKind: 'task',
-      entityId: task.id,
-      jobId,
-      type: 'task.cancelled',
-      actor: OPERATOR,
-      payload: {
-        key: task.key,
-        from: task.state,
-        to: 'cancelled',
-        ...(reason === undefined ? {} : { reason }),
-      },
-    });
+    stepTask(tx, { jobId, actor: OPERATOR }, task, 'cancelled', { reason });
   }
 }
 

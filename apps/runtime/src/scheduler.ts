@@ -25,7 +25,12 @@ import {
   type StageRunState,
   type TaskDefinition,
 } from '@factory/domain';
-import type { AgentHarness, HarnessRawResult, HarnessRun } from '@factory/harness';
+import {
+  guardrailEnv,
+  type AgentHarness,
+  type HarnessRawResult,
+  type HarnessRun,
+} from '@factory/harness';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
 import { changeJob, readJobState, type JobState } from './engine.js';
@@ -240,6 +245,7 @@ export class StageScheduler {
         role: stage.role,
         prompt: input.prompt,
         cwd: input.cwd,
+        env: guardrailEnv(process.env, { FACTORY_JOB_ID: run.jobId }),
         subject: { jobId: run.jobId, stageId: run.stageId },
         limits: { wallClockMs: this.opts.wallClockMs ?? 600_000 },
       });

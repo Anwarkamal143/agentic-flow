@@ -1,5 +1,9 @@
 import type {
   AcceptanceCriterion,
+  Artifact,
+  Attempt,
+  DeliveryReport,
+  Worktree,
   CancelJobInput,
   CreateJobInput,
   Job,
@@ -83,12 +87,25 @@ export async function jobShow(id: string, opts: { json: boolean }): Promise<numb
     return 0;
   }
   const path = `/v1/jobs/${encodeURIComponent(id)}`;
-  const [criteria, tasks] = await Promise.all([
+  const [criteria, tasks, attempts, worktrees, artifacts] = await Promise.all([
     api.json<AcceptanceCriterion[]>('GET', `${path}/acceptance-criteria`),
     api.json<Task[]>('GET', `${path}/tasks`),
+    api.json<Attempt[]>('GET', `${path}/attempts`),
+    api.json<Worktree[]>('GET', `${path}/worktrees`),
+    api.json<Artifact[]>('GET', `${path}/artifacts`),
   ]);
   writeJob(job);
   writePlan(criteria, tasks);
+  writeAttempts(tasks, attempts, worktrees);
+  const report = artifacts.find((a) => a.kind === 'report');
+  if (report !== undefined) {
+    writeDelivery(
+      await api.json<DeliveryReport>(
+        'GET',
+        `/v1/artifacts/${encodeURIComponent(report.id)}/content`,
+      ),
+    );
+  }
   return 0;
 }
 
@@ -167,4 +184,50 @@ function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
     }
   }
   if (lines.length > 0) process.stdout.write(lines.join('\n') + '\n');
+}
+
+function writeAttempts(tasks: Task[], attempts: Attempt[], worktrees: Worktree[]): void {
+  if (attempts.length === 0) return;
+  const lines = ['Attempts:'];
+  for (const a of attempts) {
+    const task = tasks.find((t) => t.id === a.taskId);
+    const wt = worktrees.find((w) => w.id === a.worktreeId);
+    lines.push(
+      `  ${task?.key ?? a.taskId} attempt ${String(a.n)}  ${a.state}` +
+        (a.exitReason === null
+          ? ''
+          : ` (${a.exitReason}${a.exitDetail === null ? '' : `: ${a.exitDetail}`})`),
+      `    harness:   ${a.harness.id} ${a.harness.version ?? '?'}, template ${a.promptTemplate.id}, usage ${a.usage?.tag ?? 'not recorded'}`,
+      `    worktree:  ${wt === undefined ? a.worktreeId : `${wt.path} (${wt.state}) on ${wt.branch}`}`,
+      `    commits:   ${a.baseSha.slice(0, 12)}..${a.headSha?.slice(0, 12) ?? '?'} (${String(a.commits.length)})` +
+        (a.wipCommit === null ? '' : `, WIP commit ${a.wipCommit.slice(0, 12)} by the factory`),
+    );
+    for (const v of a.protocolViolations) lines.push(`    violation: [${v.rule}] ${v.message}`);
+    for (const e of a.evidence) {
+      const run = a.verificationRuns.find((r) => r.id === e.verificationRunId);
+      lines.push(
+        e.kind === 'verification'
+          ? `    ${String(e.verificationKey).padEnd(12)} ${e.verdict.padEnd(10)} exit ${String(run?.exitCode ?? 'none')}`
+          : `    ${String(e.criterionCode).padEnd(12)} ${e.verdict.padEnd(10)} ${e.detail}`,
+      );
+    }
+  }
+  process.stdout.write(lines.join('\n') + '\n');
+}
+
+function writeDelivery(report: DeliveryReport): void {
+  const lines = [
+    'Delivery (local branch in the Factory Clone):',
+    `  clone: ${report.repository.clonePath}`,
+  ];
+  for (const t of report.tasks) {
+    lines.push(
+      `  ${t.key}: ${t.branch} at ${t.headSha.slice(0, 12)}`,
+      `    fetch from your checkout: ${t.fetchCommand}`,
+    );
+  }
+  if (report.knownLimitations.length > 0) {
+    lines.push('Known limitations:', ...report.knownLimitations.map((l) => `  - ${l}`));
+  }
+  process.stdout.write(lines.join('\n') + '\n');
 }

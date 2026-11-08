@@ -53,13 +53,24 @@ export class ArtifactStore {
   /** Records stored content as a Job's Artifact, with its event, in the caller's transaction. */
   record(
     tx: Tx,
-    input: { jobId: string; stageRunId: string; kind: ArtifactKind; content: StoredContent },
+    input: {
+      jobId: string;
+      /** For a proposal. */
+      stageRunId?: string;
+      /** For an Attempt's Artifacts. */
+      taskId?: string;
+      attemptId?: string;
+      kind: ArtifactKind;
+      content: StoredContent;
+    },
     actor: string,
   ): Artifact {
     const row = {
       id: newId('art'),
       jobId: input.jobId,
-      stageRunId: input.stageRunId,
+      stageRunId: input.stageRunId ?? null,
+      taskId: input.taskId ?? null,
+      attemptId: input.attemptId ?? null,
       kind: input.kind,
       contentHash: input.content.contentHash,
       path: input.content.path,
@@ -73,7 +84,13 @@ export class ArtifactStore {
       jobId: input.jobId,
       type: 'artifact.created',
       actor,
-      payload: { kind: row.kind, contentHash: row.contentHash, stageRunId: row.stageRunId },
+      payload: {
+        kind: row.kind,
+        contentHash: row.contentHash,
+        stageRunId: row.stageRunId,
+        taskId: row.taskId,
+        attemptId: row.attemptId,
+      },
     });
     return toArtifact(row);
   }
@@ -127,6 +144,8 @@ function toArtifact(row: typeof schema.artifacts.$inferSelect): Artifact {
     id: row.id,
     jobId: row.jobId,
     stageRunId: row.stageRunId,
+    taskId: row.taskId,
+    attemptId: row.attemptId,
     kind: ArtifactKindSchema.parse(row.kind),
     contentHash: row.contentHash,
     schemaVersion: row.schemaVersion,

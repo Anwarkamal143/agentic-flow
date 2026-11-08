@@ -28,6 +28,7 @@ import { JobService } from './jobs.js';
 import { Outbox } from './outbox.js';
 import { RepositoryService } from './repositories.js';
 import { StageScheduler } from './scheduler.js';
+import { TaskScheduler } from './execution.js';
 
 const ACTOR = 'system:runtime';
 
@@ -92,9 +93,22 @@ const scheduler = new StageScheduler({
   },
   log: (message) => process.stderr.write(`factory runtime: ${message}\n`),
 });
+const tasks = new TaskScheduler({
+  db: database.db,
+  harness,
+  harnessVersion: detection?.version ?? null,
+  artifacts,
+  workspaceRoot: config.workspaceRoot,
+  runtimeEnv: process.env,
+  onCommit: () => {
+    notify();
+  },
+  log: (message) => process.stderr.write(`factory runtime: ${message}\n`),
+});
 const notify = () => {
   outbox.notify();
   scheduler.wake();
+  tasks.wake();
 };
 
 const app = createApp({
@@ -139,6 +153,7 @@ const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requested
   });
   outbox.start();
   scheduler.start();
+  tasks.start();
   writeRuntimeRecord(home, {
     pid: process.pid,
     host: RUNTIME_HOST,
@@ -167,7 +182,8 @@ function shutdown(reason: string): void {
   // Ends every SSE stream; events written from here on are released at the next start.
   outbox.close();
   // A Harness Run in flight is cancelled; its Stage Run is resumed at the next start.
-  const stopped = scheduler.close();
+  // So is a developer Harness Run or verification command; its Attempt is left for recovery (#13).
+  const stopped = Promise.all([scheduler.close(), tasks.close()]);
   server.close(() => {
     void stopped.then(() => {
       finish(reason);

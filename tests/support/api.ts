@@ -94,12 +94,7 @@ export async function waitForJob(
   );
 }
 
-/** Settled: nothing queued or running except `execution`, which waits for the Task scheduler. */
-export function proposalStagesSettled(job: JobBody): boolean {
-  return (
-    job.status !== 'active' ||
-    job.stageRuns.every(
-      (s) => s.stageId === 'execution' || (s.state !== 'queued' && s.state !== 'running'),
-    )
-  );
+/** Settled: the Job is no longer `active` (it finished, or waits on something). */
+export function jobSettled(job: JobBody): boolean {
+  return job.status !== 'active';
 }

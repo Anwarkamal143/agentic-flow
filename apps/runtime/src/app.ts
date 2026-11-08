@@ -96,6 +96,8 @@ export function createApp(deps: AppDeps): Hono {
     c.json(deps.jobs.acceptanceCriteria(c.req.param('id'))),
   );
   app.get('/v1/jobs/:id/tasks', (c) => c.json(deps.jobs.tasks(c.req.param('id'))));
+  app.get('/v1/jobs/:id/attempts', (c) => c.json(deps.jobs.attempts(c.req.param('id'))));
+  app.get('/v1/jobs/:id/worktrees', (c) => c.json(deps.jobs.worktrees(c.req.param('id'))));
   app.get('/v1/artifacts/:id', (c) => c.json(deps.artifacts.get(c.req.param('id'))));
   /** The exact bytes the content hash was computed over. */
   app.get('/v1/artifacts/:id/content', (c) => {
