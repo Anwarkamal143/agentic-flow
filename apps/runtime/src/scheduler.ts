@@ -72,6 +72,8 @@ type Outcome =
 export class StageScheduler {
   private timer: NodeJS.Timeout | undefined;
   private wakeScheduled = false;
+  /** A wake arrived during a pass: run another one after it. */
+  private wokenWhileBusy = false;
   private busy: Promise<void> | undefined;
   private current: HarnessRun | undefined;
   private closed = false;
@@ -107,11 +109,23 @@ export class StageScheduler {
     this.wakeScheduled = true;
     setImmediate(() => {
       this.wakeScheduled = false;
-      if (this.busy === undefined && !this.closed) {
-        this.busy = this.pass().finally(() => {
-          this.busy = undefined;
-          if (!this.closed) this.wake();
-        });
+      if (this.busy !== undefined) {
+        this.wokenWhileBusy = true;
+        return;
+      }
+      if (!this.closed) {
+        // Another pass right away only after work, or when woken meanwhile; an
+        // empty pass waits for the poll timer (never a busy loop).
+        this.wokenWhileBusy = false;
+        let worked = false;
+        this.busy = this.pass()
+          .then((w) => {
+            worked = w;
+          })
+          .finally(() => {
+            this.busy = undefined;
+            if ((worked || this.wokenWhileBusy) && !this.closed) this.wake();
+          });
       }
     });
   }
@@ -127,15 +141,16 @@ export class StageScheduler {
     await this.busy;
   }
 
-  /** Runs at most one Stage. */
-  private async pass(): Promise<void> {
+  /** Runs at most one Stage. `true` when it did some work. */
+  private async pass(): Promise<boolean> {
     const harness = this.opts.harness;
-    if (harness === undefined) return;
+    if (harness === undefined) return false;
     let stageRunId: string | undefined;
     try {
       stageRunId = this.orphans.shift() ?? this.claimNext();
-      if (stageRunId === undefined) return;
+      if (stageRunId === undefined) return false;
       await this.runStage(harness, stageRunId);
+      return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.opts.log(`stage scheduler: ${err instanceof Error ? (err.stack ?? message) : message}`);
@@ -151,6 +166,7 @@ export class StageScheduler {
           this.opts.log(`stage scheduler: could not record the failure: ${String(failErr)}`);
         }
       }
+      return stageRunId !== undefined;
     }
   }
 

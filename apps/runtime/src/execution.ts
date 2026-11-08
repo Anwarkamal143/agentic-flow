@@ -136,6 +136,8 @@ interface Outcome {
 export class TaskScheduler {
   private timer: NodeJS.Timeout | undefined;
   private wakeScheduled = false;
+  /** A wake arrived during a pass: run another one after it. */
+  private wokenWhileBusy = false;
   private busy: Promise<void> | undefined;
   private currentRun: HarnessRun | undefined;
   private currentProc: GuardedProcess | undefined;
@@ -170,11 +172,23 @@ export class TaskScheduler {
     this.wakeScheduled = true;
     setImmediate(() => {
       this.wakeScheduled = false;
-      if (this.busy === undefined && !this.closed) {
-        this.busy = this.pass().finally(() => {
-          this.busy = undefined;
-          if (!this.closed) this.wake();
-        });
+      if (this.busy !== undefined) {
+        this.wokenWhileBusy = true;
+        return;
+      }
+      if (!this.closed) {
+        // Another pass right away only after work, or when woken meanwhile; an
+        // empty pass waits for the poll timer (never a busy loop).
+        this.wokenWhileBusy = false;
+        let worked = false;
+        this.busy = this.pass()
+          .then((w) => {
+            worked = w;
+          })
+          .finally(() => {
+            this.busy = undefined;
+            if ((worked || this.wokenWhileBusy) && !this.closed) this.wake();
+          });
       }
     });
   }
@@ -190,22 +204,23 @@ export class TaskScheduler {
     await this.busy;
   }
 
-  /** Runs at most one closure or one Attempt. */
-  private async pass(): Promise<void> {
+  /** Runs at most one closure or one Attempt. `true` when it did some work. */
+  private async pass(): Promise<boolean> {
     const harness = this.opts.harness;
-    if (harness === undefined) return;
+    if (harness === undefined) return false;
     const closure = this.nextClosure();
     if (closure !== undefined) {
       await this.guard(closure.jobId, () => this.runClosure(closure.id, closure.jobId), {
         closureId: closure.id,
       });
-      return;
+      return true;
     }
     const claimed = this.claimNext();
-    if (claimed === undefined) return;
+    if (claimed === undefined) return false;
     await this.guard(claimed.jobId, () => this.runAttempt(harness, claimed.taskId), {
       taskId: claimed.taskId,
     });
+    return true;
   }
 
   /** Runs `body`; an unexpected error fails the work where it can be seen, never silently. */
