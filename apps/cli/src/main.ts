@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { doctor } from './commands/doctor.js';
 import { init } from './commands/init.js';
 import { start, status, stop } from './commands/lifecycle.js';
 
@@ -10,6 +11,7 @@ Commands:
   start                           Start the runtime in the background (localhost only)
   status [--json]                 Report whether the runtime is running
   stop                            Stop the runtime cleanly
+  doctor [--json]                 Check tools and credential presence (via the runtime)
 
 Environment:
   FACTORY_HOME   factory home directory (default ~/.factory)
@@ -36,6 +38,10 @@ async function main(argv: string[]): Promise<number> {
     case 'stop':
       parseArgs({ args: rest, options: {} });
       return stop();
+    case 'doctor': {
+      const { values } = parseArgs({ args: rest, options: { json: { type: 'boolean' } } });
+      return doctor({ json: values.json === true });
+    }
     case undefined:
     case 'help':
     case '--help':

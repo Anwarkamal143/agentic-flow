@@ -4,7 +4,7 @@
 
 ## Current phase
 
-**Phase A — Walking skeleton** (in progress: #2 done)
+**Phase A — Walking skeleton** (in progress: #2, #3 done)
 
 ## Human answers (from CLAUDE.md §7)
 
@@ -33,6 +33,8 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 <!-- newest first: date — what changed — tests run (pass/fail counts) -->
 
+- 2026-11-08 — #3 `factory doctor` reports tools and credential presence. Runtime `GET /v1/doctor` (`apps/runtime/src/doctor.ts`): node/git/gh/claude resolved on the runtime PATH, versions parsed from `--version`; credentials present/absent only (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `gh auth status` exit code); probes run with a minimal env. CLI `factory doctor [--json]` renders it. Test helper gains `fakeBin`/`versionTool` and `startRuntime(home, { env })`. ADR-0003. Branch `phase-a/3-doctor`.
+
 - 2026-11-08 — #2 Runtime boots behind a token, with the scenario test harness. pnpm monorepo (TS 6 strict, ESLint, Prettier, Vitest); `packages/home` (factory home layout), `packages/db` (Drizzle + SQLite WAL, first migration: `events`, plus a migration drift check in lint); `apps/runtime` (Hono on 127.0.0.1, bearer token on every route, `GET /v1/status`, `POST /v1/shutdown`, clean SIGTERM); `apps/cli` (`factory init | start | status | stop`); scenario helper `tests/support/factory.ts`; MIT LICENSE; CLAUDE.md commands. Branch `phase-a/2-runtime-boot`. typecheck ✓, lint ✓, test 13/13 ✓.
 
 ## File ownership (active parallel workstreams)
@@ -43,11 +45,13 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 - ADR-0001 — The factory works in its own clone, never in the user's checkout — `docs/adr/0001-factory-owned-clones.md`
 - ADR-0002 — Runtime foundation defaults (TS 6.0 pin, Hono, tsc -b build, home layout, port, stop semantics) — `docs/adr/0002-runtime-foundation-defaults.md`
+- ADR-0003 — `factory doctor` checks (runtime-side detection, presence-only credentials, minimal probe env, exit 0) — `docs/adr/0003-doctor-checks.md`
 
 ## Known limitations
 
 - `pnpm dev` isn't defined yet (no dashboard). The runtime runs through `factory start` or `node apps/runtime/dist/main.js`.
 - `factory stop` won't signal a runtime that doesn't answer its API. The operator must kill that pid by hand.
+- `factory doctor` doesn't detect Claude Code's own stored login (`claude /login`: Keychain / `~/.claude`). Only env tokens are checked for Claude. `gh auth status` needs the network, so offline it reports the gh login absent. No minimum tool versions are enforced yet.
 - The localhost-only scenario checks a non-loopback IPv4 only when the machine has one.
 
 ## Blockers

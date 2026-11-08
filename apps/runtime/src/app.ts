@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
+import type { DoctorReport } from './doctor.js';
 
 export interface RuntimeStatus {
   state: 'running' | 'stopping';
@@ -17,6 +18,8 @@ export interface RuntimeStatus {
 export interface AppDeps {
   token: string;
   status(): RuntimeStatus;
+  /** Runs the environment checks (tools, credential presence). */
+  doctor(): Promise<DoctorReport>;
   /** Begins a graceful shutdown after the response is sent. */
   requestShutdown(): void;
 }
@@ -38,6 +41,8 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get('/v1/status', (c) => c.json(deps.status()));
+
+  app.get('/v1/doctor', async (c) => c.json(await deps.doctor()));
 
   app.post('/v1/shutdown', (c) => {
     setImmediate(() => {

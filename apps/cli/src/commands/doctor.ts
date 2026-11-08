@@ -1,0 +1,62 @@
+import { resolveHome } from '@factory/home';
+import { findRuntime } from '../client.js';
+import { EXIT_NOT_RUNNING } from './lifecycle.js';
+
+/** The `GET /v1/doctor` body, as far as the CLI renders it. */
+interface DoctorBody {
+  checkedAt: string;
+  tools: {
+    name: string;
+    command: string;
+    status: 'ok' | 'missing' | 'failed';
+    version?: string;
+    path?: string;
+    fix?: string;
+  }[];
+  credentials: { name: string; source: string; present: boolean }[];
+}
+
+/**
+ * Renders the runtime's environment checks. Detection happens in the runtime
+ * (it is the process that will run the tools); the CLI only displays it.
+ * Missing tools are findings, not errors: the command exits 0 once it has a report.
+ */
+export async function doctor(opts: { json: boolean }): Promise<number> {
+  const home = resolveHome();
+  const found = findRuntime(home);
+  if (found.kind === 'not_running') {
+    process.stderr.write(
+      'Runtime: not running. factory doctor checks the environment the runtime sees.\n' +
+        'Run: factory start\n',
+    );
+    return EXIT_NOT_RUNNING;
+  }
+  const body = await found.client.json<DoctorBody>('GET', '/v1/doctor');
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(body) + '\n');
+    return 0;
+  }
+
+  const width = Math.max(...body.tools.map((t) => t.name.length)) + 2;
+  const versionWidth = Math.max(...body.tools.map((t) => (t.version ?? '').length)) + 2;
+  const lines = ['Tools (as seen on the runtime PATH):'];
+  for (const tool of body.tools) {
+    const name = tool.name.padEnd(width);
+    if (tool.status === 'ok') {
+      lines.push(
+        `  ok       ${name}${(tool.version ?? '').padEnd(versionWidth)}${tool.path ?? ''}`,
+      );
+    } else {
+      lines.push(
+        `  ${tool.status.padEnd(9)}${name}${tool.status === 'missing' ? 'not found' : 'version unknown'}`,
+      );
+      if (tool.fix !== undefined) lines.push(`           fix: ${tool.fix}`);
+    }
+  }
+  lines.push('', 'Credentials (presence only; values are never shown):');
+  for (const cred of body.credentials) {
+    lines.push(`  ${(cred.present ? 'present' : 'absent').padEnd(9)}${cred.name} (${cred.source})`);
+  }
+  process.stdout.write(lines.join('\n') + '\n');
+  return 0;
+}
