@@ -90,6 +90,11 @@ describe('Job transitions', () => {
     });
     expect(again.status).toBe(409);
     expect(await again.json()).toMatchObject({ error: 'job_terminal' });
+    expect(
+      await json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events`)),
+      'a refused operation writes nothing, not even its version bump',
+    ).toEqual(events);
+    expect((await json<JobBody>(rt.request(`/v1/jobs/${job.id}`))).version).toBe(cancelled.version);
   });
 
   it('cancels from the CLI', async () => {

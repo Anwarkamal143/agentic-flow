@@ -34,6 +34,7 @@ export class Outbox {
   private readonly subscribers = new Set<Subscriber>();
   private timer: NodeJS.Timeout | undefined;
   private wakeScheduled = false;
+  private closed = false;
 
   constructor(
     private readonly db: FactoryDb,
@@ -73,6 +74,11 @@ export class Outbox {
   }
 
   subscribe(opts: SubscribeOptions): Subscription {
+    if (this.closed) {
+      // Shutting down: end at once so the server isn't kept open.
+      opts.onClose();
+      return { close: () => undefined };
+    }
     const sub = new Subscriber(this.db, opts, () => this.subscribers.delete(sub));
     this.subscribers.add(sub);
     sub.wake();
@@ -81,11 +87,13 @@ export class Outbox {
 
   /** Stops publishing and ends every subscription. */
   close(): void {
+    this.closed = true;
     clearInterval(this.timer);
     for (const sub of [...this.subscribers]) sub.close();
   }
 
   private publish(): void {
+    if (this.closed) return;
     const released = this.db
       .update(schema.events)
       .set({ publishedAt: new Date().toISOString() })

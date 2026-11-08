@@ -144,6 +144,14 @@ export const STAGE_RUN_TRANSITIONS: Readonly<Record<StageRunState, readonly Stag
   cancelled: [],
 };
 
+/** States a Stage Run never leaves. */
+export const FINISHED_STAGE_RUN_STATES: readonly StageRunState[] = (
+  Object.keys(STAGE_RUN_TRANSITIONS) as StageRunState[]
+).filter((s) => STAGE_RUN_TRANSITIONS[s].length === 0);
+
+/** Finished without a problem: the Job can move past it. */
+const PASSED: readonly StageRunState[] = ['succeeded', 'skipped'];
+
 export function canTransitionStageRun(from: StageRunState, to: StageRunState): boolean {
   return STAGE_RUN_TRANSITIONS[from].includes(to);
 }
@@ -193,9 +201,9 @@ export const FEATURE_RECIPE: WorkflowSnapshot = {
  * from PROGRESS.md spec issue 9). Pure: the engine stores the result
  * denormalized on the Job in the same transaction.
  */
-export function deriveJobStatus(
-  stageRuns: readonly { stageId: StageId; state: StageRunState }[],
-): JobStatus {
+type StageRunPosition = Pick<StageRun, 'stageId' | 'state'>;
+
+export function deriveJobStatus(stageRuns: readonly StageRunPosition[]): JobStatus {
   const states = new Set(stageRuns.map((s) => s.state));
   if (states.has('running') || states.has('queued')) return 'active';
   if (states.has('blocked')) return 'blocked';
@@ -203,17 +211,14 @@ export function deriveJobStatus(
   if (states.has('failed')) return 'failed';
   if (states.has('cancelled')) return 'cancelled';
   if (stageRuns.length > 0 && stageRuns.every((s) => s.state === 'pending')) return 'draft';
-  const last = stageRuns.at(-1);
-  if (last?.state === 'succeeded') return 'completed';
+  if (stageRuns.length > 0 && stageRuns.every((s) => PASSED.includes(s.state))) return 'completed';
   // Work remains but nothing is queued: only seen between two steps of the engine.
   return 'active';
 }
 
 /** The first Stage that has not finished, or the last Stage when all have. */
-export function currentStageOf(
-  stageRuns: readonly { stageId: StageId; state: StageRunState }[],
-): StageId {
-  const open = stageRuns.find((s) => s.state !== 'succeeded' && s.state !== 'skipped');
+export function currentStageOf(stageRuns: readonly StageRunPosition[]): StageId {
+  const open = stageRuns.find((s) => !PASSED.includes(s.state));
   const stage = open ?? stageRuns.at(-1);
   if (stage === undefined) throw new Error('a Job has at least one Stage Run');
   return stage.stageId;

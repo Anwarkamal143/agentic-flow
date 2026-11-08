@@ -10,6 +10,7 @@ import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   canTransitionStageRun,
   deriveJobStatus,
+  FINISHED_STAGE_RUN_STATES,
   StageIdSchema,
   StageRunStateSchema,
   type JobStatus,
@@ -151,5 +152,5 @@ function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper 
 }
 
 function isFinished(state: StageRunState): boolean {
-  return ['succeeded', 'failed', 'skipped', 'cancelled'].includes(state);
+  return FINISHED_STAGE_RUN_STATES.includes(state);
 }

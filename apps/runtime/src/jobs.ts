@@ -4,6 +4,7 @@
  */
 import { appendEvent, schema, type FactoryDb } from '@factory/db';
 import {
+  canTransitionStageRun,
   currentStageOf,
   EffectiveConfigSchema,
   FEATURE_RECIPE,
@@ -152,12 +153,14 @@ export class JobService {
       .from(schema.jobRepositories)
       .where(inArray(schema.jobRepositories.jobId, ids))
       .all();
-    return rows.map((job) =>
-      toSummary(
+    return rows.map((job) => {
+      const link = repos.find((r) => r.jobId === job.id);
+      if (link === undefined) throw new Error(`Job ${job.id} has no Repository`);
+      return toSummary(
         { job, stageRuns: runs.filter((r) => r.jobId === job.id) },
-        repos.find((r) => r.jobId === job.id)?.repositoryId ?? '',
-      ),
-    );
+        link.repositoryId,
+      );
+    });
   }
 
   /**
@@ -183,7 +186,7 @@ export class JobService {
           );
         }
         for (const run of state.stageRuns) {
-          if (['pending', 'queued', 'blocked', 'waiting_human'].includes(run.state)) {
+          if (canTransitionStageRun(StageRunStateSchema.parse(run.state), 'cancelled')) {
             step(run, 'cancelled', input.reason);
           }
         }
@@ -207,7 +210,8 @@ export class JobService {
       .from(schema.jobRepositories)
       .where(eq(schema.jobRepositories.jobId, jobId))
       .get();
-    return row?.repositoryId ?? '';
+    if (row === undefined) throw new Error(`Job ${jobId} has no Repository`);
+    return row.repositoryId;
   }
 }
 

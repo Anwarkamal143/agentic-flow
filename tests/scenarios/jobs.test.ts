@@ -60,6 +60,12 @@ describe('factory job create / job show', () => {
     expect(show.stdout).toMatch(/triage +queued/);
     expect(show.stdout).toMatch(/intake +succeeded/);
 
+    const list = await rt.home.cli(['job', 'list']);
+    expect(list.code, list.stderr).toBe(0);
+    expect(list.stdout).toMatch(
+      new RegExp(`${job.id} +active +triage +Add sum\\(\\) to math\\.ts`),
+    );
+
     const asJson = await rt.home.cli(['job', 'show', job.id, '--json']);
     expect(JSON.parse(asJson.stdout)).toEqual(job);
   });
