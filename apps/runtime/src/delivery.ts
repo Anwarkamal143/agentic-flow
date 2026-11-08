@@ -1,11 +1,14 @@
 /**
  * The Phase A Delivery Report (closure): what changed, the Evidence per
- * Acceptance Criterion, known limitations, and how to bring each Task Branch
- * from the Factory Clone into the source checkout.
+ * Acceptance Criterion, the independent review, known limitations, and how to
+ * bring each Task Branch from the Factory Clone into the source checkout.
  */
 import { schema, type FactoryDb } from '@factory/db';
 import {
+  combineVerdicts,
   DeliveryReportSchema,
+  evidenceSource,
+  isCurrent,
   EvidenceVerdictSchema,
   RuleIssueSchema,
   TaskDefinitionSchema,
@@ -44,7 +47,6 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   if (job === undefined || repo === undefined) throw new Error(`Job ${jobId} has no Repository`);
 
   const limitations = [
-    'Not independently reviewed: approval rests on the factory’s own Gates (its verification runs and the criterion Evidence from them). The review Gate is not built yet.',
     'The path-scope Gate is not built yet: changed paths were not checked against the Task’s writable and forbidden scope.',
     'The Harness ran under the Tier 0 local guardrail (environment allowlist, closed stdin, the Worktree as working directory). It ran as your user; this is not a sandbox.',
     'Harness and verification output is not redacted yet.',
@@ -87,6 +89,25 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       .where(eq(schema.evidence.attemptId, attempt.id))
       .all();
     const criteria = criteriaCoveredBy(db, jobId, definition.acceptance);
+    const at = { headSha: attempt.headSha, baseSha: attempt.baseSha };
+    const review = db
+      .select()
+      .from(schema.reviews)
+      .where(
+        and(
+          eq(schema.reviews.attemptId, attempt.id),
+          eq(schema.reviews.headSha, attempt.headSha),
+          eq(schema.reviews.baseSha, attempt.baseSha),
+        ),
+      )
+      .get();
+    if (review === undefined) throw new Error(`approved Task ${task.key} has no current review`);
+    const findings = db
+      .select()
+      .from(schema.reviewFindings)
+      .where(eq(schema.reviewFindings.reviewId, review.id))
+      .orderBy(asc(schema.reviewFindings.position))
+      .all();
 
     if (attempt.wipCommit !== null) {
       limitations.push(
@@ -116,16 +137,39 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
         ),
       })),
       criteria: criteria.map((c) => {
-        const e = evidence.find((x) => x.criterionId === c.id);
+        const current = evidence.filter((x) => x.criterionId === c.id && isCurrent(x, at));
         return {
           code: c.code,
           text: c.text,
           mandatory: c.mandatory,
-          verdict: EvidenceVerdictSchema.parse(e?.verdict ?? 'not_tested'),
-          detail: e?.detail ?? 'no Evidence',
+          verdict: combineVerdicts(current.map((e) => EvidenceVerdictSchema.parse(e.verdict))),
+          detail:
+            current.length === 0
+              ? 'no Evidence'
+              : current.map((e) => `${evidenceSource(e)}: ${e.verdict} (${e.detail})`).join('; '),
         };
       }),
+      review: {
+        id: review.id,
+        outcome: review.outcome === 'approved' ? 'approved' : 'changes_requested',
+        summary: review.summary,
+        headSha: review.headSha,
+        baseSha: review.baseSha,
+        reviewer: { harnessId: review.reviewerHarnessId, version: review.reviewerHarnessVersion },
+        findings: findings.map((f) => ({
+          severity: f.severity,
+          faultOrigin: f.faultOrigin,
+          location: f.location,
+          problem: f.problem,
+          blocking: f.blocking,
+        })),
+      },
     });
+    for (const f of findings) {
+      limitations.push(
+        `Task ${task.key}: open ${f.severity} review finding at ${f.location}: ${f.problem}`,
+      );
+    }
   }
   const allCriteria = db
     .select()
@@ -143,7 +187,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     }
   }
   return DeliveryReportSchema.parse({
-    reportVersion: 1,
+    reportVersion: 2,
     job: { id: job.id, title: job.title },
     repository: { id: repo.id, name: repo.name, clonePath: repo.clonePath, source: repo.source },
     tasks: delivered,

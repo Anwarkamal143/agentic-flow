@@ -12,6 +12,8 @@ import {
   canTransitionTask,
   TaskStateSchema,
   type TaskState,
+  type AttemptState,
+  type WorktreeState,
   deriveJobStatus,
   FINISHED_STAGE_RUN_STATES,
   StageIdSchema,
@@ -221,4 +223,59 @@ export function stepTask(
     },
   });
   return { ...task, state: to, version: task.version + 1 };
+}
+
+/**
+ * Moves one Attempt of the Job being changed (inside {@link changeJob}),
+ * guarded by its state and version, with its `attempt.<state>` event.
+ */
+export function stepAttempt(
+  tx: Tx,
+  op: { jobId: string; actor: string },
+  id: string,
+  from: AttemptState,
+  values: Partial<typeof schema.attempts.$inferInsert> & { state: AttemptState },
+  payload: Record<string, unknown> = {},
+): void {
+  const row = tx.select().from(schema.attempts).where(eq(schema.attempts.id, id)).get();
+  if (row?.state !== from) throw new Error(`Attempt ${id} is ${String(row?.state)}, not ${from}`);
+  const updated = tx
+    .update(schema.attempts)
+    .set({ ...values, version: sql`${schema.attempts.version} + 1` })
+    .where(and(eq(schema.attempts.id, id), eq(schema.attempts.version, row.version)))
+    .run();
+  if (updated.changes !== 1)
+    throw new Error(`Attempt ${id} changed under a versioned Job operation`);
+  appendEvent(tx, {
+    entityKind: 'attempt',
+    entityId: id,
+    jobId: op.jobId,
+    type: `attempt.${values.state}`,
+    actor: op.actor,
+    payload: { taskId: row.taskId, n: row.n, from, to: values.state, ...payload },
+  });
+}
+
+/** Moves one Worktree of the Job being changed, guarded by its state, with its `worktree.<to>` event. */
+export function stepWorktree(
+  tx: Tx,
+  op: { jobId: string; actor: string },
+  row: typeof schema.worktrees.$inferSelect,
+  from: WorktreeState,
+  to: WorktreeState,
+): void {
+  const updated = tx
+    .update(schema.worktrees)
+    .set({ state: to })
+    .where(and(eq(schema.worktrees.id, row.id), eq(schema.worktrees.state, from)))
+    .run();
+  if (updated.changes !== 1) throw new Error(`Worktree ${row.id} is ${row.state}, not ${from}`);
+  appendEvent(tx, {
+    entityKind: 'worktree',
+    entityId: row.id,
+    jobId: op.jobId,
+    type: `worktree.${to}`,
+    actor: op.actor,
+    payload: { taskId: row.taskId, from, to, path: row.path, branch: row.branch },
+  });
 }

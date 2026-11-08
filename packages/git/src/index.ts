@@ -273,3 +273,25 @@ export async function infoExcludePath(repo: string): Promise<string> {
   ).trim();
   return `${common}/info/exclude`;
 }
+
+/**
+ * The patch `base..head`, cut at `maxBytes`. External diff drivers and
+ * textconv filters are off: a Worktree's config is untrusted.
+ */
+export async function diffBetween(
+  repo: string,
+  base: string,
+  head: string,
+  maxBytes: number,
+): Promise<{ patch: string; truncated: boolean }> {
+  const out = await worktreeGit(repo, [
+    'diff',
+    '--no-color',
+    '--no-ext-diff',
+    '--no-textconv',
+    `${base}..${head}`,
+  ]);
+  const bytes = Buffer.from(out, 'utf8');
+  if (bytes.length <= maxBytes) return { patch: out, truncated: false };
+  return { patch: bytes.subarray(0, maxBytes).toString('utf8'), truncated: true };
+}

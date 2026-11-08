@@ -26,6 +26,7 @@ import {
   type TaskDefinition,
 } from '@factory/domain';
 import {
+  describeHarnessExit,
   guardrailEnv,
   type AgentHarness,
   type HarnessRawResult,
@@ -35,6 +36,7 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
 import { changeJob, readJobState, type JobState } from './engine.js';
 import { newId } from './ids.js';
+import { PassLoop } from './pass-loop.js';
 import {
   PROMPT_TEMPLATE_HASH,
   PROMPT_TEMPLATE_ID,
@@ -70,9 +72,7 @@ type Outcome =
   | { kind: 'harness_failed'; message: string };
 
 export class StageScheduler {
-  private timer: NodeJS.Timeout | undefined;
-  private wakeScheduled = false;
-  private busy: Promise<void> | undefined;
+  private readonly loop = new PassLoop(() => this.pass(), POLL_MS);
   private current: HarnessRun | undefined;
   private closed = false;
   /** Stage Runs left `running` by a previous runtime; resumed first. */
@@ -95,25 +95,13 @@ export class StageScheduler {
       )
       .all()
       .map((r) => r.id);
-    this.timer = setInterval(() => {
-      this.wake();
-    }, POLL_MS);
-    this.wake();
+    this.loop.start();
   }
 
   /** Asks for a scheduling pass soon. Call after committing a state change. */
   wake(): void {
-    if (this.wakeScheduled || this.closed || this.opts.harness === undefined) return;
-    this.wakeScheduled = true;
-    setImmediate(() => {
-      this.wakeScheduled = false;
-      if (this.busy === undefined && !this.closed) {
-        this.busy = this.pass().finally(() => {
-          this.busy = undefined;
-          if (!this.closed) this.wake();
-        });
-      }
-    });
+    if (this.closed || this.opts.harness === undefined) return;
+    this.loop.wake();
   }
 
   /**
@@ -122,20 +110,21 @@ export class StageScheduler {
    */
   async close(): Promise<void> {
     this.closed = true;
-    clearInterval(this.timer);
+    this.loop.halt();
     await this.current?.cancel();
-    await this.busy;
+    await this.loop.idle();
   }
 
-  /** Runs at most one Stage. */
-  private async pass(): Promise<void> {
+  /** Runs at most one Stage. `true` when it did some work. */
+  private async pass(): Promise<boolean> {
     const harness = this.opts.harness;
-    if (harness === undefined) return;
+    if (harness === undefined) return false;
     let stageRunId: string | undefined;
     try {
       stageRunId = this.orphans.shift() ?? this.claimNext();
-      if (stageRunId === undefined) return;
+      if (stageRunId === undefined) return false;
       await this.runStage(harness, stageRunId);
+      return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.opts.log(`stage scheduler: ${err instanceof Error ? (err.stack ?? message) : message}`);
@@ -151,6 +140,7 @@ export class StageScheduler {
           this.opts.log(`stage scheduler: could not record the failure: ${String(failErr)}`);
         }
       }
+      return stageRunId !== undefined;
     }
   }
 
@@ -306,13 +296,10 @@ export class StageScheduler {
     ctx: Parameters<ProposalStage['validate']>[1],
   ): Outcome {
     if (result.exit.kind !== 'exited' || result.exit.code !== 0) {
-      const how =
-        result.exit.kind === 'exited'
-          ? `exited with code ${String(result.exit.code)}`
-          : result.exit.kind === 'timed_out'
-            ? `timed out after ${String(result.exit.afterMs)} ms`
-            : 'was cancelled';
-      return { kind: 'harness_failed', message: `the ${stage.stageId} Harness Run ${how}` };
+      return {
+        kind: 'harness_failed',
+        message: `the ${stage.stageId} Harness Run ${describeHarnessExit(result.exit)}`,
+      };
     }
     let json: unknown;
     try {
