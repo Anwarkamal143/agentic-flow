@@ -53,6 +53,7 @@ import {
 } from '@factory/harness';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { ArtifactStore, StoredContent } from './artifacts.js';
+import { criteriaCoveredBy } from './criteria.js';
 import { buildDeliveryReport } from './delivery.js';
 import { changeJob, stepTask, type JobState, type StageRunStepper } from './engine.js';
 import { newId } from './ids.js';
@@ -64,6 +65,23 @@ const PORT_BLOCK_START = 42_000;
 const PORT_BLOCK_SIZE = 10;
 const PORT_BLOCKS = 1_000;
 const MAX_TURNS = 50;
+/** Default wall-clock limit of one developer Harness Run. */
+const DEFAULT_HARNESS_WALL_CLOCK_MS = 30 * 60_000;
+/** Default wall-clock limit of one verification command. */
+const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60_000;
+/** Verification commands budgeted for in an Attempt's lease. */
+const LEASE_VERIFICATION_BUDGET = 4;
+/** Slack on top of the budget, for the factory's own git work. */
+const LEASE_SLACK_MS = 60_000;
+
+/**
+ * How long an Attempt's leases (its Task, its port block) run before they
+ * expire: one Harness Run, a budget of verification commands, and slack.
+ * There is no heartbeat yet (#13), so this bounds a whole Attempt.
+ */
+export function attemptLeaseMs(limits: { wallClockMs: number; verifyTimeoutMs: number }): number {
+  return limits.wallClockMs + limits.verifyTimeoutMs * LEASE_VERIFICATION_BUDGET + LEASE_SLACK_MS;
+}
 
 export interface TaskSchedulerOptions {
   db: FactoryDb;
@@ -85,7 +103,7 @@ export interface TaskSchedulerOptions {
 type TaskRow = typeof schema.tasks.$inferSelect;
 type WorktreeRow = typeof schema.worktrees.$inferSelect;
 
-/** What the factory found in the Worktree after the Run. */
+/** What the factory found in the Worktree after the Harness Run. */
 interface Inspection {
   headSha: string;
   commits: string[];
@@ -97,7 +115,7 @@ interface Inspection {
   violations: RuleIssue[];
 }
 
-interface RunRecord {
+interface VerificationRunRecord {
   key: string;
   command: string;
   required: boolean;
@@ -123,8 +141,21 @@ export class TaskScheduler {
   private currentProc: GuardedProcess | undefined;
   private closed = false;
   private readonly holder = `runtime:${String(process.pid)}`;
+  private readonly wallClockMs: number;
+  private readonly verifyTimeoutMs: number;
 
-  constructor(private readonly opts: TaskSchedulerOptions) {}
+  constructor(private readonly opts: TaskSchedulerOptions) {
+    this.wallClockMs = opts.wallClockMs ?? DEFAULT_HARNESS_WALL_CLOCK_MS;
+    this.verifyTimeoutMs = opts.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS;
+  }
+
+  /** When an Attempt's leases taken now expire. */
+  private leaseExpiry(): string {
+    return new Date(
+      Date.now() +
+        attemptLeaseMs({ wallClockMs: this.wallClockMs, verifyTimeoutMs: this.verifyTimeoutMs }),
+    ).toISOString();
+  }
 
   start(): void {
     if (this.opts.harness === undefined) return;
@@ -228,8 +259,6 @@ export class TaskScheduler {
     if (next === undefined) return undefined;
     const { jobId, id: taskId } = next.task;
     const now = new Date();
-    const leaseMs =
-      (this.opts.wallClockMs ?? 1_800_000) + (this.opts.verifyTimeoutMs ?? 600_000) * 4 + 60_000;
     changeJob(
       this.opts.db,
       { jobId, expectedVersion: 'current', actor: ACTOR },
@@ -245,7 +274,7 @@ export class TaskScheduler {
             leaseId,
             acquiredAt: now.toISOString(),
             heartbeatAt: now.toISOString(),
-            expiresAt: new Date(now.getTime() + leaseMs).toISOString(),
+            expiresAt: this.leaseExpiry(),
           })
           .onConflictDoNothing()
           .run();
@@ -287,7 +316,7 @@ export class TaskScheduler {
     const worktreeId = newId('wt');
     const attemptId = newId('att');
     const n = 1;
-    const wallClockMs = this.opts.wallClockMs ?? 1_800_000;
+    const { wallClockMs } = this;
     // Built before the Worktree exists, so nothing between its creation and its row can fail.
     const packet = this.packet({ job, task, definition, repo, path, branch, baseSha, wallClockMs });
     await excludeResultFile(clone);
@@ -298,7 +327,10 @@ export class TaskScheduler {
       db,
       { jobId: job.id, expectedVersion: 'current', actor: ACTOR },
       (tx) => {
-        const base = allocatePortBlock(tx, worktreeId, this.holder);
+        const base = allocatePortBlock(tx, {
+          holder: `${this.holder}/${attemptId}`,
+          expiresAt: this.leaseExpiry(),
+        });
         const now = new Date().toISOString();
         tx.insert(schema.worktrees)
           .values({
@@ -407,7 +439,7 @@ export class TaskScheduler {
           );
 
     let outcome: Outcome;
-    let runs: RunRecord[] = [];
+    let verificationRuns: VerificationRunRecord[] = [];
     if (result === undefined || result.exit.kind !== 'exited' || result.exit.code !== 0) {
       outcome = {
         state: 'failed',
@@ -435,13 +467,17 @@ export class TaskScheduler {
     } else {
       const verified = await this.verify(definition, path, env);
       if (verified === undefined) return; // shutdown during verification
-      runs = verified;
+      verificationRuns = verified;
       const headAfter = await resolveCommit(path, 'HEAD');
       const changedByVerification = await uncommittedPaths(path);
-      outcome = decide(runs, this.criteriaOf(job.id, definition), {
-        headUnchanged: headAfter === inspection.headSha,
-        changedByVerification,
-      });
+      outcome = decide(
+        verificationRuns,
+        criteriaCoveredBy(this.opts.db, job.id, definition.acceptance),
+        {
+          headUnchanged: headAfter === inspection.headSha,
+          changedByVerification,
+        },
+      );
     }
 
     this.finish({
@@ -452,7 +488,7 @@ export class TaskScheduler {
       baseSha,
       inspection,
       resultContent,
-      runs,
+      verificationRuns,
       outcome,
       usage:
         result === undefined
@@ -485,7 +521,7 @@ export class TaskScheduler {
         : DiscoveryProposalSchema.parse(this.opts.artifacts.readJson(discovery.id)).files.map(
             (f) => f.path,
           );
-    const criteria = this.criteriaOf(job.id, definition);
+    const criteria = criteriaCoveredBy(this.opts.db, job.id, definition.acceptance);
     return TaskPacketSchema.parse({
       packetVersion: 1,
       job: { id: job.id, title: job.title, objective },
@@ -523,22 +559,6 @@ export class TaskScheduler {
       limits: { maxTurns: MAX_TURNS, wallClockS: input.wallClockMs / 1000 },
       protocol: { resultFile: RESULT_FILE, mayAskQuestions: false },
     } satisfies TaskPacket);
-  }
-
-  /** The Job's Acceptance Criteria the Task covers. */
-  private criteriaOf(jobId: string, definition: TaskDefinition) {
-    if (definition.acceptance.length === 0) return [];
-    return this.opts.db
-      .select()
-      .from(schema.acceptanceCriteria)
-      .where(
-        and(
-          eq(schema.acceptanceCriteria.jobId, jobId),
-          inArray(schema.acceptanceCriteria.code, definition.acceptance),
-        ),
-      )
-      .orderBy(asc(schema.acceptanceCriteria.code))
-      .all();
   }
 
   /** The developer Harness Run, recorded as `harness_run.started` / `.finished` events. */
@@ -635,8 +655,8 @@ export class TaskScheduler {
     definition: TaskDefinition,
     cwd: string,
     env: Record<string, string>,
-  ): Promise<RunRecord[] | undefined> {
-    const runs: RunRecord[] = [];
+  ): Promise<VerificationRunRecord[] | undefined> {
+    const records: VerificationRunRecord[] = [];
     for (const v of definition.verification) {
       const startedAt = new Date().toISOString();
       const proc = spawnGuarded({
@@ -644,14 +664,14 @@ export class TaskScheduler {
         args: ['-c', v.command],
         cwd,
         env,
-        timeoutMs: this.opts.verifyTimeoutMs ?? 600_000,
+        timeoutMs: this.verifyTimeoutMs,
       });
       this.currentProc = proc;
       const exit = await proc.exit;
       this.currentProc = undefined;
       if (this.closed) return undefined;
       const exitCode = exit.timedOut ? null : exit.code;
-      runs.push({
+      records.push({
         key: v.key,
         command: v.command,
         required: v.required,
@@ -670,7 +690,7 @@ export class TaskScheduler {
         }),
       });
     }
-    return runs;
+    return records;
   }
 
   /**
@@ -686,7 +706,7 @@ export class TaskScheduler {
     baseSha: string;
     inspection: Inspection;
     resultContent: StoredContent | undefined;
-    runs: RunRecord[];
+    verificationRuns: VerificationRunRecord[];
     outcome: Outcome;
     usage: Usage | null;
   }): void {
@@ -707,15 +727,13 @@ export class TaskScheduler {
         const definition = TaskDefinitionSchema.parse(
           JSON.parse(requireTask(tx, taskId, 'verifying').definitionJson),
         );
-        const runIds = new Map<string, string>();
-        for (const run of input.runs) {
+        for (const run of input.verificationRuns) {
           const log = this.opts.artifacts.record(
             tx,
             { jobId, taskId, attemptId, kind: 'log', content: run.content },
             ACTOR,
           );
           const id = newId('vr');
-          runIds.set(run.key, id);
           tx.insert(schema.verificationRuns)
             .values({
               id,
@@ -748,10 +766,10 @@ export class TaskScheduler {
             })
             .run();
         }
-        if (input.runs.length > 0) {
-          for (const criterion of criteriaIn(tx, jobId, definition)) {
+        if (input.verificationRuns.length > 0) {
+          for (const criterion of criteriaCoveredBy(tx, jobId, definition.acceptance)) {
             const verdict = criterionVerdict(
-              input.runs.filter((r) => r.criteria.includes(criterion.code)),
+              input.verificationRuns.filter((r) => r.criteria.includes(criterion.code)),
             );
             tx.insert(schema.evidence)
               .values({
@@ -798,10 +816,9 @@ export class TaskScheduler {
           outcome.state === 'passed' ? 'approved' : 'failed',
           { reason: outcome.exitReason, payload: { attemptId, headSha: head } },
         );
-        tx.delete(schema.leases)
-          .where(and(eq(schema.leases.resourceKind, 'task'), eq(schema.leases.resourceId, taskId)))
-          .run();
-        stepWorktree(tx, jobId, requireWorktree(tx, input.worktreeId), 'active', 'preserved');
+        const worktree = requireWorktree(tx, input.worktreeId);
+        releaseAttemptTokens(tx, taskId, worktree.portBase);
+        stepWorktree(tx, jobId, worktree, 'active', 'preserved');
         settleExecution(tx, state, step);
       },
     );
@@ -827,6 +844,7 @@ export class TaskScheduler {
           )
           .get();
         const detail = `the factory could not run this Task: ${message}`;
+        let portBase: number | undefined;
         if (attempt !== undefined) {
           stepAttempt(
             tx,
@@ -842,6 +860,7 @@ export class TaskScheduler {
             { exitReason: 'factory_error' },
           );
           const worktree = requireWorktree(tx, attempt.worktreeId);
+          portBase = worktree.portBase;
           if (worktree.state === 'active') stepWorktree(tx, jobId, worktree, 'active', 'preserved');
         }
         if (['claimed', 'running', 'verifying'].includes(task.state)) {
@@ -850,9 +869,7 @@ export class TaskScheduler {
             payload: { detail },
           });
         }
-        tx.delete(schema.leases)
-          .where(and(eq(schema.leases.resourceKind, 'task'), eq(schema.leases.resourceId, taskId)))
-          .run();
+        releaseAttemptTokens(tx, taskId, portBase);
         settleExecution(tx, state, step);
       },
     );
@@ -884,15 +901,19 @@ export class TaskScheduler {
     });
     this.opts.onCommit();
 
-    const report = await buildDeliveryReport(db, jobId);
-    const content = this.opts.artifacts.writeContent(report);
-    db.transaction(
-      (tx) => {
-        this.opts.artifacts.record(tx, { jobId, kind: 'report', content }, ACTOR);
-      },
-      { behavior: 'immediate' },
-    );
-    this.opts.onCommit();
+    // A closure that stopped after recording its report resumes from that report:
+    // it is never written twice (the full resume is recovery's, #13).
+    const existing = this.opts.artifacts.listForJob(jobId).find((a) => a.kind === 'report');
+    if (existing === undefined) {
+      const content = this.opts.artifacts.writeContent(await buildDeliveryReport(db, jobId));
+      db.transaction(
+        (tx) => {
+          this.opts.artifacts.record(tx, { jobId, kind: 'report', content }, ACTOR);
+        },
+        { behavior: 'immediate' },
+      );
+      this.opts.onCommit();
+    }
 
     // Removal only after delivery: the branches hold the work, the report says where.
     const preserved = db
@@ -918,14 +939,6 @@ export class TaskScheduler {
       }
       changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx) => {
         stepWorktree(tx, jobId, requireWorktree(tx, worktree.id), 'preserved', 'removed');
-        tx.delete(schema.leases)
-          .where(
-            and(
-              eq(schema.leases.resourceKind, 'port_block'),
-              eq(schema.leases.resourceId, String(worktree.portBase)),
-            ),
-          )
-          .run();
       });
       this.opts.onCommit();
     }
@@ -965,7 +978,7 @@ export class TaskScheduler {
   }
 }
 
-// ---- after the Run -----------------------------------------------------------------
+// ---- after the Harness Run ---------------------------------------------------------
 
 /**
  * What is really in the Worktree: leftovers committed as a flagged WIP commit
@@ -1057,12 +1070,12 @@ async function inspect(worktree: string, baseSha: string): Promise<Inspection> {
  * the Task covers has passing Evidence.
  */
 function decide(
-  runs: readonly RunRecord[],
+  verificationRuns: readonly VerificationRunRecord[],
   criteria: readonly { code: string; mandatory: boolean }[],
   worktree: { headUnchanged: boolean; changedByVerification: readonly string[] },
 ): Outcome {
   const problems: string[] = [];
-  for (const run of runs) {
+  for (const run of verificationRuns) {
     if (run.required && run.exitCode !== 0) {
       problems.push(
         `verification ${run.key} ${run.timedOut ? 'timed out' : `exited ${String(run.exitCode)}`}`,
@@ -1081,7 +1094,7 @@ function decide(
   for (const c of criteria) {
     if (!c.mandatory) continue;
     const verdict: EvidenceVerdict = criterionVerdict(
-      runs.filter((r) => r.criteria.includes(c.code)),
+      verificationRuns.filter((r) => r.criteria.includes(c.code)),
     ).verdict;
     if (verdict !== 'pass') problems.push(`mandatory ${c.code} has Evidence ${verdict}, not pass`);
   }
@@ -1141,21 +1154,6 @@ function requireStageRun(state: JobState, id: string, expected: string) {
   return run;
 }
 
-function criteriaIn(tx: Tx, jobId: string, definition: TaskDefinition) {
-  if (definition.acceptance.length === 0) return [];
-  return tx
-    .select()
-    .from(schema.acceptanceCriteria)
-    .where(
-      and(
-        eq(schema.acceptanceCriteria.jobId, jobId),
-        inArray(schema.acceptanceCriteria.code, definition.acceptance),
-      ),
-    )
-    .orderBy(asc(schema.acceptanceCriteria.code))
-    .all();
-}
-
 /** Updates an Attempt guarded by its state and version, with its `attempt.<state>` event. */
 function stepAttempt(
   tx: Tx,
@@ -1207,8 +1205,12 @@ function stepWorktree(
   });
 }
 
-/** Leases the lowest free block of ports to a Worktree. */
-function allocatePortBlock(tx: Tx, worktreeId: string, holder: string): number {
+/**
+ * Leases the lowest free block of ports for one Attempt (its Harness Run and
+ * verification commands). The Worktree records the base; the lease itself is
+ * an Attempt token, released with the Task lease when the Attempt ends.
+ */
+function allocatePortBlock(tx: Tx, lease: { holder: string; expiresAt: string }): number {
   const used = new Set(
     tx
       .select({ id: schema.leases.resourceId })
@@ -1225,17 +1227,36 @@ function allocatePortBlock(tx: Tx, worktreeId: string, holder: string): number {
       .values({
         resourceKind: 'port_block',
         resourceId: String(base),
-        holder: `${holder}/${worktreeId}`,
+        holder: lease.holder,
         leaseId: newId('lse'),
         acquiredAt: now,
         heartbeatAt: now,
-        // Held for the Worktree's life; released when it is removed.
-        expiresAt: '9999-12-31T23:59:59.999Z',
+        expiresAt: lease.expiresAt,
       })
       .run();
     return base;
   }
   throw new Error('no free port block');
+}
+
+/**
+ * Releases an Attempt's tokens: its Task lease and, when it got one, its port
+ * block (ARCHITECTURE §12 step 5). Call in the transaction that ends the Attempt.
+ */
+function releaseAttemptTokens(tx: Tx, taskId: string, portBase: number | undefined): void {
+  tx.delete(schema.leases)
+    .where(and(eq(schema.leases.resourceKind, 'task'), eq(schema.leases.resourceId, taskId)))
+    .run();
+  if (portBase !== undefined) {
+    tx.delete(schema.leases)
+      .where(
+        and(
+          eq(schema.leases.resourceKind, 'port_block'),
+          eq(schema.leases.resourceId, String(portBase)),
+        ),
+      )
+      .run();
+  }
 }
 
 /**

@@ -17,7 +17,7 @@
  *       - output: { … }
  *       - exitCode: 2                                        # a crashing Run
  *         delayMs: 100                                       # before it ends
- *   tasks:                                                   # developer Runs, by Task key
+ *   tasks:                                                   # developer Harness Runs, by Task key
  *     add-sum:
  *       - steps:                                             # in the Worktree, in order
  *           - write: { path: src/math.ts, content: "…" }
@@ -29,7 +29,7 @@
  *         exitCode: 0
  *         delayMs: 0                                         # after the steps, before exiting
  *
- * A Task's Runs happen in a child process started under the Tier 0 guardrail
+ * A Task's Harness Runs happen in a child process started under the Tier 0 guardrail
  * (the environment, stdin and working directory the factory chose), so the
  * Fake is contained exactly like a real Harness. The n-th Run of a Task for a
  * Job gets the n-th response.
@@ -220,7 +220,7 @@ function scriptedRun(
 
 const WORKER = fileURLToPath(new URL('./fake-worker.js', import.meta.url));
 
-/** A developer Run: the scripted steps, performed by a guarded child process. */
+/** A developer Harness Run: the scripted steps, performed by a guarded child process. */
 function taskRun(
   input: HarnessStartInput,
   response: FakeTaskResponse | undefined,

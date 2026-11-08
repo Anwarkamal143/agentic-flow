@@ -358,6 +358,28 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
     expect(readFileSync(join(probe, 'cwd.txt'), 'utf8').trim()).toBe(worktree.path);
   });
 
+  it('releases the port block when the Attempt ends, also when the Job fails', async () => {
+    // The Harness commits nothing, so the factory's `test` command fails and the Job fails.
+    const response = { ...validTaskResponse(), steps: [] };
+    const { rt, repo } = await executionRuntime(scriptWith({}, { 'add-sum': [response] }));
+
+    const first = await runJob(rt, repo.id);
+    const second = await runJob(rt, repo.id);
+
+    for (const job of [first, second]) {
+      expect(job.status).toBe('failed');
+      const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody];
+      expect(attempt).toMatchObject({ state: 'failed', exitReason: 'gates_failed' });
+    }
+    const [kept] = await json<[WorktreeBody]>(rt.request(`/v1/jobs/${first.id}/worktrees`));
+    const [next] = await json<[WorktreeBody]>(rt.request(`/v1/jobs/${second.id}/worktrees`));
+    expect(kept.state, 'the failed Job keeps its Worktree').toBe('preserved');
+    expect(kept.portBase).toBe(42_000);
+    expect(next.portBase, 'the first block was free again: no port_block lease was left').toBe(
+      42_000,
+    );
+  });
+
   it('never reads a Task Result that is a symbolic link out of the Worktree', async () => {
     const outside = tempDir('factory-secret-');
     writeFileSync(join(outside, 'id_rsa'), 'TOP-SECRET-KEY-MATERIAL\n');

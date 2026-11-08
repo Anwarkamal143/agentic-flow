@@ -14,6 +14,7 @@ import {
 import { changedPaths, commitsBetween } from '@factory/git';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { criteriaCoveredBy } from './criteria.js';
 
 /** A POSIX shell single-quoted word. */
 export function shellQuote(word: string): string {
@@ -85,13 +86,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       .from(schema.evidence)
       .where(eq(schema.evidence.attemptId, attempt.id))
       .all();
-    const criteria = db
-      .select()
-      .from(schema.acceptanceCriteria)
-      .where(eq(schema.acceptanceCriteria.jobId, jobId))
-      .orderBy(asc(schema.acceptanceCriteria.code))
-      .all()
-      .filter((c) => definition.acceptance.includes(c.code));
+    const criteria = criteriaCoveredBy(db, jobId, definition.acceptance);
 
     if (attempt.wipCommit !== null) {
       limitations.push(
