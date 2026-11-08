@@ -1,0 +1,17 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/home"
+    },
+    {
+      "path": "packages/db"
+    },
+    {
+      "path": "apps/runtime"
+    },
+    {
+      "path": "apps/cli"
+    }
+  ]
+}

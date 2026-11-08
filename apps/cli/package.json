@@ -1,0 +1,13 @@
+{
+  "name": "@factory/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "factory": "./dist/main.js"
+  },
+  "dependencies": {
+    "@factory/home": "workspace:*",
+    "@factory/runtime": "workspace:*"
+  }
+}
