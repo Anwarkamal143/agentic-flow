@@ -242,7 +242,11 @@ export class JobService {
   }
 }
 
-/** Tasks that have not started are cancelled with their Job. */
+/**
+ * Tasks that have not started are cancelled with their Job, so the Task
+ * scheduler can never pick up work of a cancelled Job. Running Tasks don't
+ * exist before #7; stopping them is #12.
+ */
 function cancelOpenTasks(tx: Tx, jobId: string, reason: string | undefined): void {
   const open = tx
     .select()
@@ -250,10 +254,21 @@ function cancelOpenTasks(tx: Tx, jobId: string, reason: string | undefined): voi
     .where(and(eq(schema.tasks.jobId, jobId), inArray(schema.tasks.state, ['pending', 'ready'])))
     .all();
   for (const task of open) {
-    tx.update(schema.tasks)
+    const updated = tx
+      .update(schema.tasks)
       .set({ state: 'cancelled', version: sql`${schema.tasks.version} + 1` })
-      .where(and(eq(schema.tasks.id, task.id), eq(schema.tasks.version, task.version)))
+      .where(
+        and(
+          eq(schema.tasks.id, task.id),
+          eq(schema.tasks.state, task.state),
+          eq(schema.tasks.version, task.version),
+        ),
+      )
       .run();
+    if (updated.changes !== 1) {
+      // Read in this same transaction, so unreachable unless a writer bypassed it.
+      throw new Error(`Task ${task.id} changed under a versioned Job operation`);
+    }
     appendEvent(tx, {
       entityKind: 'task',
       entityId: task.id,

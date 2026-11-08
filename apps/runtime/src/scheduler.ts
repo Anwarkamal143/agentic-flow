@@ -19,14 +19,16 @@ import {
   SpecificationProposalSchema,
   TaskDefinitionSchema,
   type ArtifactKind,
+  type PlanContext,
   type RuleIssue,
   type StageFailure,
+  type StageRunState,
   type TaskDefinition,
 } from '@factory/domain';
 import type { AgentHarness, HarnessRawResult, HarnessRun } from '@factory/harness';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
-import { changeJob, readJobState } from './engine.js';
+import { changeJob, readJobState, type JobState } from './engine.js';
 import { newId } from './ids.js';
 import {
   PROMPT_TEMPLATE_HASH,
@@ -56,7 +58,7 @@ export interface SchedulerOptions {
 
 type StageRunRow = typeof schema.stageRuns.$inferSelect;
 
-/** How one proposal attempt ended. */
+/** What one Harness Run's output is worth. */
 type Outcome =
   | { kind: 'valid'; value: unknown }
   | { kind: 'invalid'; issues: RuleIssue[] }
@@ -75,8 +77,8 @@ export class StageScheduler {
 
   start(): void {
     if (this.opts.harness === undefined) return;
-    // A previous runtime died mid-Run. Its Run lived in that process, so it is
-    // gone, and nothing was stored for it: the Stage is started again.
+    // A previous runtime died during a Harness Run. That Harness Run lived in its
+    // process, so it is gone, and nothing was stored for it: the Stage starts again.
     this.orphans = this.opts.db
       .select({ id: schema.stageRuns.id })
       .from(schema.stageRuns)
@@ -110,7 +112,7 @@ export class StageScheduler {
   }
 
   /**
-   * Stops scheduling and cancels a Run in flight. Its Stage Run stays
+   * Stops scheduling and cancels a Harness Run in flight. Its Stage Run stays
    * `running` and is resumed at the next start.
    */
   async close(): Promise<void> {
@@ -124,15 +126,26 @@ export class StageScheduler {
   private async pass(): Promise<void> {
     const harness = this.opts.harness;
     if (harness === undefined) return;
+    let stageRunId: string | undefined;
     try {
-      const orphan = this.orphans.shift();
-      const runId = orphan ?? this.claimNext();
-      if (runId === undefined) return;
-      await this.runStage(harness, runId);
+      stageRunId = this.orphans.shift() ?? this.claimNext();
+      if (stageRunId === undefined) return;
+      await this.runStage(harness, stageRunId);
     } catch (err) {
-      this.opts.log(
-        `stage scheduler: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      this.opts.log(`stage scheduler: ${err instanceof Error ? (err.stack ?? message) : message}`);
+      // Never leave a claimed Stage Run silently `running`: fail it where it can be seen.
+      if (stageRunId !== undefined && !this.closed) {
+        try {
+          this.fail(this.stageRun(stageRunId), {
+            reason: 'factory_error',
+            message: `the factory could not run this Stage: ${message}`,
+            issues: [],
+          });
+        } catch (failErr) {
+          this.opts.log(`stage scheduler: could not record the failure: ${String(failErr)}`);
+        }
+      }
     }
   }
 
@@ -156,18 +169,15 @@ export class StageScheduler {
       this.opts.db,
       { jobId: next.run.jobId, expectedVersion: 'current', actor: ACTOR },
       (_, state, step) => {
-        const run = state.stageRuns.find((r) => r.id === next.run.id);
-        if (run?.state !== 'queued')
-          throw new Error(`Stage Run ${next.run.id} is no longer queued`);
-        step(run, 'running');
+        step(requireStageRun(state, next.run.id, 'queued'), 'running');
       },
     );
     this.opts.onCommit();
     return next.run.id;
   }
 
-  private async runStage(harness: AgentHarness, runId: string): Promise<void> {
-    const run = this.stageRun(runId);
+  private async runStage(harness: AgentHarness, stageRunId: string): Promise<void> {
+    const run = this.stageRun(stageRunId);
     const stage = proposalStage(run.stageId);
     if (stage === undefined) throw new Error(`Stage ${run.stageId} is not a proposal Stage`);
     const { job } = readJobState(this.opts.db, run.jobId);
@@ -186,7 +196,13 @@ export class StageScheduler {
         inputs,
         ...(rejected === undefined ? {} : { rejected }),
       });
-      const outcome = await this.harnessRun(harness, stage, run, { n, prompt, cwd, rejected });
+      const outcome = await this.harnessRun(harness, stage, run, {
+        n,
+        prompt,
+        cwd,
+        repositories,
+        rejected,
+      });
       if (this.closed) return; // shutdown: left running, resumed at the next start
       if (outcome.kind === 'valid') {
         this.succeed(run, stage, outcome.value);
@@ -210,7 +226,13 @@ export class StageScheduler {
     harness: AgentHarness,
     stage: ProposalStage,
     run: StageRunRow,
-    input: { n: number; prompt: string; cwd: string; rejected: RuleIssue[] | undefined },
+    input: {
+      n: number;
+      prompt: string;
+      cwd: string;
+      repositories: PlanContext['repositories'];
+      rejected: RuleIssue[] | undefined;
+    },
   ): Promise<Outcome> {
     let started: HarnessRun;
     try {
@@ -248,7 +270,8 @@ export class StageScheduler {
     const eventCount = await drained;
     this.current = undefined;
     const outcome = this.evaluate(stage, result, {
-      repositories: this.repositoriesOf(run.jobId),
+      repositories: input.repositories,
+      // Read after the Run: the Specification's criteria, for planning.
       criteria: this.opts.db
         .select()
         .from(schema.acceptanceCriteria)
@@ -270,7 +293,7 @@ export class StageScheduler {
     return outcome;
   }
 
-  /** Decides what a Run's output is worth. The exit code alone proves nothing. */
+  /** Decides what a Harness Run's output is worth. The exit code alone proves nothing. */
   private evaluate(
     stage: ProposalStage,
     result: HarnessRawResult,
@@ -317,10 +340,7 @@ export class StageScheduler {
       this.opts.db,
       { jobId: run.jobId, expectedVersion: 'current', actor: ACTOR },
       (tx, state, step) => {
-        const current = state.stageRuns.find((r) => r.id === run.id);
-        if (current?.state !== 'running') {
-          throw new Error(`Stage Run ${run.id} is ${String(current?.state)}, not running`);
-        }
+        const current = requireStageRun(state, run.id, 'running');
         const artifact = this.opts.artifacts.record(
           tx,
           { jobId: run.jobId, stageRunId: run.id, kind: stage.kind, content },
@@ -374,7 +394,7 @@ export class StageScheduler {
           (r) => r.id === task.repository || r.name === task.repository,
         );
         if (repo === undefined) throw new Error(`validated Task ${task.key} has no Repository`);
-        const id = ids.get(task.key) ?? '';
+        const id = taskId(ids, task.key);
         const state = initialTaskState(task.dependsOn);
         tx.insert(schema.tasks)
           .values({
@@ -413,7 +433,7 @@ export class StageScheduler {
       for (const task of plan.tasks) {
         for (const dep of task.dependsOn) {
           tx.insert(schema.taskDependencies)
-            .values({ taskId: ids.get(task.key) ?? '', dependsOnTaskId: ids.get(dep) ?? '' })
+            .values({ taskId: taskId(ids, task.key), dependsOnTaskId: taskId(ids, dep) })
             .run();
         }
       }
@@ -425,11 +445,7 @@ export class StageScheduler {
       this.opts.db,
       { jobId: run.jobId, expectedVersion: 'current', actor: ACTOR },
       (_, state, step) => {
-        const current = state.stageRuns.find((r) => r.id === run.id);
-        if (current?.state !== 'running') {
-          throw new Error(`Stage Run ${run.id} is ${String(current?.state)}, not running`);
-        }
-        step(current, 'failed', { reason: failure.reason, failure });
+        step(requireStageRun(state, run.id, 'running'), 'failed', { failure });
       },
     );
     this.opts.onCommit();
@@ -479,4 +495,20 @@ export class StageScheduler {
       .where(eq(schema.jobRepositories.jobId, jobId))
       .all();
   }
+}
+
+/** The Stage Run `id` of the Job being changed, which must be in state `expected`. */
+function requireStageRun(state: JobState, id: string, expected: StageRunState): StageRunRow {
+  const run = state.stageRuns.find((r) => r.id === id);
+  if (run?.state !== expected) {
+    throw new Error(`Stage Run ${id} is ${String(run?.state)}, not ${expected}`);
+  }
+  return run;
+}
+
+/** The id given to a validated Plan's Task key (the validator guarantees it exists). */
+function taskId(ids: ReadonlyMap<string, string>, key: string): string {
+  const id = ids.get(key);
+  if (id === undefined) throw new Error(`the validated Plan has no Task ${key}`);
+  return id;
 }

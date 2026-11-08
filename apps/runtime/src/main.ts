@@ -65,7 +65,9 @@ function configuredHarness(): AgentHarness | undefined {
   const harness = config?.harness;
   if (harness === undefined) return undefined;
   try {
-    return new FakeHarness(loadFakeScript(harness.script));
+    // A second Harness id makes this a type error, so it can't silently be built as the Fake.
+    const fake: Extract<typeof harness, { id: 'fake' }> = harness;
+    return new FakeHarness(loadFakeScript(fake.script));
   } catch (err) {
     if (err instanceof FakeScriptError) fail(`harness 'fake': ${err.message}`);
     throw err;

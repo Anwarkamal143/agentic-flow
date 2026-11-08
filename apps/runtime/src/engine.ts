@@ -119,7 +119,8 @@ export type StageRunStepper = (
 
 function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper {
   return (run, to, opts = {}) => {
-    const { reason, failure } = opts;
+    const { failure } = opts;
+    const reason = opts.reason ?? failure?.reason;
     if (failure !== undefined && to !== 'failed') {
       throw new Error(`a failure is recorded only when a Stage Run fails (${run.id} → ${to})`);
     }

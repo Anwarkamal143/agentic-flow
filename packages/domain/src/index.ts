@@ -267,8 +267,9 @@ export const StageFailureSchema = z.object({
   /**
    * `invalid_output`: the proposal failed validation, also after the one re-prompt.
    * `harness_failed`: the Harness Run did not end with exit code 0.
+   * `factory_error`: the factory itself could not run the Stage (a bug or a broken setup).
    */
-  reason: z.enum(['invalid_output', 'harness_failed']),
+  reason: z.enum(['invalid_output', 'harness_failed', 'factory_error']),
   message: z.string(),
   issues: z.array(RuleIssueSchema),
 });
