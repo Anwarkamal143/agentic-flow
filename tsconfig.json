@@ -5,6 +5,12 @@
       "path": "packages/home"
     },
     {
+      "path": "packages/domain"
+    },
+    {
+      "path": "packages/git"
+    },
+    {
       "path": "packages/db"
     },
     {

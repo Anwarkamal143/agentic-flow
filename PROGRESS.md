@@ -4,7 +4,7 @@
 
 ## Current phase
 
-**Phase A — Walking skeleton** (in progress: #2, #3 done)
+**Phase A — Walking skeleton** (in progress: #2, #3, #4 done)
 
 ## Human answers (from CLAUDE.md §7)
 
@@ -33,6 +33,8 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 <!-- newest first: date — what changed — tests run (pass/fail counts) -->
 
+- 2026-11-08 — #4 Register a Repository into a Factory Clone. `factory repo add <path> [--project] [--test-command] [--typecheck-command] [--yes]`; runtime `POST /v1/repositories/inspect` (read-only proposal), `POST /v1/repositories` (confirmed commands → clone → save), `GET /v1/projects`, `GET /v1/repositories`. Migration 0001: `projects`, `repositories`. New `packages/domain` (shared Zod contracts) and `packages/git`. Clone from `origin` with `--reference <source> --dissociate`, or from the path with `--no-hardlinks`. Fixture generator `fixtures/create-tiny-ts.mjs` (`pnpm fixtures`). ADR-0004. Branch `phase-a/4-repo-add`. typecheck ✓, lint ✓, test 24/24 ✓.
+
 - 2026-11-08 — #3 `factory doctor` reports tools and credential presence. Runtime `GET /v1/doctor` (`apps/runtime/src/doctor.ts`): node/git/gh/claude resolved on the runtime PATH, versions parsed from `--version`; credentials present/absent only (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `gh auth status` exit code); probes run with a minimal env. CLI `factory doctor [--json]` renders it. Test helper gains `fakeBin`/`versionTool` and `startRuntime(home, { env })`. ADR-0003. Branch `phase-a/3-doctor`. typecheck ✓, lint ✓, test 17/17 ✓.
 
 - 2026-11-08 — #2 Runtime boots behind a token, with the scenario test harness. pnpm monorepo (TS 6 strict, ESLint, Prettier, Vitest); `packages/home` (factory home layout), `packages/db` (Drizzle + SQLite WAL, first migration: `events`, plus a migration drift check in lint); `apps/runtime` (Hono on 127.0.0.1, bearer token on every route, `GET /v1/status`, `POST /v1/shutdown`, clean SIGTERM); `apps/cli` (`factory init | start | status | stop`); scenario helper `tests/support/factory.ts`; MIT LICENSE; CLAUDE.md commands. Branch `phase-a/2-runtime-boot`. typecheck ✓, lint ✓, test 13/13 ✓.
@@ -45,6 +47,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 - ADR-0001 — The factory works in its own clone, never in the user's checkout — `docs/adr/0001-factory-owned-clones.md`
 - ADR-0002 — Runtime foundation defaults (TS 6.0 pin, Hono, tsc -b build, home layout, port, stop semantics) — `docs/adr/0002-runtime-foundation-defaults.md`
+- ADR-0004 — Repository registration (`--reference --dissociate`, read-only source, two-step confirm, detection rules, Project defaults) — `docs/adr/0004-repository-registration.md`
 - ADR-0003 — `factory doctor` checks (runtime-side detection, presence-only credentials, minimal probe env, exit 0) — `docs/adr/0003-doctor-checks.md`
 
 ## Known limitations
@@ -52,6 +55,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 - `pnpm dev` isn't defined yet (no dashboard). The runtime runs through `factory start` or `node apps/runtime/dist/main.js`.
 - `factory stop` won't signal a runtime that doesn't answer its API. The operator must kill that pid by hand.
 - `factory doctor` doesn't detect Claude Code's own stored login (`claude /login`: Keychain / `~/.claude`). Only env tokens are checked for Claude. `gh auth status` needs the network, so offline it reports the gh login absent. No minimum tool versions are enforced yet.
+- `factory repo add` takes a path only. Registering by URL (PRODUCT_SPEC §13 `<path|url>`) isn't built. Command detection covers `package.json` projects only. There is no `repo list` CLI command yet (the API has `GET /v1/repositories`).
 - The localhost-only scenario checks a non-loopback IPv4 only when the machine has one.
 
 ## Blockers
@@ -74,6 +78,7 @@ Logged 2026-11-08, Round 2:
 7. **The `never_auto` and `human_approval` merge policies aren't distinguished** (PRODUCT_SPEC §9). Proposed reading: under `never_auto` the factory never merges; it waits for a human to merge on GitHub, which polling detects. Under `human_approval` the factory merges after an Inbox Approval. While it waits on the external merge, the Job is `waiting_human` with a human-kind Blocker. A PR closed without merging opens an Inbox Question and never auto-cancels the Job. Phase C scope.
 8. **No human-initiated replan during execution.** Today replanning happens only through the `fault_origin: plan` route or the pre-approval "replan" action. Proposed: a `requestReplan` API operation in Phase B. Each replan writes a new plan Artifact; Tasks in `approved`/`integrated` and unaffected pending Tasks carry over; the count is capped by `max_replans`. Not in Phase A.
 9. **Job status precedence (clarifies ARCHITECTURE §4.2).** `active` if any Stage Run or Task is running or queued; otherwise `blocked` if any non-human Blocker exists; otherwise `waiting_human` if any human Blocker exists. Hitting a rework or replan cap creates a human-kind Blocker, so the Job shows `waiting_human` and never loops. Blocker kinds: human, infrastructure, recovery, policy. An unmet dependency is the Task state `pending`, not a Blocker.
+12. **ARCHITECTURE §10 `--reference` "to save disk".** A plain `--reference` makes the Factory Clone depend on the user's object store (alternates), so a `git gc` there can corrupt the clone. #4 uses `--reference --dissociate` instead (ADR-0004): it saves network transfer and time, but not disk. Proposed fix: reword §10 to "`--reference <path> --dissociate` to save network and time". Also, §5 `repositories` gains `created_at`.
 11. **ARCHITECTURE §2 layout lacks `packages/home`** (added in #2, ADR-0002: the factory-home file layout shared by the CLI and runtime). Proposed fix: add `home/  # factory home layout: token, config, runtime record` to the §2 tree.
 
 10. **RESOLVED 2026-11-08: fault origin and Blocker kind `environment` renamed to `infrastructure`** (human decision), so "environment" stays free for deploy targets (Phase F). Applied in ARCHITECTURE §4.6 and `GLOSSARY.md`.

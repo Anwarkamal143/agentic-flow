@@ -5,3 +5,6 @@ export const cliEntry = fileURLToPath(new URL('../../apps/cli/dist/main.js', imp
 export const runtimeEntry = fileURLToPath(
   new URL('../../apps/runtime/dist/main.js', import.meta.url),
 );
+export const tinyTsScript = fileURLToPath(
+  new URL('../../fixtures/create-tiny-ts.mjs', import.meta.url),
+);

@@ -1,0 +1,16 @@
+# Repository registration and the Factory Clone (Phase A, issue #4)
+
+Routine, reversible choices made while building `factory repo add` on top of ADR-0001.
+
+- **`--reference <source> --dissociate`, not a plain `--reference`.** ARCHITECTURE §10 says to clone from `origin` "using `--reference <path>` to save disk and time". A plain `--reference` leaves the Factory Clone borrowing objects from the user's checkout through `objects/info/alternates`. Then a `git gc` or `git prune` in that checkout could delete objects the clone needs and corrupt it, which is exactly the coupling ADR-0001 rules out. `--dissociate` borrows the local objects during the clone (saving network transfer and time) and then copies them, so no alternates file remains. We give up the disk saving.
+- **Path clones copy, never hard-link** (`--no-hardlinks`), so the clone shares no inodes with the user's object store.
+- **Reads of the source are plumbing only:** `rev-parse` and `config --get`, with `GIT_OPTIONAL_LOCKS=0`. The factory never runs `status`, `fetch` or `gc` there, and never adds a remote. Command detection reads `package.json` and checks lockfile names. A scenario test hashes every file in the source, `.git/` included, before and after registration.
+- **Two-step API.** `POST /v1/repositories/inspect` is a read-only proposal: the source root, `origin`, the package manager and the detected commands. `POST /v1/repositories` takes the **human-confirmed** commands, makes the clone, and saves. The runtime never saves detected commands that no one confirmed. The CLI shows the commands and asks `[y/N]`. Anything but `y` registers nothing. `--yes` confirms on the command line, and `--test-command` / `--typecheck-command` replace a detected value (an empty value means none).
+- **Detection.** The package manager comes from the `packageManager` field, else from the lockfile, else npm. `test` → `<pm> test` (`bun run test` for bun), unless the script is npm's "no test specified" placeholder. `typecheck` → `<pm> run <script>` for the first of `typecheck`, `type-check`, `tsc`. Anything else is "not detected".
+- **Project.** `--project <name>` finds or creates the Project by name (names are unique). It defaults to the Repository's name.
+- **Identity and uniqueness.** IDs are `prj_<16 hex>` / `repo_<16 hex>`. The clone lives at `<workspace_root>/clones/<repo-id>`. A source path can be registered once, and the name must be unique within a Project. A path inside the repository resolves to its root.
+- **Failure cleanup.** If the clone or the insert fails, the runtime removes the directory it just created; it holds no work. A failed clone is `422 clone_failed`. The factory never falls back from `origin` to the path.
+- **Events:** `project.created` and `repository.registered` (actor `user:local`), in the same transaction as the rows.
+- **`repositories.created_at`** is added beyond ARCHITECTURE §5, for ordering and display.
+- **New packages:** `packages/domain` (Zod contracts shared by the runtime and the CLI) and `packages/git` (local git operations), both from the ARCHITECTURE §2 layout.
+- **Fixture generator:** `fixtures/create-tiny-ts.mjs [dest]` (`pnpm fixtures`) writes the files and makes one deterministic commit on `main`, with a fixed author and date and no user or system git config read. The output under `fixtures/repos/` is gitignored.

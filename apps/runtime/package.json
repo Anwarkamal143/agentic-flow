@@ -6,8 +6,12 @@
   "main": "./dist/main.js",
   "dependencies": {
     "@factory/db": "workspace:*",
+    "@factory/domain": "workspace:*",
+    "@factory/git": "workspace:*",
     "@factory/home": "workspace:*",
     "@hono/node-server": "2.1.6",
-    "hono": "4.13.17"
+    "drizzle-orm": "0.45.4",
+    "hono": "4.13.17",
+    "zod": "4.6.7"
   }
 }

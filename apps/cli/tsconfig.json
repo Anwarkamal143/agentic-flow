@@ -1,6 +1,16 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
   "include": ["src"],
-  "references": [{ "path": "../../packages/home" }]
+  "references": [
+    {
+      "path": "../../packages/home"
+    },
+    {
+      "path": "../../packages/domain"
+    }
+  ]
 }

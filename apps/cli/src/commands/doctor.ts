@@ -36,7 +36,9 @@ export async function doctor(opts: { json: boolean }): Promise<number> {
   let body: DoctorBody;
   try {
     // The runtime runs probes with their own timeouts (ADR-0003); allow for them.
-    body = await found.client.json<DoctorBody>('GET', '/v1/doctor', DOCTOR_TIMEOUT_MS);
+    body = await found.client.json<DoctorBody>('GET', '/v1/doctor', {
+      timeoutMs: DOCTOR_TIMEOUT_MS,
+    });
   } catch (err) {
     process.stderr.write(
       `Runtime process ${String(found.record.pid)} did not answer the doctor request at ` +
