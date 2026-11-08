@@ -15,16 +15,16 @@ export class RuntimeClient {
     private readonly token: string,
   ) {}
 
-  async request(method: 'GET' | 'POST', path: string): Promise<Response> {
+  async request(method: 'GET' | 'POST', path: string, timeoutMs = 5_000): Promise<Response> {
     return fetch(this.url + path, {
       method,
       headers: { authorization: `Bearer ${this.token}` },
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   }
 
-  async json<T>(method: 'GET' | 'POST', path: string): Promise<T> {
-    const res = await this.request(method, path);
+  async json<T>(method: 'GET' | 'POST', path: string, timeoutMs?: number): Promise<T> {
+    const res = await this.request(method, path, timeoutMs);
     if (!res.ok) throw new Error(`${method} ${path} failed: HTTP ${String(res.status)}`);
     return (await res.json()) as T;
   }

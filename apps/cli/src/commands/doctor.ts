@@ -2,6 +2,8 @@ import { resolveHome } from '@factory/home';
 import { findRuntime } from '../client.js';
 import { EXIT_NOT_RUNNING } from './lifecycle.js';
 
+const DOCTOR_TIMEOUT_MS = 30_000;
+
 /** The `GET /v1/doctor` body, as far as the CLI renders it. */
 interface DoctorBody {
   checkedAt: string;
@@ -31,17 +33,27 @@ export async function doctor(opts: { json: boolean }): Promise<number> {
     );
     return EXIT_NOT_RUNNING;
   }
-  const body = await found.client.json<DoctorBody>('GET', '/v1/doctor');
+  let body: DoctorBody;
+  try {
+    // The runtime runs probes with their own timeouts (ADR-0003); allow for them.
+    body = await found.client.json<DoctorBody>('GET', '/v1/doctor', DOCTOR_TIMEOUT_MS);
+  } catch (err) {
+    process.stderr.write(
+      `Runtime process ${String(found.record.pid)} did not answer the doctor request at ` +
+        `${found.client.url}: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return 1;
+  }
   if (opts.json) {
     process.stdout.write(JSON.stringify(body) + '\n');
     return 0;
   }
 
-  const width = Math.max(...body.tools.map((t) => t.name.length)) + 2;
+  const nameWidth = Math.max(...body.tools.map((t) => t.name.length)) + 2;
   const versionWidth = Math.max(...body.tools.map((t) => (t.version ?? '').length)) + 2;
   const lines = ['Tools (as seen on the runtime PATH):'];
   for (const tool of body.tools) {
-    const name = tool.name.padEnd(width);
+    const name = tool.name.padEnd(nameWidth);
     if (tool.status === 'ok') {
       lines.push(
         `  ok       ${name}${(tool.version ?? '').padEnd(versionWidth)}${tool.path ?? ''}`,
@@ -57,6 +69,7 @@ export async function doctor(opts: { json: boolean }): Promise<number> {
   for (const cred of body.credentials) {
     lines.push(`  ${(cred.present ? 'present' : 'absent').padEnd(9)}${cred.name} (${cred.source})`);
   }
+  lines.push("  (not checked: Claude Code's own stored login from `claude /login`)");
   process.stdout.write(lines.join('\n') + '\n');
   return 0;
 }

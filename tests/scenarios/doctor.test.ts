@@ -74,6 +74,7 @@ describe('factory doctor', () => {
     expect(res.code, res.stderr).toBe(0);
     expect(res.stdout).toMatch(/present +Claude API key \(ANTHROPIC_API_KEY\)/);
     expect(res.stdout).toMatch(/absent +Claude subscription token \(CLAUDE_CODE_OAUTH_TOKEN\)/);
+    expect(res.stdout, 'an undetected login is never shown as absent').toContain('not checked');
     expect(res.stdout).toMatch(/present +GitHub token \(GH_TOKEN\)/);
     expect(res.stdout).toMatch(/absent +GitHub token \(GITHUB_TOKEN\)/);
     expect(res.stdout).toMatch(/present +GitHub CLI login \(gh auth status\)/);

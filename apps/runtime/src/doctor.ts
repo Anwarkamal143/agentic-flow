@@ -68,7 +68,7 @@ const TOOLS: readonly ToolSpec[] = [
   },
 ];
 
-const VERSION_TIMEOUT_MS = 10_000;
+const PROBE_TIMEOUT_MS = 10_000;
 
 const ENV_CREDENTIALS: readonly Omit<CredentialCheck, 'present'>[] = [
   { id: 'anthropic_api_key', name: 'Claude API key', source: 'ANTHROPIC_API_KEY' },
@@ -155,16 +155,16 @@ function run(file: string, args: string[], env: NodeJS.ProcessEnv): Promise<RunR
     execFile(
       file,
       args,
-      { env, timeout: VERSION_TIMEOUT_MS, maxBuffer: 64 * 1024, windowsHide: true },
+      { env, timeout: PROBE_TIMEOUT_MS, maxBuffer: 64 * 1024, windowsHide: true },
       (err, stdout) => {
         if (err === null) {
           resolve({ ok: true, stdout });
         } else if (err.killed) {
-          resolve({ ok: false, reason: `timed out after ${String(VERSION_TIMEOUT_MS / 1000)}s` });
+          resolve({ ok: false, reason: `timed out after ${String(PROBE_TIMEOUT_MS / 1000)}s` });
         } else {
-          const code =
+          const reason =
             typeof err.code === 'number' ? `exited with code ${String(err.code)}` : 'could not run';
-          resolve({ ok: false, reason: code });
+          resolve({ ok: false, reason });
         }
       },
     );
