@@ -8,6 +8,7 @@
     "@factory/db": "workspace:*",
     "@factory/domain": "workspace:*",
     "@factory/git": "workspace:*",
+    "@factory/harness": "workspace:*",
     "@factory/home": "workspace:*",
     "@hono/node-server": "2.1.6",
     "drizzle-orm": "0.45.4",

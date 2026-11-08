@@ -42,7 +42,12 @@ export async function init(opts: { workspaceRoot: string | undefined }): Promise
   ensureHomeDirs(home);
   mkdirSync(workspaceRoot, { recursive: true });
   if (!existsSync(home.tokenPath)) createToken(home);
-  writeConfig(home, { version: 1, workspaceRoot, port: existing?.port ?? DEFAULT_PORT });
+  writeConfig(home, {
+    ...existing,
+    version: 1,
+    workspaceRoot,
+    port: existing?.port ?? DEFAULT_PORT,
+  });
 
   process.stdout.write(
     `Initialized factory home: ${home.root}\n` +

@@ -7,6 +7,7 @@ export interface StageRunBody {
   stageId: string;
   state: string;
   version: number;
+  failure: { reason: string; message: string; issues: { rule: string; message: string }[] } | null;
 }
 
 export interface JobBody {
@@ -72,4 +73,33 @@ export async function createJob(rt: RunningRuntime, repositoryId: string, title 
   const res = await post(rt, '/v1/jobs', { repositoryId, title, description: 'in math.ts' });
   expect(res.status, 'create Job').toBe(201);
   return (await res.json()) as JobBody;
+}
+
+/** Polls a Job until `done` holds, failing with the last state seen after `timeoutMs`. */
+export async function waitForJob(
+  rt: RunningRuntime,
+  id: string,
+  done: (job: JobBody) => boolean,
+  timeoutMs = 10_000,
+): Promise<JobBody> {
+  const deadline = Date.now() + timeoutMs;
+  let job: JobBody | undefined;
+  while (Date.now() < deadline) {
+    job = await json<JobBody>(rt.request(`/v1/jobs/${id}`));
+    if (done(job)) return job;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(
+    `Job ${id} did not reach the expected state; last seen: ${JSON.stringify(job?.stageRuns.map((s) => [s.stageId, s.state]))}\n${rt.output()}`,
+  );
+}
+
+/** Settled: nothing queued or running except `execution`, which waits for the Task scheduler. */
+export function proposalStagesSettled(job: JobBody): boolean {
+  return (
+    job.status !== 'active' ||
+    job.stageRuns.every(
+      (s) => s.stageId === 'execution' || (s.state !== 'queued' && s.state !== 'running'),
+    )
+  );
 }

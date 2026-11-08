@@ -20,11 +20,14 @@ import {
   resolveHome,
   writeRuntimeRecord,
 } from '@factory/home';
+import { FakeHarness, FakeScriptError, loadFakeScript, type AgentHarness } from '@factory/harness';
 import { createApp, type RuntimeStatus } from './app.js';
+import { ArtifactStore } from './artifacts.js';
 import { runDoctor } from './doctor.js';
 import { JobService } from './jobs.js';
 import { Outbox } from './outbox.js';
 import { RepositoryService } from './repositories.js';
+import { StageScheduler } from './scheduler.js';
 
 const ACTOR = 'system:runtime';
 
@@ -57,14 +60,41 @@ if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 655
   fail(`invalid port: ${String(portEnv)}`);
 }
 
+/** The Harness comes from runtime configuration only; there is no other switch. */
+function configuredHarness(): AgentHarness | undefined {
+  const harness = config?.harness;
+  if (harness === undefined) return undefined;
+  try {
+    // A second Harness id makes this a type error, so it can't silently be built as the Fake.
+    const fake: Extract<typeof harness, { id: 'fake' }> = harness;
+    return new FakeHarness(loadFakeScript(fake.script));
+  } catch (err) {
+    if (err instanceof FakeScriptError) fail(`harness 'fake': ${err.message}`);
+    throw err;
+  }
+}
+const harness = configuredHarness();
+const detection = await harness?.detect();
+
 const database = openDatabase(home.dbPath);
 const startedAt = new Date();
 let state: RuntimeStatus['state'] = 'running';
 let port = 0;
 
 const outbox = new Outbox(database.db);
+const artifacts = new ArtifactStore(database.db, home.root);
+const scheduler = new StageScheduler({
+  db: database.db,
+  harness,
+  artifacts,
+  onCommit: () => {
+    notify();
+  },
+  log: (message) => process.stderr.write(`factory runtime: ${message}\n`),
+});
 const notify = () => {
   outbox.notify();
+  scheduler.wake();
 };
 
 const app = createApp({
@@ -80,10 +110,15 @@ const app = createApp({
     home: home.root,
     workspaceRoot: config.workspaceRoot,
     database: { journalMode: database.journalMode, migrations: database.appliedMigrations },
+    harness:
+      harness === undefined || detection === undefined
+        ? null
+        : { id: harness.id, version: detection.version, installed: detection.installed },
   }),
   doctor: () => runDoctor(process.env),
   repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
   jobs: new JobService(database.db, notify),
+  artifacts,
   outbox,
   requestShutdown: () => {
     shutdown('api');
@@ -103,6 +138,7 @@ const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requested
     });
   });
   outbox.start();
+  scheduler.start();
   writeRuntimeRecord(home, {
     pid: process.pid,
     host: RUNTIME_HOST,
@@ -130,23 +166,31 @@ function shutdown(reason: string): void {
   force.unref();
   // Ends every SSE stream; events written from here on are released at the next start.
   outbox.close();
+  // A Harness Run in flight is cancelled; its Stage Run is resumed at the next start.
+  const stopped = scheduler.close();
   server.close(() => {
-    database.db.transaction((tx) => {
-      appendEvent(tx, {
-        entityKind: 'runtime',
-        entityId: 'runtime',
-        type: 'runtime.stopped',
-        actor: ACTOR,
-        payload: { reason },
-      });
+    void stopped.then(() => {
+      finish(reason);
     });
-    database.close();
-    const record = readRuntimeRecord(home);
-    if (record?.pid === process.pid) removeRuntimeRecord(home);
-    process.stdout.write('factory runtime stopped\n');
-    process.exit(0);
   });
   server.closeIdleConnections();
+}
+
+function finish(reason: string): void {
+  database.db.transaction((tx) => {
+    appendEvent(tx, {
+      entityKind: 'runtime',
+      entityId: 'runtime',
+      type: 'runtime.stopped',
+      actor: ACTOR,
+      payload: { reason },
+    });
+  });
+  database.close();
+  const record = readRuntimeRecord(home);
+  if (record?.pid === process.pid) removeRuntimeRecord(home);
+  process.stdout.write('factory runtime stopped\n');
+  process.exit(0);
 }
 
 process.on('SIGTERM', () => {

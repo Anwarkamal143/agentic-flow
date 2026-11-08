@@ -119,9 +119,95 @@ export const stageRuns = sqliteTable(
     attempt: integer('attempt').notNull(),
     resumeStageId: text('resume_stage_id'),
     blockerJson: text('blocker_json'),
+    /** Why the Stage Run failed (`StageFailure`), when it did. */
+    failureJson: text('failure_json'),
     startedAt: text('started_at'),
     finishedAt: text('finished_at'),
     version: integer('version').notNull(),
   },
   (t) => [uniqueIndex('stage_runs_job_stage_attempt').on(t.jobId, t.stageId, t.attempt)],
+);
+
+/**
+ * An immutable stored output (ARCHITECTURE §5). The content lives in the
+ * factory home at `path`, named by `content_hash` (`sha256:<hex>` of its bytes).
+ * Rows are only ever inserted.
+ */
+export const artifacts = sqliteTable(
+  'artifacts',
+  {
+    id: text('id').primaryKey(),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    /** The Stage Run whose proposal it is, for proposal Artifacts. */
+    stageRunId: text('stage_run_id').references(() => stageRuns.id),
+    kind: text('kind').notNull(),
+    contentHash: text('content_hash').notNull(),
+    /** Relative to the factory home. */
+    path: text('path').notNull(),
+    schemaVersion: integer('schema_version').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [index('artifacts_job').on(t.jobId), uniqueIndex('artifacts_stage_run').on(t.stageRunId)],
+);
+
+/** The numbered Acceptance Criteria of a Job's Specification. */
+export const acceptanceCriteria = sqliteTable(
+  'acceptance_criteria',
+  {
+    id: text('id').primaryKey(),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    artifactId: text('artifact_id')
+      .notNull()
+      .references(() => artifacts.id),
+    code: text('code').notNull(),
+    text: text('text').notNull(),
+    mandatory: integer('mandatory', { mode: 'boolean' }).notNull(),
+    verification: text('verification').notNull(),
+  },
+  (t) => [uniqueIndex('acceptance_criteria_job_code').on(t.jobId, t.code)],
+);
+
+/**
+ * A unit of work in a Job's Plan. `definition_json` is the validated Plan entry
+ * (objective, role, risk, scope, covered criteria, verification commands).
+ */
+export const tasks = sqliteTable(
+  'tasks',
+  {
+    id: text('id').primaryKey(),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    repositoryId: text('repository_id')
+      .notNull()
+      .references(() => repositories.id),
+    planArtifactId: text('plan_artifact_id')
+      .notNull()
+      .references(() => artifacts.id),
+    key: text('key').notNull(),
+    title: text('title').notNull(),
+    definitionJson: text('definition_json').notNull(),
+    state: text('state').notNull(),
+    priority: integer('priority').notNull(),
+    maxAttempts: integer('max_attempts').notNull(),
+    version: integer('version').notNull(),
+  },
+  (t) => [uniqueIndex('tasks_job_key').on(t.jobId, t.key), index('tasks_state').on(t.state)],
+);
+
+export const taskDependencies = sqliteTable(
+  'task_dependencies',
+  {
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    dependsOnTaskId: text('depends_on_task_id')
+      .notNull()
+      .references(() => tasks.id),
+  },
+  (t) => [primaryKey({ columns: [t.taskId, t.dependsOnTaskId] })],
 );

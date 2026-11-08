@@ -4,6 +4,15 @@
  */
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import {
+  RiskSchema,
+  RuleIssueSchema,
+  TaskRoleSchema,
+  TaskScopeSchema,
+  VerificationCommandSchema,
+} from './proposals.js';
+
+export * from './proposals.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -253,12 +262,26 @@ export function resolveEffectiveConfig(levels: { project: ProjectConfig }): Effe
 
 // ---- Job API contracts ------------------------------------------------------
 
+/** Why a Stage Run failed. Recorded on the Stage Run itself, not only in its event. */
+export const StageFailureSchema = z.object({
+  /**
+   * `invalid_output`: the proposal failed validation, also after the one re-prompt.
+   * `harness_failed`: the Harness Run did not end with exit code 0.
+   * `factory_error`: the factory itself could not run the Stage (a bug or a broken setup).
+   */
+  reason: z.enum(['invalid_output', 'harness_failed', 'factory_error']),
+  message: z.string(),
+  issues: z.array(RuleIssueSchema),
+});
+export type StageFailure = z.infer<typeof StageFailureSchema>;
+
 export const StageRunSchema = z.object({
   id: z.string(),
   stageId: StageIdSchema,
   state: StageRunStateSchema,
   startedAt: z.string().nullable(),
   finishedAt: z.string().nullable(),
+  failure: StageFailureSchema.nullable(),
   version: z.number().int(),
 });
 export type StageRun = z.infer<typeof StageRunSchema>;
@@ -300,6 +323,87 @@ export const CancelJobInputSchema = z.object({
   reason: z.string().trim().max(1000).optional(),
 });
 export type CancelJobInput = z.infer<typeof CancelJobInputSchema>;
+
+// ---- Artifacts, Acceptance Criteria, Tasks (ARCHITECTURE §5) -----------------
+
+/** The proposal Stage each Artifact kind comes from: triage, discovery, specification, planning. */
+export const ArtifactKindSchema = z.enum(['triage', 'discovery', 'spec', 'plan']);
+export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
+
+/** An immutable stored output, addressed by the SHA-256 of its bytes. */
+export const ArtifactSchema = z.object({
+  id: z.string(),
+  jobId: z.string(),
+  stageRunId: z.string().nullable(),
+  kind: ArtifactKindSchema,
+  /** `sha256:<hex>` of the content bytes served by `GET /v1/artifacts/:id/content`. */
+  contentHash: z.string(),
+  schemaVersion: z.number().int().positive(),
+  createdAt: z.string(),
+});
+export type Artifact = z.infer<typeof ArtifactSchema>;
+
+export const AcceptanceCriterionSchema = z.object({
+  id: z.string(),
+  jobId: z.string(),
+  code: z.string(),
+  text: z.string(),
+  mandatory: z.boolean(),
+  verification: z.string(),
+  /** The Specification Artifact it was taken from. */
+  artifactId: z.string(),
+});
+export type AcceptanceCriterion = z.infer<typeof AcceptanceCriterionSchema>;
+
+/** ARCHITECTURE §4.4. */
+export const TaskStateSchema = z.enum([
+  'pending',
+  'ready',
+  'claimed',
+  'running',
+  'verifying',
+  'in_review',
+  'changes_requested',
+  'approved',
+  'integrated',
+  'blocked',
+  'failed',
+  'cancelled',
+]);
+export type TaskState = z.infer<typeof TaskStateSchema>;
+
+/** A Task starts `ready` when it depends on nothing, else `pending` (its dependencies are unmet). */
+export function initialTaskState(dependsOn: readonly string[]): TaskState {
+  return dependsOn.length === 0 ? 'ready' : 'pending';
+}
+
+/** What the Plan says about a Task, stored with it (`tasks.definition_json`). */
+export const TaskDefinitionSchema = z.object({
+  objective: z.string(),
+  role: TaskRoleSchema,
+  risk: RiskSchema,
+  scope: TaskScopeSchema,
+  /** Keys of the Tasks this one depends on. */
+  dependsOn: z.array(z.string()),
+  /** Codes of the Acceptance Criteria it covers. */
+  acceptance: z.array(z.string()),
+  verification: z.array(VerificationCommandSchema),
+});
+export type TaskDefinition = z.infer<typeof TaskDefinitionSchema>;
+
+export const TaskSchema = TaskDefinitionSchema.extend({
+  id: z.string(),
+  jobId: z.string(),
+  key: z.string(),
+  title: z.string(),
+  repositoryId: z.string(),
+  state: TaskStateSchema,
+  maxAttempts: z.number().int().positive(),
+  /** The Plan Artifact it was taken from. */
+  planArtifactId: z.string(),
+  version: z.number().int(),
+});
+export type Task = z.infer<typeof TaskSchema>;
 
 // ---- Events (ARCHITECTURE §4.1, §17) ----------------------------------------
 

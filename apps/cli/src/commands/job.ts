@@ -1,4 +1,12 @@
-import type { CancelJobInput, CreateJobInput, Job, JobSummary, Repository } from '@factory/domain';
+import type {
+  AcceptanceCriterion,
+  CancelJobInput,
+  CreateJobInput,
+  Job,
+  JobSummary,
+  Repository,
+  Task,
+} from '@factory/domain';
 import { resolveHome } from '@factory/home';
 import { ApiRequestError, findRuntime, type RuntimeClient } from '../client.js';
 import { EXIT_NOT_RUNNING } from './lifecycle.js';
@@ -70,8 +78,17 @@ export async function jobShow(id: string, opts: { json: boolean }): Promise<numb
   if (api === undefined) return EXIT_NOT_RUNNING;
   const job = await getJob(api, id);
   if (job === undefined) return 1;
-  if (opts.json) process.stdout.write(JSON.stringify(job, null, 2) + '\n');
-  else writeJob(job);
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(job, null, 2) + '\n');
+    return 0;
+  }
+  const path = `/v1/jobs/${encodeURIComponent(id)}`;
+  const [criteria, tasks] = await Promise.all([
+    api.json<AcceptanceCriterion[]>('GET', `${path}/acceptance-criteria`),
+    api.json<Task[]>('GET', `${path}/tasks`),
+  ]);
+  writeJob(job);
+  writePlan(criteria, tasks);
   return 0;
 }
 
@@ -119,8 +136,35 @@ function writeJob(job: Job): void {
     `  version:    ${String(job.version)}`,
     `  created:    ${job.createdAt} by ${job.createdBy}`,
     'Stages:',
-    ...job.stageRuns.map((s) => `  ${s.stageId.padEnd(14)} ${s.state}`),
+    ...job.stageRuns.map(
+      (s) =>
+        `  ${s.stageId.padEnd(14)} ${s.state}` +
+        (s.failure === null ? '' : `: ${s.failure.reason}: ${s.failure.message}`),
+    ),
   ];
   if (job.description !== '') lines.splice(1, 0, `  ${job.description}`);
   process.stdout.write(lines.join('\n') + '\n');
+}
+
+function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
+  const lines: string[] = [];
+  if (criteria.length > 0) {
+    lines.push('Acceptance criteria:');
+    for (const c of criteria) {
+      lines.push(`  ${c.code} ${c.mandatory ? 'mandatory' : 'optional '} ${c.text}`);
+    }
+  }
+  if (tasks.length > 0) {
+    lines.push('Tasks:');
+    for (const t of tasks) {
+      lines.push(
+        `  ${t.key.padEnd(14)} ${t.state.padEnd(10)} ${t.title}`,
+        `    writable:  ${t.scope.writable.join(', ')}`,
+        `    forbidden: ${t.scope.forbidden.join(', ') || '(none)'}`,
+        `    verify:    ${t.verification.map((v) => `${v.key}: ${v.command}`).join('; ')}`,
+      );
+      if (t.dependsOn.length > 0) lines.push(`    after:     ${t.dependsOn.join(', ')}`);
+    }
+  }
+  if (lines.length > 0) process.stdout.write(lines.join('\n') + '\n');
 }

@@ -7,12 +7,13 @@
  *   config.json    operator config (workspace root, port)
  *   runtime.json   pid record of the running runtime (pidfile)
  *   factory.db     SQLite database (runtime only)
+ *   artifacts/     immutable Artifact contents, named by content hash (runtime only)
  *   logs/runtime.log
  */
 import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 
 export const DEFAULT_PORT = 7420;
@@ -24,6 +25,7 @@ export interface FactoryHome {
   readonly configPath: string;
   readonly runtimeRecordPath: string;
   readonly dbPath: string;
+  readonly artifactDir: string;
   readonly logDir: string;
   readonly runtimeLogPath: string;
 }
@@ -37,6 +39,7 @@ export function resolveHome(env: NodeJS.ProcessEnv = process.env): FactoryHome {
     configPath: join(root, 'config.json'),
     runtimeRecordPath: join(root, 'runtime.json'),
     dbPath: join(root, 'factory.db'),
+    artifactDir: join(root, 'artifacts'),
     logDir,
     runtimeLogPath: join(logDir, 'runtime.log'),
   };
@@ -46,14 +49,30 @@ export function ensureHomeDirs(home: FactoryHome): void {
   mkdirSync(home.root, { recursive: true, mode: 0o700 });
   chmodSync(home.root, 0o700);
   mkdirSync(home.logDir, { recursive: true, mode: 0o700 });
+  mkdirSync(home.artifactDir, { recursive: true, mode: 0o700 });
 }
 
 // ---- config ---------------------------------------------------------------
+
+/**
+ * Which Harness the runtime drives. Runtime configuration is the only way to
+ * choose it: the runtime has no other switch. Unset: no Harness, so queued
+ * Stages wait.
+ */
+export const HarnessConfigSchema = z.discriminatedUnion('id', [
+  z.object({
+    id: z.literal('fake'),
+    /** The Fake Harness's YAML script. */
+    script: z.string().refine((p) => isAbsolute(p), 'must be an absolute path'),
+  }),
+]);
+export type HarnessConfig = z.infer<typeof HarnessConfigSchema>;
 
 export const FactoryConfigSchema = z.object({
   version: z.literal(1),
   workspaceRoot: z.string().min(1),
   port: z.number().int().min(0).max(65535),
+  harness: HarnessConfigSchema.optional(),
 });
 export type FactoryConfig = z.infer<typeof FactoryConfigSchema>;
 
