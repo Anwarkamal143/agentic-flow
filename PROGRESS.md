@@ -4,7 +4,7 @@
 
 ## Current phase
 
-**Phase A — Walking skeleton** (in progress: #2, #3, #4 done)
+**Phase A — Walking skeleton** (in progress: #2, #3, #4, #5 done)
 
 ## Human answers (from CLAUDE.md §7)
 
@@ -22,7 +22,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 | Phase | Status | Exit tests | Report |
 |---|---|---|---|
-| A — Walking skeleton | In progress | 0 / 7 | — |
+| A — Walking skeleton | In progress | 1 / 7 (A6) | — |
 | B — Human-in-the-loop + DAG | Not started | — | — |
 | C — GitHub delivery | Not started | — | — |
 | D — Multi-project, multi-repo, onboarding | Not started | — | — |
@@ -32,6 +32,8 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 ## Work log
 
 <!-- newest first: date — what changed — tests run (pass/fail counts) -->
+
+- 2026-11-08 — #5 Create a Job; events are streamed and replayable (A6). `factory job create --repo --title [--description] | job list | job show [--json] | job cancel [--reason]`. Runtime `POST/GET /v1/jobs`, `GET /v1/jobs/:id`, `POST /v1/jobs/:id/cancel` (`expectedVersion`; stale → 409), `GET /v1/jobs/:id/events`, `GET /v1/events`, `GET /v1/events/stream` (SSE, `Last-Event-ID`), `POST /v1/projects/:id/config`. Migration 0002: `jobs`, `job_repositories`, `stage_runs`. Domain: Phase A `feature` Recipe, the Stage Run state machine, `deriveJobStatus`, `resolveEffectiveConfig` (`maxAttempts`). Runtime: transition engine (`engine.ts`), outbox publisher (`outbox.ts`). Cancel was pulled forward from #12 (human decision); running Stage Runs can't be cancelled yet. ADR-0005. Branch `phase-a/5-job-create`. typecheck ✓, lint ✓, test 38/38 ✓.
 
 - 2026-11-08 — #4 Register a Repository into a Factory Clone. `factory repo add <path> [--project] [--test-command] [--typecheck-command] [--yes]`; runtime `POST /v1/repositories/inspect` (read-only proposal), `POST /v1/repositories` (confirmed commands → clone → save), `GET /v1/projects`, `GET /v1/repositories`. Migration 0001: `projects`, `repositories`. New `packages/domain` (shared Zod contracts) and `packages/git`. Clone from `origin` with `--reference <source> --dissociate`, or from the path with `--no-hardlinks`. Fixture generator `fixtures/create-tiny-ts.mjs` (`pnpm fixtures`). ADR-0004. Branch `phase-a/4-repo-add`. typecheck ✓, lint ✓, test 26/26 ✓ (after review fixes).
 
@@ -49,6 +51,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 - ADR-0002 — Runtime foundation defaults (TS 6.0 pin, Hono, tsc -b build, home layout, port, stop semantics) — `docs/adr/0002-runtime-foundation-defaults.md`
 - ADR-0004 — Repository registration (`--reference --dissociate`, read-only source, two-step confirm, detection rules, Project defaults) — `docs/adr/0004-repository-registration.md`
 - ADR-0003 — `factory doctor` checks (runtime-side detection, presence-only credentials, minimal probe env, exit 0) — `docs/adr/0003-doctor-checks.md`
+- ADR-0005 — Jobs, versioned transitions and the event stream (Cancel early, aggregate Job version, intake at creation, status precedence, minimal Effective Configuration, outbox and SSE contract) — `docs/adr/0005-jobs-transitions-event-stream.md`
 
 ## Known limitations
 
@@ -56,6 +59,9 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 - `factory stop` won't signal a runtime that doesn't answer its API. The operator must kill that pid by hand.
 - `factory doctor` doesn't detect Claude Code's own stored login (`claude /login`: Keychain / `~/.claude`). Only env tokens are checked for Claude. `gh auth status` needs the network, so offline it reports the gh login absent. No minimum tool versions are enforced yet.
 - `factory repo add` takes a path only. Registering by URL (PRODUCT_SPEC §13 `<path|url>`) isn't built. Command detection covers `package.json` projects only. There is no `repo list` CLI command yet (the API has `GET /v1/repositories`).
+- There is no scheduler yet (#6), so a new Job waits at `triage: queued` until it is cancelled. `factory job cancel` refuses a Job whose Stage is `running` (process termination is #12).
+- The Effective Configuration has one setting (`maxAttempts`) and two levels (recipe, Project). The Project config can be set only through the API (`POST /v1/projects/:id/config`); there is no CLI command and no re-freeze of a Job's config.
+- `factory logs` isn't built yet; `job show` doesn't list events (use `GET /v1/jobs/:id/events`).
 - The localhost-only scenario checks a non-loopback IPv4 only when the machine has one.
 
 ## Blockers
@@ -79,6 +85,7 @@ Logged 2026-11-08, Round 2:
 8. **No human-initiated replan during execution.** Today replanning happens only through the `fault_origin: plan` route or the pre-approval "replan" action. Proposed: a `requestReplan` API operation in Phase B. Each replan writes a new plan Artifact; Tasks in `approved`/`integrated` and unaffected pending Tasks carry over; the count is capped by `max_replans`. Not in Phase A.
 9. **Job status precedence (clarifies ARCHITECTURE §4.2).** `active` if any Stage Run or Task is running or queued; otherwise `blocked` if any non-human Blocker exists; otherwise `waiting_human` if any human Blocker exists. Hitting a rework or replan cap creates a human-kind Blocker, so the Job shows `waiting_human` and never loops. Blocker kinds: human, infrastructure, recovery, policy. An unmet dependency is the Task state `pending`, not a Blocker.
 12. **ARCHITECTURE §10 `--reference` "to save disk".** A plain `--reference` makes the Factory Clone depend on the user's object store (alternates), so a `git gc` there can corrupt the clone. #4 uses `--reference --dissociate` instead (ADR-0004): it saves network transfer and time, but not disk. Proposed fix: reword §10 to "`--reference <path> --dissociate` to save network and time". Also, §5 `repositories` gains `created_at`.
+13. **ARCHITECTURE §5 `stage_runs` has no ordering column**, so a Job's position can't be read back in Recipe order. #5 adds `stage_runs.position` (ADR-0005). Proposed fix: add `position` to §5. Also, §4.2's status table has no Stage Run state that yields `rejected`. Proposed fix: say a triage rejection ends the triage Stage Run as `failed` with a `rejection` outcome, or add a `rejected` Stage Run state (to decide in #6).
 11. **ARCHITECTURE §2 layout lacks `packages/home`** (added in #2, ADR-0002: the factory-home file layout shared by the CLI and runtime). Proposed fix: add `home/  # factory home layout: token, config, runtime record` to the §2 tree.
 
 10. **RESOLVED 2026-11-08: fault origin and Blocker kind `environment` renamed to `infrastructure`** (human decision), so "environment" stays free for deploy targets (Phase F). Applied in ARCHITECTURE §4.6 and `GLOSSARY.md`.

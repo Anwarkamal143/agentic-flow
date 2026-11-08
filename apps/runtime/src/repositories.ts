@@ -5,14 +5,15 @@
  * plus lockfile names for command detection. Every Worktree later comes from the
  * Factory Clone made here, under `<workspace_root>/clones/<repo-id>`.
  */
-import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
-import { appendEvent, schema, type FactoryDb } from '@factory/db';
+import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
+  ProjectConfigSchema,
   RepositoryProfileSchema,
   type PackageManager,
   type Project,
+  type ProjectConfig,
   type RegisterRepositoryInput,
   type RegisterRepositoryResult,
   type Repository,
@@ -29,6 +30,7 @@ import {
 } from '@factory/git';
 import { and, eq, or } from 'drizzle-orm';
 import { ApiFailure } from './errors.js';
+import { newId } from './ids.js';
 
 const ACTOR = 'user:local';
 
@@ -36,6 +38,8 @@ export class RepositoryService {
   constructor(
     private readonly db: FactoryDb,
     private readonly workspaceRoot: string,
+    /** Called after every committed change, so the outbox publishes promptly. */
+    private readonly onCommit: () => void = () => undefined,
   ) {}
 
   /** A read-only look at `path`: where its repository is, its origin, and proposed commands. */
@@ -170,17 +174,44 @@ export class RepositoryService {
     return this.db.select().from(schema.projects).all().map(toProject);
   }
 
+  /**
+   * Replaces a Project's config. Jobs already created keep the Effective
+   * Configuration they froze at creation; only new Jobs see the change.
+   */
+  updateProjectConfig(id: string, config: ProjectConfig): Project {
+    const updated = this.db.transaction(
+      (tx) => {
+        const row = tx.select().from(schema.projects).where(eq(schema.projects.id, id)).get();
+        if (row === undefined) throw new ApiFailure(404, 'project_not_found', `no Project ${id}`);
+        const before = toProject(row).config;
+        tx.update(schema.projects)
+          .set({ configJson: JSON.stringify(config) })
+          .where(eq(schema.projects.id, id))
+          .run();
+        appendEvent(tx, {
+          entityKind: 'project',
+          entityId: id,
+          type: 'project.config_updated',
+          actor: ACTOR,
+          payload: { before, after: config },
+        });
+        return { ...toProject(row), config };
+      },
+      { behavior: 'immediate' },
+    );
+    this.onCommit();
+    return updated;
+  }
+
   listRepositories(): Repository[] {
     return this.db.select().from(schema.repositories).all().map(toRepository);
   }
 }
 
-type Tx = Parameters<Parameters<FactoryDb['transaction']>[0]>[0];
-
 function findOrCreateProject(tx: Tx, name: string, now: string): Project {
   const existing = tx.select().from(schema.projects).where(eq(schema.projects.name, name)).get();
   if (existing !== undefined) return toProject(existing);
-  const project: Project = { id: newId('prj'), name, createdAt: now };
+  const project: Project = { id: newId('prj'), name, config: {}, createdAt: now };
   tx.insert(schema.projects)
     .values({ id: project.id, name, configJson: '{}', createdAt: now })
     .run();
@@ -195,7 +226,12 @@ function findOrCreateProject(tx: Tx, name: string, now: string): Project {
 }
 
 function toProject(row: typeof schema.projects.$inferSelect): Project {
-  return { id: row.id, name: row.name, createdAt: row.createdAt };
+  return {
+    id: row.id,
+    name: row.name,
+    config: ProjectConfigSchema.parse(JSON.parse(row.configJson)),
+    createdAt: row.createdAt,
+  };
 }
 
 function toRepository(row: typeof schema.repositories.$inferSelect): Repository {
@@ -210,10 +246,6 @@ function toRepository(row: typeof schema.repositories.$inferSelect): Repository 
     profile: RepositoryProfileSchema.parse(JSON.parse(row.profileJson)),
     createdAt: row.createdAt,
   };
-}
-
-function newId(prefix: string): string {
-  return `${prefix}_${randomBytes(8).toString('hex')}`;
 }
 
 function resolveRemote(source: string, url: string): string {
