@@ -39,11 +39,34 @@ export function git(args: readonly string[], opts: { cwd?: string } = {}): Promi
           return;
         }
         const code = typeof err.code === 'number' ? err.code : null;
-        const detail = stderr.trim().split('\n').at(-1) ?? err.message;
-        reject(new GitError(`git ${args[0] ?? ''} failed: ${detail}`, args, code, stderr));
+        const detail = redactUrlCredentials(stderr.trim().split('\n').at(-1) ?? err.message);
+        reject(
+          new GitError(
+            `git ${args[0] ?? ''} failed: ${detail}`,
+            args.map(redactUrlCredentials),
+            code,
+            redactUrlCredentials(stderr),
+          ),
+        );
       },
     );
   });
+}
+
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi;
+
+/**
+ * True when a URL carries userinfo for a password-capable scheme
+ * (`https://token@host/…`, `https://user:pass@host/…`). `ssh://git@host` and
+ * scp-style `git@host:path` name a user, not a secret, and are not flagged.
+ */
+export function hasEmbeddedCredentials(url: string): boolean {
+  return /^(https?|ftps?):\/\/[^/@\s]+@/i.test(url);
+}
+
+/** Replaces any `scheme://userinfo@` with `scheme://***@`, so no credential is echoed. */
+export function redactUrlCredentials(text: string): string {
+  return text.replace(URL_USERINFO, '$1***@');
 }
 
 /** The working tree root containing `path`, or undefined if it is not inside a git working tree. */

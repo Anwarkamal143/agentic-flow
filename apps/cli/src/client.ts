@@ -9,6 +9,13 @@ import {
   type RuntimeRecord,
 } from '@factory/home';
 
+export interface RequestOptions {
+  /** Default 5s. */
+  timeoutMs?: number;
+  /** Sent as JSON. */
+  body?: unknown;
+}
+
 /** Thin HTTP client for the runtime API. The CLI never touches the database. */
 export class RuntimeClient {
   constructor(
@@ -19,7 +26,7 @@ export class RuntimeClient {
   async request(
     method: 'GET' | 'POST',
     path: string,
-    opts: { timeoutMs?: number; body?: unknown } = {},
+    opts: RequestOptions = {},
   ): Promise<Response> {
     const headers: Record<string, string> = { authorization: `Bearer ${this.token}` };
     if (opts.body !== undefined) headers['content-type'] = 'application/json';
@@ -32,11 +39,7 @@ export class RuntimeClient {
   }
 
   /** Sends a request and returns the JSON body; a non-2xx response throws {@link ApiRequestError}. */
-  async json<T>(
-    method: 'GET' | 'POST',
-    path: string,
-    opts: { timeoutMs?: number; body?: unknown } = {},
-  ): Promise<T> {
+  async json<T>(method: 'GET' | 'POST', path: string, opts: RequestOptions = {}): Promise<T> {
     const res = await this.request(method, path, opts);
     if (!res.ok) {
       const parsed = ApiErrorSchema.safeParse(await res.json().catch(() => undefined));

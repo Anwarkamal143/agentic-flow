@@ -2,6 +2,7 @@
  * Entities and API contracts shared by the runtime and its clients. Zod schemas
  * only: no I/O (ARCHITECTURE §2).
  */
+import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
@@ -55,7 +56,7 @@ export type Repository = z.infer<typeof RepositorySchema>;
 const absolutePath = z
   .string()
   .min(1)
-  .refine((p) => p.startsWith('/'), 'must be an absolute path');
+  .refine((p) => isAbsolute(p), 'must be an absolute path');
 
 /** `POST /v1/repositories/inspect`: read-only look at a path before registering it. */
 export const InspectRepositoryInputSchema = z.object({ path: absolutePath });

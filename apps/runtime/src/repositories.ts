@@ -19,7 +19,14 @@ import {
   type RepositoryCommands,
   type RepositoryInspection,
 } from '@factory/domain';
-import { clone, currentBranch, GitError, originUrl, workTreeRoot } from '@factory/git';
+import {
+  clone,
+  currentBranch,
+  GitError,
+  hasEmbeddedCredentials,
+  originUrl,
+  workTreeRoot,
+} from '@factory/git';
 import { and, eq, or } from 'drizzle-orm';
 import { ApiFailure } from './errors.js';
 
@@ -37,13 +44,24 @@ export class RepositoryService {
     if (source === undefined) {
       throw new ApiFailure(400, 'not_a_repository', `${path} is not inside a git working tree`);
     }
-    const remoteUrl = (await originUrl(source)) ?? null;
+    const origin = await originUrl(source);
+    if (origin !== undefined && hasEmbeddedCredentials(origin)) {
+      // The value is never stored, returned or logged (CLAUDE.md §2).
+      throw new ApiFailure(
+        400,
+        'credentials_in_url',
+        `the origin URL of ${source} has embedded credentials. Use a credential helper or SSH, then retry`,
+      );
+    }
+    // A relative origin (e.g. `../upstream.git`) is relative to the source repository.
+    const remoteUrl = origin === undefined ? null : resolveRemote(source, origin);
     return { source, name: basename(source), remoteUrl, ...detectCommands(source) };
   }
 
   async register(input: RegisterRepositoryInput): Promise<RegisterRepositoryResult> {
     const inspection = await this.inspect(input.path);
     const { source, name, remoteUrl } = inspection;
+    // Checked again inside the transaction; this early check avoids a needless clone.
     const already = this.db
       .select({ id: schema.repositories.id })
       .from(schema.repositories)
@@ -61,12 +79,18 @@ export class RepositoryService {
     const clonesDir = join(this.workspaceRoot, 'clones');
     const clonePath = join(clonesDir, id);
     mkdirSync(clonesDir, { recursive: true });
-    const cloneMethod = remoteUrl === null ? 'path' : 'origin_with_reference';
+    const cloneMethod: RegisterRepositoryResult['cloneMethod'] =
+      remoteUrl === null ? 'path' : 'origin_with_reference';
     try {
       if (remoteUrl === null) await clone({ from: source, dest: clonePath });
-      else
-        await clone({ from: resolveRemote(source, remoteUrl), dest: clonePath, reference: source });
-      const defaultBranch = await currentBranch(clonePath);
+      else await clone({ from: remoteUrl, dest: clonePath, reference: source });
+      const defaultBranch = await currentBranch(clonePath).catch((err: unknown) => {
+        throw new ApiFailure(
+          422,
+          'no_default_branch',
+          `the Factory Clone has no checked-out branch (is the source's HEAD detached?): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
       const now = new Date().toISOString();
       const profile = RepositoryProfileSchema.parse({
         version: 1,
@@ -192,7 +216,6 @@ function newId(prefix: string): string {
   return `${prefix}_${randomBytes(8).toString('hex')}`;
 }
 
-/** A relative `origin` (e.g. `../upstream.git`) is relative to the source repository. */
 function resolveRemote(source: string, url: string): string {
   const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(url) || /^[^/]+@[^/:]+:/.test(url);
   return isUrl || isAbsolute(url) ? url : resolve(source, url);

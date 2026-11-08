@@ -101,6 +101,36 @@ describe('factory repo add', () => {
     }
   });
 
+  it('refuses an origin URL with embedded credentials, never showing them', async () => {
+    const rt = await startRuntime();
+    const repo = tinyTsRepo();
+    const token = 'ghp_DUMMY' + 'z'.repeat(30);
+    git(repo, ['remote', 'add', 'origin', `https://${token}@example.invalid/acme/tiny-ts.git`]);
+
+    const res = await rt.home.cli(['repo', 'add', repo, '--yes']);
+
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain('embedded credentials');
+    expect(res.stdout + res.stderr).not.toContain(token);
+    expect(await (await rt.request('/v1/repositories')).json()).toEqual([]);
+    expect(rt.output()).not.toContain(token);
+  });
+
+  it('saves a relative origin as the absolute location it was cloned from', async () => {
+    const rt = await startRuntime();
+    const repo = tinyTsRepo();
+    const origin = join(dirname(repo), 'upstream.git');
+    git(dirname(repo), ['clone', '--quiet', '--bare', repo, origin]);
+    git(repo, ['remote', 'add', 'origin', '../upstream.git']);
+
+    const res = await rt.home.cli(['repo', 'add', repo, '--yes']);
+
+    expect(res.code, res.stderr).toBe(0);
+    const [registered] = (await (await rt.request('/v1/repositories')).json()) as [RepositoryBody];
+    expect(registered.remoteUrl).toBe(origin);
+    expect(git(registered.clonePath, ['remote', 'get-url', 'origin']).trim()).toBe(origin);
+  });
+
   it('saves nothing when the detected commands are not confirmed', async () => {
     const rt = await startRuntime();
     const repo = tinyTsRepo();
