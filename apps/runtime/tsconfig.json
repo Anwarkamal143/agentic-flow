@@ -1,6 +1,22 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
   "include": ["src"],
-  "references": [{ "path": "../../packages/db" }, { "path": "../../packages/home" }]
+  "references": [
+    {
+      "path": "../../packages/db"
+    },
+    {
+      "path": "../../packages/home"
+    },
+    {
+      "path": "../../packages/domain"
+    },
+    {
+      "path": "../../packages/git"
+    }
+  ]
 }

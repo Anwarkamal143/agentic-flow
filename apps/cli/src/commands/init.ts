@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { createInterface } from 'node:readline';
 import {
   DEFAULT_PORT,
   createToken,
@@ -10,6 +9,7 @@ import {
   resolveHome,
   writeConfig,
 } from '@factory/home';
+import { ask } from '../prompt.js';
 
 export async function init(opts: { workspaceRoot: string | undefined }): Promise<number> {
   const home = resolveHome();
@@ -51,17 +51,4 @@ export async function init(opts: { workspaceRoot: string | undefined }): Promise
       `Next: factory start\n`,
   );
   return 0;
-}
-
-/** Reads one line from stdin. Resolves undefined if stdin ends first. */
-async function ask(prompt: string): Promise<string | undefined> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: false });
-  process.stdout.write(prompt);
-  try {
-    for await (const line of rl) return line;
-    return undefined;
-  } finally {
-    rl.close();
-    process.stdout.write('\n');
-  }
 }

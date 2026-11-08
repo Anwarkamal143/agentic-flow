@@ -1,6 +1,14 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { Hono } from 'hono';
+import {
+  InspectRepositoryInputSchema,
+  RegisterRepositoryInputSchema,
+  type ApiError,
+} from '@factory/domain';
+import { Hono, type Context } from 'hono';
+import type { z } from 'zod';
 import type { DoctorReport } from './doctor.js';
+import { ApiFailure } from './errors.js';
+import type { RepositoryService } from './repositories.js';
 
 export interface RuntimeStatus {
   state: 'running' | 'stopping';
@@ -20,6 +28,7 @@ export interface AppDeps {
   status(): RuntimeStatus;
   /** Runs the environment checks (tools, credential presence). */
   doctor(): Promise<DoctorReport>;
+  repositories: RepositoryService;
   /** Begins a graceful shutdown after the response is sent. */
   requestShutdown(): void;
 }
@@ -44,6 +53,17 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get('/v1/doctor', async (c) => c.json(await deps.doctor()));
 
+  app.get('/v1/projects', (c) => c.json(deps.repositories.listProjects()));
+  app.get('/v1/repositories', (c) => c.json(deps.repositories.listRepositories()));
+  app.post('/v1/repositories/inspect', async (c) => {
+    const input = await parseBody(c, InspectRepositoryInputSchema);
+    return c.json(await deps.repositories.inspect(input.path));
+  });
+  app.post('/v1/repositories', async (c) => {
+    const input = await parseBody(c, RegisterRepositoryInputSchema);
+    return c.json(await deps.repositories.register(input), 201);
+  });
+
   app.post('/v1/shutdown', (c) => {
     setImmediate(() => {
       deps.requestShutdown();
@@ -51,8 +71,30 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ state: 'stopping' }, 202);
   });
 
-  app.notFound((c) => c.json({ error: 'not_found' }, 404));
+  app.notFound((c) => c.json({ error: 'not_found' } satisfies ApiError, 404));
+  app.onError((err, c) => {
+    if (err instanceof ApiFailure) {
+      return c.json({ error: err.code, message: err.message } satisfies ApiError, err.status);
+    }
+    process.stderr.write(
+      `factory runtime: ${c.req.method} ${c.req.path} failed: ${err.stack ?? err.message}\n`,
+    );
+    return c.json({ error: 'internal' } satisfies ApiError, 500);
+  });
   return app;
+}
+
+/** Parses a JSON request body against a schema, failing with 400 `invalid_request`. */
+async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T>> {
+  const body: unknown = await c.req.json().catch(() => undefined);
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    const message = parsed.error.issues
+      .map((i) => `${i.path.join('.') || '(body)'}: ${i.message}`)
+      .join('; ');
+    throw new ApiFailure(400, 'invalid_request', message);
+  }
+  return parsed.data;
 }
 
 /** Fixed-length digests so the comparison is constant-time regardless of input length. */

@@ -13,7 +13,8 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:e2e": "vitest run tests/scenarios",
-    "factory": "node apps/cli/dist/main.js"
+    "factory": "node apps/cli/dist/main.js",
+    "fixtures": "node fixtures/create-tiny-ts.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

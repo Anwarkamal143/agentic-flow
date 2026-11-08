@@ -1,3 +1,4 @@
+import { ApiErrorSchema, type ApiError } from '@factory/domain';
 import {
   isProcessAlive,
   readRuntimeRecord,
@@ -8,6 +9,13 @@ import {
   type RuntimeRecord,
 } from '@factory/home';
 
+export interface RequestOptions {
+  /** Default 5s. */
+  timeoutMs?: number;
+  /** Sent as JSON. */
+  body?: unknown;
+}
+
 /** Thin HTTP client for the runtime API. The CLI never touches the database. */
 export class RuntimeClient {
   constructor(
@@ -15,18 +23,44 @@ export class RuntimeClient {
     private readonly token: string,
   ) {}
 
-  async request(method: 'GET' | 'POST', path: string, timeoutMs = 5_000): Promise<Response> {
+  async request(
+    method: 'GET' | 'POST',
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<Response> {
+    const headers: Record<string, string> = { authorization: `Bearer ${this.token}` };
+    if (opts.body !== undefined) headers['content-type'] = 'application/json';
     return fetch(this.url + path, {
       method,
-      headers: { authorization: `Bearer ${this.token}` },
-      signal: AbortSignal.timeout(timeoutMs),
+      headers,
+      ...(opts.body === undefined ? {} : { body: JSON.stringify(opts.body) }),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? 5_000),
     });
   }
 
-  async json<T>(method: 'GET' | 'POST', path: string, timeoutMs?: number): Promise<T> {
-    const res = await this.request(method, path, timeoutMs);
-    if (!res.ok) throw new Error(`${method} ${path} failed: HTTP ${String(res.status)}`);
+  /** Sends a request and returns the JSON body; a non-2xx response throws {@link ApiRequestError}. */
+  async json<T>(method: 'GET' | 'POST', path: string, opts: RequestOptions = {}): Promise<T> {
+    const res = await this.request(method, path, opts);
+    if (!res.ok) {
+      const parsed = ApiErrorSchema.safeParse(await res.json().catch(() => undefined));
+      throw new ApiRequestError(method, path, res.status, parsed.success ? parsed.data : undefined);
+    }
     return (await res.json()) as T;
+  }
+}
+
+export class ApiRequestError extends Error {
+  constructor(
+    method: string,
+    path: string,
+    readonly status: number,
+    readonly body: ApiError | undefined,
+  ) {
+    super(
+      body?.message ??
+        `${method} ${path} failed: HTTP ${String(status)}${body ? ` (${body.error})` : ''}`,
+    );
+    this.name = 'ApiRequestError';
   }
 }
 

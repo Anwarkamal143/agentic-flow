@@ -3,7 +3,7 @@
  * process against a temporary factory home and talk to it only over HTTP (and,
  * later, SSE). Never import runtime internals or open the database here.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -17,7 +17,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { onTestFinished } from 'vitest';
-import { cliEntry, runtimeEntry } from './paths.js';
+import { cliEntry, runtimeEntry, tinyTsScript } from './paths.js';
 
 export interface CliResult {
   code: number | null;
@@ -209,4 +209,32 @@ export function fakeBin(tools: Record<string, string>): string {
 /** A fake tool body that prints `output` for `--version` and fails otherwise. */
 export function versionTool(output: string, otherwise = 'exit 1'): string {
   return `if [ "$1" = "--version" ]; then\n  printf '%s\\n' '${output}'\n  exit 0\nfi\n${otherwise}`;
+}
+
+/**
+ * A fresh `tiny-ts` fixture Repository, made by the fixture generator script
+ * (never a committed nested repo). Returns the path of its checkout.
+ */
+export function tinyTsRepo(): string {
+  const dir = join(tempDir('factory-repo-'), 'tiny-ts');
+  execFileSync(process.execPath, [tinyTsScript, dir], { stdio: 'pipe' });
+  return dir;
+}
+
+/** Runs git with no user or system config, so tests never depend on the machine's setup. */
+export function git(cwd: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      PATH: process.env['PATH'],
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_OPTIONAL_LOCKS: '0',
+      GIT_AUTHOR_NAME: 'Test',
+      GIT_AUTHOR_EMAIL: 'test@example.invalid',
+      GIT_COMMITTER_NAME: 'Test',
+      GIT_COMMITTER_EMAIL: 'test@example.invalid',
+    },
+  });
 }

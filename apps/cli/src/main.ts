@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import { doctor } from './commands/doctor.js';
 import { init } from './commands/init.js';
+import { repoAdd } from './commands/repo.js';
 import { start, status, stop } from './commands/lifecycle.js';
 
 const USAGE = `Usage: factory <command> [options]
@@ -12,6 +13,10 @@ Commands:
   status [--json]                 Report whether the runtime is running
   stop                            Stop the runtime cleanly
   doctor [--json]                 Check tools and credential presence (via the runtime)
+  repo add <path> [--project <name>] [--test-command <cmd>]
+           [--typecheck-command <cmd>] [--yes]
+                                  Register a Repository: make its Factory Clone and save
+                                  its confirmed commands (your checkout is never modified)
 
 Environment:
   FACTORY_HOME   factory home directory (default ~/.factory)
@@ -41,6 +46,35 @@ async function main(argv: string[]): Promise<number> {
     case 'doctor': {
       const { values } = parseArgs({ args: rest, options: { json: { type: 'boolean' } } });
       return doctor({ json: values.json === true });
+    }
+    case 'repo': {
+      const [sub, ...subArgs] = rest;
+      if (sub !== 'add') {
+        process.stderr.write(`factory: unknown repo command '${sub ?? ''}'\n\n${USAGE}`);
+        return 2;
+      }
+      const { values, positionals } = parseArgs({
+        args: subArgs,
+        allowPositionals: true,
+        options: {
+          project: { type: 'string' },
+          'test-command': { type: 'string' },
+          'typecheck-command': { type: 'string' },
+          yes: { type: 'boolean', short: 'y' },
+        },
+      });
+      const [path, ...extra] = positionals;
+      if (path === undefined || extra.length > 0) {
+        process.stderr.write(`factory: repo add takes exactly one path\n\n${USAGE}`);
+        return 2;
+      }
+      return repoAdd({
+        path,
+        project: values.project,
+        testCommand: values['test-command'],
+        typecheckCommand: values['typecheck-command'],
+        yes: values.yes === true,
+      });
     }
     case undefined:
     case 'help':

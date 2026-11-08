@@ -22,6 +22,7 @@ import {
 } from '@factory/home';
 import { createApp, type RuntimeStatus } from './app.js';
 import { runDoctor } from './doctor.js';
+import { RepositoryService } from './repositories.js';
 
 const ACTOR = 'system:runtime';
 
@@ -74,6 +75,7 @@ const app = createApp({
     database: { journalMode: database.journalMode, migrations: database.appliedMigrations },
   }),
   doctor: () => runDoctor(process.env),
+  repositories: new RepositoryService(database.db, config.workspaceRoot),
   requestShutdown: () => {
     shutdown('api');
   },
