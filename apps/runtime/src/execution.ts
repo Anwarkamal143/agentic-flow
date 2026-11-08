@@ -9,7 +9,7 @@
  * verification command is run again by the factory, its exit code recorded as
  * Evidence tied to `(head_sha, base_sha)`.
  */
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
@@ -30,7 +30,6 @@ import {
   type TaskPacket,
   type TaskResult,
   type Usage,
-  type WorktreeState,
 } from '@factory/domain';
 import {
   addWorktree,
@@ -38,7 +37,6 @@ import {
   commitAll,
   commitsBetween,
   fetchRemote,
-  infoExcludePath,
   removeWorktree,
   resolveCommit,
   uncommittedPaths,
@@ -55,16 +53,27 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { ArtifactStore, StoredContent } from './artifacts.js';
 import { criteriaCoveredBy } from './criteria.js';
 import { buildDeliveryReport } from './delivery.js';
-import { changeJob, stepTask, type JobState, type StageRunStepper } from './engine.js';
+import {
+  changeJob,
+  stepAttempt,
+  stepTask,
+  stepWorktree,
+  type JobState,
+  type StageRunStepper,
+} from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
+import {
+  allocatePortBlock,
+  excludeResultFile,
+  releaseAttemptTokens,
+  requireWorktree,
+  taskWorkspace,
+} from './workspace.js';
 
 const ACTOR = 'system:scheduler';
 const POLL_MS = 1_000;
-const PORT_BLOCK_START = 42_000;
-const PORT_BLOCK_SIZE = 10;
-const PORT_BLOCKS = 1_000;
 const MAX_TURNS = 50;
 /** Default wall-clock limit of one developer Harness Run. */
 const DEFAULT_HARNESS_WALL_CLOCK_MS = 30 * 60_000;
@@ -102,7 +111,6 @@ export interface TaskSchedulerOptions {
 }
 
 type TaskRow = typeof schema.tasks.$inferSelect;
-type WorktreeRow = typeof schema.worktrees.$inferSelect;
 
 /** What the factory found in the Worktree after the Harness Run. */
 interface Inspection {
@@ -299,8 +307,13 @@ export class TaskScheduler {
       (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
     if (baseSha === undefined)
       throw new Error(`the Factory Clone has no ${repo.defaultBranch} to start from`);
-    const branch = `factory/${job.id}/${task.id}-${task.key}`;
-    const path = join(this.opts.workspaceRoot, repo.id, job.id, task.key);
+    const { path, branch } = taskWorkspace({
+      workspaceRoot: this.opts.workspaceRoot,
+      repositoryId: repo.id,
+      jobId: job.id,
+      taskId: task.id,
+      taskKey: task.key,
+    });
     const worktreeId = newId('wt');
     const attemptId = newId('att');
     const n = 1;
@@ -630,7 +643,7 @@ export class TaskScheduler {
 
   private toVerifying(jobId: string, taskId: string, attemptId: string): void {
     changeJob(this.opts.db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx) => {
-      stepAttempt(tx, jobId, attemptId, 'running', { state: 'verifying' });
+      stepAttempt(tx, { jobId, actor: ACTOR }, attemptId, 'running', { state: 'verifying' });
       stepTask(tx, { jobId, actor: ACTOR }, requireTask(tx, taskId, 'running'), 'verifying', {
         payload: { attemptId },
       });
@@ -776,7 +789,7 @@ export class TaskScheduler {
         const now = new Date().toISOString();
         stepAttempt(
           tx,
-          jobId,
+          { jobId, actor: ACTOR },
           attemptId,
           'verifying',
           {
@@ -806,7 +819,7 @@ export class TaskScheduler {
         );
         const worktree = requireWorktree(tx, input.worktreeId);
         releaseAttemptTokens(tx, taskId, worktree.portBase);
-        stepWorktree(tx, jobId, worktree, 'active', 'preserved');
+        stepWorktree(tx, { jobId, actor: ACTOR }, worktree, 'active', 'preserved');
         settleExecution(tx, state, step);
       },
     );
@@ -836,7 +849,7 @@ export class TaskScheduler {
         if (attempt !== undefined) {
           stepAttempt(
             tx,
-            jobId,
+            { jobId, actor: ACTOR },
             attempt.id,
             AttemptStateSchema.parse(attempt.state),
             {
@@ -849,7 +862,8 @@ export class TaskScheduler {
           );
           const worktree = requireWorktree(tx, attempt.worktreeId);
           portBase = worktree.portBase;
-          if (worktree.state === 'active') stepWorktree(tx, jobId, worktree, 'active', 'preserved');
+          if (worktree.state === 'active')
+            stepWorktree(tx, { jobId, actor: ACTOR }, worktree, 'active', 'preserved');
         }
         if (['claimed', 'running', 'verifying'].includes(task.state)) {
           stepTask(tx, { jobId, actor: ACTOR }, task, 'failed', {
@@ -926,7 +940,13 @@ export class TaskScheduler {
         continue;
       }
       changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx) => {
-        stepWorktree(tx, jobId, requireWorktree(tx, worktree.id), 'preserved', 'removed');
+        stepWorktree(
+          tx,
+          { jobId, actor: ACTOR },
+          requireWorktree(tx, worktree.id),
+          'preserved',
+          'removed',
+        );
       });
       this.opts.onCommit();
     }
@@ -1109,16 +1129,6 @@ function describeExit(result: HarnessRawResult | undefined): string {
   return 'was cancelled';
 }
 
-/** Keeps the Task Result file out of every commit, via the Factory Clone's `info/exclude`. */
-async function excludeResultFile(clone: string): Promise<void> {
-  const exclude = await infoExcludePath(clone);
-  const line = `/${dirname(RESULT_FILE)}/`;
-  const current = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
-  if (current.split('\n').includes(line)) return;
-  mkdirSync(dirname(exclude), { recursive: true });
-  appendFileSync(exclude, `${current === '' || current.endsWith('\n') ? '' : '\n'}${line}\n`);
-}
-
 // ---- rows and transitions -------------------------------------------------------------
 
 function requireTask(db: FactoryDb | Tx, id: string, expected: string): TaskRow {
@@ -1129,122 +1139,11 @@ function requireTask(db: FactoryDb | Tx, id: string, expected: string): TaskRow 
   return task;
 }
 
-function requireWorktree(tx: Tx, id: string): WorktreeRow {
-  const row = tx.select().from(schema.worktrees).where(eq(schema.worktrees.id, id)).get();
-  if (row === undefined) throw new Error(`no Worktree ${id}`);
-  return row;
-}
-
 function requireStageRun(state: JobState, id: string, expected: string) {
   const run = state.stageRuns.find((r) => r.id === id);
   if (run?.state !== expected)
     throw new Error(`Stage Run ${id} is ${String(run?.state)}, not ${expected}`);
   return run;
-}
-
-/** Updates an Attempt guarded by its state and version, with its `attempt.<state>` event. */
-function stepAttempt(
-  tx: Tx,
-  jobId: string,
-  id: string,
-  from: AttemptState,
-  values: Partial<typeof schema.attempts.$inferInsert> & { state: AttemptState },
-  payload: Record<string, unknown> = {},
-): void {
-  const row = tx.select().from(schema.attempts).where(eq(schema.attempts.id, id)).get();
-  if (row?.state !== from) throw new Error(`Attempt ${id} is ${String(row?.state)}, not ${from}`);
-  const updated = tx
-    .update(schema.attempts)
-    .set({ ...values, version: sql`${schema.attempts.version} + 1` })
-    .where(and(eq(schema.attempts.id, id), eq(schema.attempts.version, row.version)))
-    .run();
-  if (updated.changes !== 1)
-    throw new Error(`Attempt ${id} changed under a versioned Job operation`);
-  appendEvent(tx, {
-    entityKind: 'attempt',
-    entityId: id,
-    jobId,
-    type: `attempt.${values.state}`,
-    actor: ACTOR,
-    payload: { taskId: row.taskId, n: row.n, from, to: values.state, ...payload },
-  });
-}
-
-function stepWorktree(
-  tx: Tx,
-  jobId: string,
-  row: WorktreeRow,
-  from: WorktreeState,
-  to: WorktreeState,
-): void {
-  const updated = tx
-    .update(schema.worktrees)
-    .set({ state: to })
-    .where(and(eq(schema.worktrees.id, row.id), eq(schema.worktrees.state, from)))
-    .run();
-  if (updated.changes !== 1) throw new Error(`Worktree ${row.id} is ${row.state}, not ${from}`);
-  appendEvent(tx, {
-    entityKind: 'worktree',
-    entityId: row.id,
-    jobId,
-    type: `worktree.${to}`,
-    actor: ACTOR,
-    payload: { taskId: row.taskId, from, to, path: row.path, branch: row.branch },
-  });
-}
-
-/**
- * Leases the lowest free block of ports for one Attempt (its Harness Run and
- * verification commands). The Worktree records the base; the lease itself is
- * an Attempt token, released with the Task lease when the Attempt ends.
- */
-function allocatePortBlock(tx: Tx, lease: { holder: string; expiresAt: string }): number {
-  const used = new Set(
-    tx
-      .select({ id: schema.leases.resourceId })
-      .from(schema.leases)
-      .where(eq(schema.leases.resourceKind, 'port_block'))
-      .all()
-      .map((l) => Number(l.id)),
-  );
-  for (let i = 0; i < PORT_BLOCKS; i++) {
-    const base = PORT_BLOCK_START + i * PORT_BLOCK_SIZE;
-    if (used.has(base)) continue;
-    const now = new Date().toISOString();
-    tx.insert(schema.leases)
-      .values({
-        resourceKind: 'port_block',
-        resourceId: String(base),
-        holder: lease.holder,
-        leaseId: newId('lse'),
-        acquiredAt: now,
-        heartbeatAt: now,
-        expiresAt: lease.expiresAt,
-      })
-      .run();
-    return base;
-  }
-  throw new Error('no free port block');
-}
-
-/**
- * Releases an Attempt's tokens: its Task lease and, when it got one, its port
- * block (ARCHITECTURE §12 step 5). Call in the transaction that ends the Attempt.
- */
-function releaseAttemptTokens(tx: Tx, taskId: string, portBase: number | undefined): void {
-  tx.delete(schema.leases)
-    .where(and(eq(schema.leases.resourceKind, 'task'), eq(schema.leases.resourceId, taskId)))
-    .run();
-  if (portBase !== undefined) {
-    tx.delete(schema.leases)
-      .where(
-        and(
-          eq(schema.leases.resourceKind, 'port_block'),
-          eq(schema.leases.resourceId, String(portBase)),
-        ),
-      )
-      .run();
-  }
 }
 
 /**
