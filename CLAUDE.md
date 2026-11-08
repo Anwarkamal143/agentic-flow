@@ -73,7 +73,7 @@ pnpm dev           # TODO(Phase A) — runtime + dashboard (dashboard not built 
 
 Scenario tests spawn the built runtime and CLI as child processes against a temporary `FACTORY_HOME`
 (helper: `tests/support/factory.ts`). They never import runtime internals or open the database.
-Unit tests (`tests/unit/`) cover pure `@factory/domain` rules only, such as approval and review checks.
+Unit tests (`tests/unit/`) cover pure `@factory/domain` rules only, such as the approval rule and the review validation rules.
 
 ## 7. Questions for the human, before Phase A
 

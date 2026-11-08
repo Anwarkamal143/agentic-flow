@@ -272,7 +272,7 @@ describe('The independent review Gate', () => {
     expect(review.findings.map((f) => [f.severity, f.blocking])).toEqual([['high', true]]);
   });
 
-  it('re-prompts an invalid review once, in a new Session, then fails the Attempt', async () => {
+  it('re-prompts an invalid review once, in a new Session, then fails with invalid_output', async () => {
     const valid = validReviewResponse();
     const reprompted = await runWith(
       scriptWith({}, {}, { 'add-sum': [{ raw: 'looks good to me' }, valid] }),
@@ -294,11 +294,21 @@ describe('The independent review Gate', () => {
 
     expect(twiceInvalid.job.status).toBe('failed');
     const [attempt] = (await attemptsOf(twiceInvalid.rt, twiceInvalid.job.id)) as [AttemptBody];
-    expect(attempt).toMatchObject({ state: 'failed', exitReason: 'review_failed' });
-    expect(attempt.exitDetail).toMatch(/invalid/);
+    expect(attempt).toMatchObject({ state: 'failed', exitReason: 'invalid_output' });
+    expect(attempt.exitDetail).toMatch(/review was invalid after 1 re-prompt/);
     expect(
       await reviewsOf(twiceInvalid.rt, twiceInvalid.job.id),
       'nothing invalid is stored',
     ).toEqual([]);
+  });
+
+  it('fails the Attempt with review_failed when the reviewer Harness Run crashes', async () => {
+    const { rt, job } = await runWith(scriptWith({}, {}, { 'add-sum': [{ exitCode: 2 }] }));
+
+    expect(job.status).toBe('failed');
+    const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody];
+    expect(attempt).toMatchObject({ state: 'failed', exitReason: 'review_failed' });
+    expect(attempt.exitDetail).toMatch(/reviewer Harness Run exited with code 2/);
+    expect(await reviewsOf(rt, job.id)).toEqual([]);
   });
 });

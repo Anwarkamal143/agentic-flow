@@ -5,6 +5,7 @@
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   AttemptSchema,
+  evidenceSource,
   ReviewSchema,
   type Review,
   WorktreeSchema,
@@ -308,7 +309,7 @@ export class JobService {
             id: e.id,
             attemptId: e.attemptId,
             kind: e.kind,
-            source: e.reviewId === null ? 'commands' : 'review',
+            source: evidenceSource(e),
             reviewId: e.reviewId,
             verificationKey: own.find((r) => r.id === e.verificationRunId)?.commandKey ?? null,
             verificationRunId: e.verificationRunId,

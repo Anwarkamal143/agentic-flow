@@ -1,7 +1,7 @@
 /**
- * Workspaces (ARCHITECTURE §10): where a Task's Worktree lives in the Factory
- * Clone, the block of ports an Attempt leases, and the Task Result file kept
- * out of every commit.
+ * Worktrees (ARCHITECTURE §10): where a Task's Worktree and Task Branch live
+ * in the Factory Clone, the block of ports an Attempt leases, and the Task
+ * Result file kept out of every commit.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -18,7 +18,7 @@ const PORT_BLOCKS = 1_000;
 export type WorktreeRow = typeof schema.worktrees.$inferSelect;
 
 /** A Task's Worktree path and Task Branch (ADR-0007). */
-export function taskWorkspace(input: {
+export function taskWorktree(input: {
   workspaceRoot: string;
   repositoryId: string;
   jobId: string;

@@ -18,7 +18,7 @@ import {
   type SpecificationProposal,
 } from '@factory/domain';
 import { changedPaths, diffBetween } from '@factory/git';
-import type { HarnessRawResult } from '@factory/harness';
+import { describeHarnessExit, type HarnessRawResult } from '@factory/harness';
 import { z } from 'zod';
 
 export const REVIEW_TEMPLATE_ID = 'review-packet@1';
@@ -139,13 +139,10 @@ export function evaluateReview(
   }
   const { exit } = result;
   if (exit.kind !== 'exited' || exit.code !== 0) {
-    const how =
-      exit.kind === 'exited'
-        ? `exited with code ${String(exit.code)}`
-        : exit.kind === 'timed_out'
-          ? `timed out after ${String(exit.afterMs)} ms`
-          : 'was cancelled';
-    return { kind: 'harness_failed', message: `the reviewer Harness Run ${how}` };
+    return {
+      kind: 'harness_failed',
+      message: `the reviewer Harness Run ${describeHarnessExit(exit)}`,
+    };
   }
   let json: unknown;
   try {

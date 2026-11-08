@@ -7,6 +7,7 @@ import { schema, type FactoryDb } from '@factory/db';
 import {
   combineVerdicts,
   DeliveryReportSchema,
+  evidenceSource,
   isCurrent,
   EvidenceVerdictSchema,
   RuleIssueSchema,
@@ -145,12 +146,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
           detail:
             current.length === 0
               ? 'no Evidence'
-              : current
-                  .map(
-                    (e) =>
-                      `${e.reviewId === null ? 'commands' : 'review'}: ${e.verdict} (${e.detail})`,
-                  )
-                  .join('; '),
+              : current.map((e) => `${evidenceSource(e)}: ${e.verdict} (${e.detail})`).join('; '),
         };
       }),
       review: {

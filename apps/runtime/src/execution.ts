@@ -16,6 +16,8 @@ import {
   AttemptStateSchema,
   criterionVerdict,
   decideApproval,
+  evidenceSource,
+  type GateRef,
   EvidenceVerdictSchema,
   isBlocking,
   isCurrent,
@@ -49,6 +51,7 @@ import {
   uncommittedPaths,
 } from '@factory/git';
 import {
+  describeHarnessExit,
   guardrailEnv,
   spawnGuarded,
   type AgentHarness,
@@ -84,8 +87,8 @@ import {
   excludeResultFile,
   releaseAttemptTokens,
   requireWorktree,
-  taskWorkspace,
-} from './workspace.js';
+  taskWorktree,
+} from './worktree.js';
 
 const ACTOR = 'system:scheduler';
 const POLL_MS = 1_000;
@@ -346,7 +349,7 @@ export class TaskScheduler {
       (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
     if (baseSha === undefined)
       throw new Error(`the Factory Clone has no ${repo.defaultBranch} to start from`);
-    const { path, branch } = taskWorkspace({
+    const { path, branch } = taskWorktree({
       workspaceRoot: this.opts.workspaceRoot,
       repositoryId: repo.id,
       jobId: job.id,
@@ -486,7 +489,7 @@ export class TaskScheduler {
       outcome = {
         state: 'failed',
         exitReason: 'harness_failed',
-        detail: `the ${harness.id} Harness Run ${describeExit(result)}`,
+        detail: `the ${harness.id} Harness Run ${result === undefined ? 'did not start' : describeHarnessExit(result.exit)}`,
       };
     } else if (inspection.result.kind === 'missing') {
       outcome = {
@@ -557,9 +560,7 @@ export class TaskScheduler {
           usage,
           reviewed,
           current: { headSha: (await resolveCommit(path, 'HEAD')) ?? '(none)', baseSha },
-          reviewerChanges: await worktreeProblems(path, inspection.headSha, 'the reviewer', {
-            headToo: false,
-          }),
+          reviewerChanges: await worktreeProblems(path, inspection.headSha, 'reviewer'),
         });
         return;
       }
@@ -844,7 +845,7 @@ export class TaskScheduler {
         { jobId, actor: ACTOR },
         attemptId,
         'verifying',
-        { state: 'in_review', ...attemptFindings(inspection, input.usage) },
+        { state: 'in_review', ...inspectionColumns(inspection, input.usage) },
         { headSha: inspection.headSha, baseSha: input.baseSha },
       );
       stepTask(tx, { jobId, actor: ACTOR }, requireTask(tx, taskId, 'verifying'), 'in_review', {
@@ -869,7 +870,7 @@ export class TaskScheduler {
       attemptId: string;
       path: string;
       env: Record<string, string>;
-      at: { headSha: string; baseSha: string };
+      at: GateRef;
       runs: readonly VerificationRunRecord[];
     },
   ): Promise<Reviewed | undefined> {
@@ -935,12 +936,13 @@ export class TaskScheduler {
         };
       }
       if (evaluation.kind === 'harness_failed') {
-        return { kind: 'failed', detail: evaluation.message };
+        return { kind: 'failed', exitReason: 'review_failed', detail: evaluation.message };
       }
       rejected = evaluation.issues;
     }
     return {
       kind: 'failed',
+      exitReason: 'invalid_output',
       detail: `the review was invalid after ${String(REVIEW_RUNS - 1)} re-prompt: ${(rejected ?? []).map((i) => `[${i.rule}] ${i.message}`).join('; ')}`,
     };
   }
@@ -949,7 +951,9 @@ export class TaskScheduler {
    * Records a valid review (its Artifact, its row, its Findings and its
    * criterion verdicts as Evidence), then decides approval with the full rule
    * against the Task Branch head as git reads it now, and ends the Attempt. One
-   * transaction. An invalid review is not stored; the Attempt fails `review_failed`.
+   * transaction. No review is stored without a valid proposal: the Attempt fails
+   * `invalid_output` (still invalid after the re-prompt) or `review_failed` (the
+   * reviewer Run crashed, timed out or did not start).
    */
   private finishReview(input: {
     jobId: string;
@@ -959,11 +963,11 @@ export class TaskScheduler {
     inspection: Inspection;
     usage: Usage | null;
     reviewed: Reviewed;
-    current: { headSha: string; baseSha: string };
+    current: GateRef;
     reviewerChanges: string[];
   }): void {
     const { jobId, taskId, attemptId, reviewed } = input;
-    const reviewed_head = input.inspection.headSha;
+    const reviewedHead = input.inspection.headSha;
     const base = input.current.baseSha;
     const content =
       reviewed.kind === 'valid' ? this.opts.artifacts.writeContent(reviewed.value) : undefined;
@@ -994,7 +998,7 @@ export class TaskScheduler {
               promptTemplateId: REVIEW_TEMPLATE_ID,
               promptTemplateHash: REVIEW_TEMPLATE_HASH,
               packetJson: JSON.stringify(reviewed.packet),
-              headSha: reviewed_head,
+              headSha: reviewedHead,
               baseSha: base,
               outcome: value.outcome,
               summary: value.summary,
@@ -1018,7 +1022,7 @@ export class TaskScheduler {
                 reviewId,
                 verdict: verdict?.verdict ?? 'not_tested',
                 detail: verdict?.detail ?? 'the review gave no verdict',
-                headSha: reviewed_head,
+                headSha: reviewedHead,
                 baseSha: base,
                 artifactId: artifact.id,
               })
@@ -1034,7 +1038,7 @@ export class TaskScheduler {
               taskId,
               attemptId,
               outcome: value.outcome,
-              headSha: reviewed_head,
+              headSha: reviewedHead,
               baseSha: base,
               findings: value.findings.length,
               blocking: value.findings.filter(isBlocking).length,
@@ -1043,16 +1047,22 @@ export class TaskScheduler {
           review = {
             outcome: value.outcome,
             blockingFindings: value.findings.filter(isBlocking).length,
-            headSha: reviewed_head,
+            headSha: reviewedHead,
             baseSha: base,
           };
         }
         let outcome: Outcome;
         if (reviewed.kind === 'failed') {
-          outcome = { state: 'failed', exitReason: 'review_failed', detail: reviewed.detail };
+          outcome = { state: 'failed', exitReason: reviewed.exitReason, detail: reviewed.detail };
         } else {
           const decision = decideApproval(
-            approvalInput(tx, attemptId, input.current, review, definition, jobId),
+            approvalInput(tx, {
+              jobId,
+              attemptId,
+              definition,
+              current: input.current,
+              review,
+            }),
           );
           const problems = [...decision.problems, ...input.reviewerChanges];
           outcome =
@@ -1428,7 +1438,7 @@ type Reviewed =
       sessionRef: string | null;
       harnessId: string;
     }
-  | { kind: 'failed'; detail: string };
+  | { kind: 'failed'; exitReason: 'review_failed' | 'invalid_output'; detail: string };
 
 function usageOf(result: HarnessRawResult | undefined): Usage {
   return result === undefined
@@ -1437,7 +1447,7 @@ function usageOf(result: HarnessRawResult | undefined): Usage {
 }
 
 /** What the factory read from git about an Attempt, as Attempt columns. */
-function attemptFindings(inspection: Inspection, usage: Usage | null) {
+function inspectionColumns(inspection: Inspection, usage: Usage | null) {
   return {
     headSha: inspection.headSha,
     commitsJson: JSON.stringify(inspection.commits),
@@ -1456,18 +1466,22 @@ function attemptFindings(inspection: Inspection, usage: Usage | null) {
 async function worktreeProblems(
   path: string,
   head: string,
-  who: string,
-  opts: { headToo: boolean } = { headToo: true },
+  after: 'verification' | 'reviewer',
 ): Promise<string[]> {
   const problems: string[] = [];
-  if (opts.headToo && (await resolveCommit(path, 'HEAD')) !== head) {
-    problems.push(`HEAD moved during ${who}, so the Evidence is stale`);
+  if (after === 'verification' && (await resolveCommit(path, 'HEAD')) !== head) {
+    problems.push('HEAD moved during verification, so the Evidence is stale');
   }
   const changed = await uncommittedPaths(path);
   if (changed.length > 0) {
-    // The Gates didn't see exactly head_sha, so their results can't be tied to it.
+    // The Gates didn't see exactly head_sha, so their Evidence can't be tied to it.
+    const who = after === 'verification' ? 'verification' : 'the reviewer';
+    const fix =
+      after === 'verification'
+        ? 'make the commands leave no untracked or modified files (or ignore them)'
+        : 'the reviewer must change nothing';
     problems.push(
-      `${who} changed the Worktree (${changed.slice(0, 10).join(', ')}), so the Gates do not match head_sha; ${who === 'verification' ? 'make the commands leave no untracked or modified files (or ignore them)' : 'the reviewer must change nothing'}`,
+      `${who} changed the Worktree (${changed.slice(0, 10).join(', ')}), so the Gates do not match head_sha; ${fix}`,
     );
   }
   return problems;
@@ -1489,12 +1503,15 @@ function commandCriteriaFailures(
 /** The approval rule's input, read from what is recorded for the Attempt. */
 function approvalInput(
   tx: Tx,
-  attemptId: string,
-  current: { headSha: string; baseSha: string },
-  review: ApprovalInput['review'],
-  definition: TaskDefinition,
-  jobId: string,
+  input: {
+    jobId: string;
+    attemptId: string;
+    definition: TaskDefinition;
+    current: GateRef;
+    review: ApprovalInput['review'];
+  },
 ): ApprovalInput {
+  const { jobId, attemptId, definition, current, review } = input;
   const runs = tx
     .select()
     .from(schema.verificationRuns)
@@ -1521,7 +1538,7 @@ function approvalInput(
       evidence: evidence
         .filter((e) => e.criterionId === c.id)
         .map((e) => ({
-          source: e.reviewId === null ? ('commands' as const) : ('review' as const),
+          source: evidenceSource(e),
           verdict: EvidenceVerdictSchema.parse(e.verdict),
           headSha: e.headSha,
           baseSha: e.baseSha,
@@ -1562,7 +1579,7 @@ function endAttempt(
       state: outcome.state,
       exitReason: outcome.exitReason,
       exitDetail: outcome.detail,
-      ...attemptFindings(inspection, input.usage),
+      ...inspectionColumns(inspection, input.usage),
       finishedAt: new Date().toISOString(),
     },
     {
@@ -1593,14 +1610,6 @@ function lstatOrUndefined(path: string) {
   } catch {
     return undefined;
   }
-}
-
-function describeExit(result: HarnessRawResult | undefined): string {
-  if (result === undefined) return 'did not start';
-  const { exit } = result;
-  if (exit.kind === 'exited') return `exited with code ${String(exit.code)}`;
-  if (exit.kind === 'timed_out') return `timed out after ${String(exit.afterMs)} ms`;
-  return 'was cancelled';
 }
 
 // ---- rows and transitions -------------------------------------------------------------

@@ -71,10 +71,11 @@ export type AttemptState = z.infer<typeof AttemptStateSchema>;
 /**
  * Why an Attempt ended. `completed`: it ran to the end and every Gate passed.
  * `gates_failed`: a required verification command failed, a mandatory
- * criterion has no passing Evidence, or a Gate result is stale (recorded for
- * another `(head, base)`). `changes_requested`: the review requested changes.
- * `review_failed`: no valid review (the reviewer's Run failed, or its output
- * was invalid after the one re-prompt). `invalid_output`: no valid Task Result.
+ * criterion has no passing Evidence, or Evidence or the review is stale
+ * (recorded for another `(head, base)`). `changes_requested`: the review requested changes.
+ * `review_failed`: the reviewer Harness Run did not exit 0 (it crashed, timed
+ * out or did not start), so there is no review. `invalid_output`: no valid
+ * Task Result, or the review was still invalid after its one re-prompt.
  * `not_done`: the Task Result's status is not `done`. `harness_failed`: the
  * Harness Run did not exit 0. `factory_error`: the factory itself broke.
  */
@@ -225,6 +226,11 @@ export type EvidenceVerdict = z.infer<typeof EvidenceVerdictSchema>;
  * Criterion, from the commands that verify it (source `commands`) or from the
  * independent review (source `review`).
  */
+/** Where a criterion verdict came from: the commands that name it, or the review that gave it. */
+export function evidenceSource(row: { reviewId: string | null }): 'commands' | 'review' {
+  return row.reviewId === null ? 'commands' : 'review';
+}
+
 export const EvidenceSchema = z.object({
   id: z.string(),
   attemptId: z.string(),

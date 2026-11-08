@@ -167,6 +167,63 @@ describe('decideApproval', () => {
     });
   });
 
+  describe('a mandatory criterion, from all its current Evidence (commands and review)', () => {
+    const decideWith = (evidence: ApprovalInput['criteria'][number]['evidence']) => {
+      const input = passing();
+      input.criteria = [{ code: 'AC-01', mandatory: true, evidence }];
+      return decideApproval(input);
+    };
+
+    it.each([
+      ['a failing command', 'commands', 'fail'],
+      ['a blocked command', 'commands', 'blocked'],
+      ['a failing review verdict', 'review', 'fail'],
+      ['a blocked review verdict', 'review', 'blocked'],
+    ] as const)('blocks on %s, even beside a pass from the other source', (_, source, verdict) => {
+      const other = source === 'commands' ? 'review' : 'commands';
+      const decision = decideWith([
+        { source, verdict, ...at },
+        { source: other, verdict: 'pass', ...at },
+      ]);
+
+      expect(decision.approved).toBe(false);
+      expect(decision.criteria[0]?.verdict).toBe(verdict);
+    });
+
+    it('is satisfied by a passing command that names it, when the reviewer did not check it', () => {
+      const decision = decideWith([
+        { source: 'commands', verdict: 'pass', ...at },
+        { source: 'review', verdict: 'not_tested', ...at },
+      ]);
+
+      expect(decision).toMatchObject({ approved: true, criteria: [{ verdict: 'pass' }] });
+    });
+
+    it('blocks when every source says not_tested', () => {
+      const decision = decideWith([
+        { source: 'commands', verdict: 'not_tested', ...at },
+        { source: 'review', verdict: 'not_tested', ...at },
+      ]);
+
+      expect(decision.approved).toBe(false);
+      expect(decision.problems).toContain('mandatory AC-01 has Evidence not_tested, not pass');
+    });
+
+    it('does not count a passing verification command that does not name it', () => {
+      // `test` and `typecheck` pass, but neither names AC-01: no command Evidence for it.
+      const decision = decideWith([{ source: 'review', verdict: 'not_tested', ...at }]);
+
+      expect(decision.criteria[0]?.verdict).toBe('not_tested');
+      expect(decision.approved).toBe(false);
+    });
+
+    it('blocks on not_applicable: it needs a justification, which nothing checks yet', () => {
+      const decision = decideWith([{ source: 'review', verdict: 'not_applicable', ...at }]);
+
+      expect(decision.approved).toBe(false);
+    });
+  });
+
   it('refuses approval when a required verification command failed or is stale', () => {
     const failed = passing();
     failed.verification[0] = { key: 'test', required: true, exitCode: 1, timedOut: false, ...at };

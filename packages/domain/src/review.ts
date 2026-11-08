@@ -196,13 +196,13 @@ export type Review = z.infer<typeof ReviewSchema>;
 
 // ---- The approval rule --------------------------------------------------------------
 
-/** The commit pair a Gate result was recorded against. */
+/** The commit pair a Gate's Evidence or a review was recorded against. */
 export interface GateRef {
   headSha: string;
   baseSha: string;
 }
 
-/** A Gate result counts only for the `(head, base)` it ran against. */
+/** Evidence or a review counts only for the `(head, base)` it was recorded against. */
 export function isCurrent(gate: GateRef, current: GateRef): boolean {
   return gate.headSha === current.headSha && gate.baseSha === current.baseSha;
 }
@@ -233,7 +233,7 @@ export interface ApprovalDecision {
   criteria: { code: string; mandatory: boolean; verdict: EvidenceVerdict }[];
 }
 
-/** Strongest first: one `fail` from any source outweighs every `pass`. */
+/** Strongest first: one `fail` or `blocked` from any source outweighs every `pass`. */
 const VERDICT_PRECEDENCE: readonly EvidenceVerdict[] = [
   'fail',
   'blocked',
@@ -277,8 +277,14 @@ export function verificationProblems(
 /**
  * The full approval rule: every required verification command passed on the
  * current commit, a current review approved, and every mandatory criterion
- * the Task covers has current Evidence that passes (not `fail`, `blocked` or
- * `not_tested`).
+ * the Task covers is `pass`, combined over its current Evidence from the
+ * commands and the review:
+ *   1. any current `fail` or `blocked`, from either source, blocks;
+ *   2. otherwise any current `pass` satisfies it (a reviewer's `not_tested`
+ *      means "I didn't check this", not "this is unverified");
+ *   3. otherwise (only `not_tested`, or no Evidence) it blocks.
+ * `not_applicable` doesn't satisfy it either: it needs a justification, and
+ * nothing checks one yet (PRODUCT_SPEC §8).
  */
 export function decideApproval(input: ApprovalInput): ApprovalDecision {
   const problems = verificationProblems(input.current, input.verification);
@@ -302,7 +308,7 @@ export function decideApproval(input: ApprovalInput): ApprovalDecision {
     ),
   }));
   for (const c of criteria) {
-    if (c.mandatory && c.verdict !== 'pass' && c.verdict !== 'not_applicable') {
+    if (c.mandatory && c.verdict !== 'pass') {
       problems.push(`mandatory ${c.code} has Evidence ${c.verdict}, not pass`);
     }
   }
