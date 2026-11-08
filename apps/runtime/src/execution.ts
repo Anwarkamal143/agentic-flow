@@ -9,10 +9,11 @@
  * verification command is run again by the factory, its exit code recorded as
  * Evidence tied to `(head_sha, base_sha)`.
  */
-import { existsSync, mkdirSync, readFileSync, appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
+  AttemptStateSchema,
   criterionVerdict,
   RESULT_FILE,
   schemaIssues,
@@ -33,6 +34,7 @@ import {
 } from '@factory/domain';
 import {
   addWorktree,
+  changedPaths,
   commitAll,
   commitsBetween,
   fetchRemote,
@@ -282,15 +284,15 @@ export class TaskScheduler {
       throw new Error(`the Factory Clone has no ${repo.defaultBranch} to start from`);
     const branch = `factory/${job.id}/${task.id}-${task.key}`;
     const path = join(this.opts.workspaceRoot, repo.id, job.id, task.key);
-    await excludeResultFile(clone);
-    mkdirSync(dirname(path), { recursive: true });
-    await addWorktree({ repo: clone, path, branch, startSha: baseSha });
-
     const worktreeId = newId('wt');
     const attemptId = newId('att');
     const n = 1;
     const wallClockMs = this.opts.wallClockMs ?? 1_800_000;
+    // Built before the Worktree exists, so nothing between its creation and its row can fail.
     const packet = this.packet({ job, task, definition, repo, path, branch, baseSha, wallClockMs });
+    await excludeResultFile(clone);
+    mkdirSync(dirname(path), { recursive: true });
+    await addWorktree({ repo: clone, path, branch, startSha: baseSha });
 
     const portBase = changeJob(
       db,
@@ -435,7 +437,11 @@ export class TaskScheduler {
       if (verified === undefined) return; // shutdown during verification
       runs = verified;
       const headAfter = await resolveCommit(path, 'HEAD');
-      outcome = decide(runs, this.criteriaOf(job.id, definition), headAfter === inspection.headSha);
+      const changedByVerification = await uncommittedPaths(path);
+      outcome = decide(runs, this.criteriaOf(job.id, definition), {
+        headUnchanged: headAfter === inspection.headSha,
+        changedByVerification,
+      });
     }
 
     this.finish({
@@ -450,7 +456,7 @@ export class TaskScheduler {
       outcome,
       usage:
         result === undefined
-          ? null
+          ? { tag: 'unknown', inputTokens: null, outputTokens: null, costUsd: null, durationMs: 0 }
           : { ...result.usage, durationMs: Math.round(result.durationMs) },
     });
   }
@@ -826,7 +832,7 @@ export class TaskScheduler {
             tx,
             jobId,
             attempt.id,
-            attempt.state as AttemptState,
+            AttemptStateSchema.parse(attempt.state),
             {
               state: 'failed',
               exitReason: 'factory_error',
@@ -984,7 +990,20 @@ async function inspect(worktree: string, baseSha: string): Promise<Inspection> {
 
   const file = join(worktree, RESULT_FILE);
   let result: Inspection['result'] = { kind: 'missing' };
-  if (existsSync(file)) {
+  // Untrusted: never follow a link out of the Worktree, never read without a bound.
+  const stat = lstatOrUndefined(file);
+  if (stat !== undefined && (!stat.isFile() || stat.size > MAX_RESULT_BYTES)) {
+    result = {
+      kind: 'invalid',
+      content: null,
+      issues: [
+        {
+          rule: 'result.regular_file',
+          message: `${RESULT_FILE} must be a regular file of at most ${String(MAX_RESULT_BYTES)} bytes (found ${stat.isSymbolicLink() ? 'a symbolic link' : stat.isFile() ? `${String(stat.size)} bytes` : 'no regular file'}); it was not read`,
+        },
+      ],
+    };
+  } else if (stat !== undefined) {
     const raw = readFileSync(file, 'utf8');
     let json: unknown;
     try {
@@ -1009,6 +1028,15 @@ async function inspect(worktree: string, baseSha: string): Promise<Inspection> {
     }
   }
   const violations: RuleIssue[] = [];
+  const committed = (await changedPaths(worktree, baseSha, headSha)).filter(
+    (p) => p === RESULT_FILE || p.startsWith(`${dirname(RESULT_FILE)}/`),
+  );
+  if (committed.length > 0) {
+    violations.push({
+      rule: 'result.not_committed',
+      message: `the Task Branch commits the reserved ${dirname(RESULT_FILE)}/ path: ${committed.join(', ')}`,
+    });
+  }
   if (result.kind === 'valid') {
     for (const claimed of result.value.commits) {
       const lower = claimed.toLowerCase();
@@ -1025,13 +1053,13 @@ async function inspect(worktree: string, baseSha: string): Promise<Inspection> {
 
 /**
  * Approval before review exists (#8): every required verification command
- * passed, HEAD did not move during verification, and every mandatory criterion
+ * passed, verification left HEAD and the Worktree as they were, and every mandatory criterion
  * the Task covers has passing Evidence.
  */
 function decide(
   runs: readonly RunRecord[],
   criteria: readonly { code: string; mandatory: boolean }[],
-  headUnchanged: boolean,
+  worktree: { headUnchanged: boolean; changedByVerification: readonly string[] },
 ): Outcome {
   const problems: string[] = [];
   for (const run of runs) {
@@ -1041,7 +1069,15 @@ function decide(
       );
     }
   }
-  if (!headUnchanged) problems.push('HEAD moved during verification, so the Evidence is stale');
+  if (!worktree.headUnchanged) {
+    problems.push('HEAD moved during verification, so the Evidence is stale');
+  }
+  if (worktree.changedByVerification.length > 0) {
+    // The commands didn't test exactly head_sha, so their Evidence can't be tied to it.
+    problems.push(
+      `verification changed the Worktree (${worktree.changedByVerification.slice(0, 10).join(', ')}), so the Evidence does not match head_sha; make the commands leave no untracked or modified files (or ignore them)`,
+    );
+  }
   for (const c of criteria) {
     if (!c.mandatory) continue;
     const verdict: EvidenceVerdict = criterionVerdict(
@@ -1052,6 +1088,16 @@ function decide(
   return problems.length === 0
     ? { state: 'passed', exitReason: 'completed', detail: 'every factory Gate passed' }
     : { state: 'failed', exitReason: 'gates_failed', detail: problems.join('; ') };
+}
+
+const MAX_RESULT_BYTES = 1024 * 1024;
+
+function lstatOrUndefined(path: string) {
+  try {
+    return lstatSync(path);
+  } catch {
+    return undefined;
+  }
 }
 
 function describeExit(result: HarnessRawResult | undefined): string {

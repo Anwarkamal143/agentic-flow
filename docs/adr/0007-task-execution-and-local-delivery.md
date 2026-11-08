@@ -23,3 +23,12 @@ Choices made while making a ready Task run in a Worktree, get verified by the fa
 - **Closure** writes the Delivery Report (`report` Artifact, `reportVersion: 1`). It contains, per approved Task: the branch, base and head, commits with subjects, changed files, the WIP commit, verification exit codes, the criterion verdicts, and `fetchCommand` = `git fetch '<clone>' '<branch>:<branch>'`, which run from the source checkout creates the branch there. It also lists the computed known limitations. Then come Worktree removal and `closure: succeeded`, and only then is the Job `completed`.
 - **API:** `GET /v1/jobs/:id/attempts` (with verification runs and Evidence) and `GET /v1/jobs/:id/worktrees`. Artifacts gain `taskId` and `attemptId`, and the kinds `task_result`, `log` and `report`. `factory job show` lists the Attempts, their Evidence and the delivery.
 - **IDs:** `wt_`, `att_`, `lse_`, `vr_` and `evd_`. **Migration 0004:** `attempts`, `leases`, `worktrees`, `verification_runs`, `evidence`, plus `artifacts.task_id` and `artifacts.attempt_id`.
+- **Review hardening.**
+  - **The result file is untrusted.** It is read only if it is a regular file of at most 1 MiB, never through a symbolic link (rule `result.regular_file`). A branch that commits the reserved `.factory/` path is a protocol violation (`result.not_committed`).
+  - **Planted git config can't run code with the runtime's secrets.** Every factory git call in the Factory Clone or a Worktree runs with `core.hooksPath=/dev/null` and `core.fsmonitor=false`. Except `fetch`, they also run with a minimal environment (`PATH`, no user or system git config), so a configured driver that does run sees no secrets. `fetch` keeps the runtime's environment for SSH agents and credential helpers.
+  - **Verification must leave the Worktree as it found it.** Modified or untracked files after verification fail the Gates, because the Evidence would no longer match `head_sha`.
+  - **No untracked Worktree.** The packet is built before the Worktree is created.
+  - **Usage always has a tag**, `unknown` when the Harness did not start.
+- **Known gaps.**
+  - Port blocks of failed Jobs' Worktrees stay leased: they are released only at removal, and only closure removes.
+  - Closure records the report and completes the Stage in separate transactions; a crash between them is recovery's concern (#13).

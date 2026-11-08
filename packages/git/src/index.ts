@@ -27,12 +27,35 @@ function gitEnv(): NodeJS.ProcessEnv {
   return { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' };
 }
 
-export function git(args: readonly string[], opts: { cwd?: string } = {}): Promise<string> {
+/**
+ * The environment of the factory's git calls inside a Worktree, whose `.git`
+ * config a Harness may have changed: none of the runtime's own variables (so
+ * no secrets), and no user or system git config.
+ */
+function worktreeGitEnv(): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env['PATH'],
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+  };
+}
+
+export function git(
+  args: readonly string[],
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
       args,
-      { cwd: opts.cwd, env: gitEnv(), timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
+      {
+        cwd: opts.cwd,
+        env: opts.env ?? gitEnv(),
+        timeout: TIMEOUT_MS,
+        maxBuffer: 16 * 1024 * 1024,
+      },
       (err, stdout, stderr) => {
         if (err === null) {
           resolve(stdout);
@@ -119,19 +142,35 @@ export async function currentBranch(repo: string): Promise<string> {
 
 // ---- Factory Clone and Worktree operations ----------------------------------
 // These run only in the factory's own clone and its Worktrees, never in a source checkout.
+// A Harness can change a Worktree's shared `.git` config, so every factory git call in
+// the Factory Clone or a Worktree disables hooks and fsmonitor, and (except fetch) runs
+// with no secrets in its environment in case another configured driver runs.
+
+const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+
+function worktreeGit(worktree: string, args: readonly string[]): Promise<string> {
+  return git(['-C', worktree, ...NO_HOOKS, ...args], { env: worktreeGitEnv() });
+}
+
+/** Fetch keeps the runtime's environment (SSH agent, credential helpers), but runs no hooks. */
+function fetchGit(repo: string, args: readonly string[]): Promise<string> {
+  return git(['-C', repo, ...NO_HOOKS, ...args]);
+}
 
 /** The identity of commits the factory itself makes (WIP commits). */
 export const FACTORY_COMMITTER = { name: 'Software Factory', email: 'factory@factory.invalid' };
 
 /** Fetches every branch of `remote` into `refs/remotes/<remote>/*`. */
 export async function fetchRemote(repo: string, remote = 'origin'): Promise<void> {
-  await git(['-C', repo, 'fetch', '--quiet', '--prune', remote]);
+  await fetchGit(repo, ['fetch', '--quiet', '--prune', remote]);
 }
 
 /** The full SHA `rev` names, or undefined when it names no commit. */
 export async function resolveCommit(repo: string, rev: string): Promise<string | undefined> {
   try {
-    return (await git(['-C', repo, 'rev-parse', '--verify', '--quiet', `${rev}^{commit}`])).trim();
+    return (
+      await worktreeGit(repo, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`])
+    ).trim();
   } catch (err) {
     if (err instanceof GitError) return undefined;
     throw err;
@@ -145,9 +184,7 @@ export async function addWorktree(opts: {
   branch: string;
   startSha: string;
 }): Promise<void> {
-  await git([
-    '-C',
-    opts.repo,
+  await worktreeGit(opts.repo, [
     'worktree',
     'add',
     '--quiet',
@@ -164,14 +201,12 @@ export async function addWorktree(opts: {
  * Worktree has changes that are neither committed nor ignored.
  */
 export async function removeWorktree(repo: string, path: string): Promise<void> {
-  await git(['-C', repo, 'worktree', 'remove', '--', path]);
+  await worktreeGit(repo, ['worktree', 'remove', '--', path]);
 }
 
 /** Paths with uncommitted changes (tracked or untracked, not ignored). */
 export async function uncommittedPaths(worktree: string): Promise<string[]> {
-  const out = await git([
-    '-C',
-    worktree,
+  const out = await worktreeGit(worktree, [
     'status',
     '--porcelain=v1',
     '-z',
@@ -193,10 +228,8 @@ export async function uncommittedPaths(worktree: string): Promise<string[]> {
  * running the repository's hooks or signing. Returns the new commit's SHA.
  */
 export async function commitAll(worktree: string, message: string): Promise<string> {
-  await git(['-C', worktree, 'add', '--all']);
-  await git([
-    '-C',
-    worktree,
+  await worktreeGit(worktree, ['add', '--all']);
+  await worktreeGit(worktree, [
     '-c',
     `user.name=${FACTORY_COMMITTER.name}`,
     '-c',
@@ -208,7 +241,7 @@ export async function commitAll(worktree: string, message: string): Promise<stri
     '--message',
     message,
   ]);
-  return (await git(['-C', worktree, 'rev-parse', 'HEAD'])).trim();
+  return (await worktreeGit(worktree, ['rev-parse', 'HEAD'])).trim();
 }
 
 /** The commits in `base..head`, newest first, with their subjects. */
@@ -217,7 +250,7 @@ export async function commitsBetween(
   base: string,
   head: string,
 ): Promise<{ sha: string; subject: string }[]> {
-  const out = await git(['-C', repo, 'log', '--format=%H%x00%s', `${base}..${head}`]);
+  const out = await worktreeGit(repo, ['log', '--format=%H%x00%s', `${base}..${head}`]);
   return out
     .split('\n')
     .filter((l) => l !== '')
@@ -229,20 +262,14 @@ export async function commitsBetween(
 
 /** Paths changed between two commits. */
 export async function changedPaths(repo: string, base: string, head: string): Promise<string[]> {
-  const out = await git(['-C', repo, 'diff', '--name-only', '-z', `${base}..${head}`]);
+  const out = await worktreeGit(repo, ['diff', '--name-only', '-z', `${base}..${head}`]);
   return out.split('\0').filter((p) => p !== '');
-}
-
-/** True when the repository has an object named `sha` (full or abbreviated). */
-export async function hasCommit(repo: string, sha: string): Promise<boolean> {
-  if (!/^[0-9a-f]{4,64}$/i.test(sha)) return false;
-  return (await resolveCommit(repo, sha)) !== undefined;
 }
 
 /** The repository's `info/exclude` file (shared by all its Worktrees). */
 export async function infoExcludePath(repo: string): Promise<string> {
   const common = (
-    await git(['-C', repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+    await worktreeGit(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
   ).trim();
   return `${common}/info/exclude`;
 }

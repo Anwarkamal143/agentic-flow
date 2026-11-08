@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -356,6 +356,55 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
     expect(env['PORT']).toBe(env['FACTORY_PORT_BASE']);
     expect(readFileSync(join(probe, 'stdin.txt'), 'utf8').trim()).toBe('closed');
     expect(readFileSync(join(probe, 'cwd.txt'), 'utf8').trim()).toBe(worktree.path);
+  });
+
+  it('never reads a Task Result that is a symbolic link out of the Worktree', async () => {
+    const outside = tempDir('factory-secret-');
+    writeFileSync(join(outside, 'id_rsa'), 'TOP-SECRET-KEY-MATERIAL\n');
+    const response = validTaskResponse();
+    delete (response as { result?: unknown }).result;
+    response.steps.push({
+      run: `mkdir -p .factory && ln -s '${outside}/id_rsa' .factory/result.json`,
+    });
+    const { rt, repo } = await executionRuntime(scriptWith({}, { 'add-sum': [response] }));
+
+    const job = await runJob(rt, repo.id);
+
+    expect(job.status).toBe('failed');
+    const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody & { exitDetail: string }];
+    expect(attempt).toMatchObject({ state: 'failed', exitReason: 'invalid_output' });
+    expect(attempt.exitDetail).toContain('result.regular_file');
+    const artifacts = await json<ArtifactBody[]>(rt.request(`/v1/jobs/${job.id}/artifacts`));
+    for (const a of artifacts) {
+      const text = await (await rt.request(`/v1/artifacts/${a.id}/content`)).text();
+      expect(text, `${a.kind} Artifact`).not.toContain('TOP-SECRET');
+    }
+    const events = await (await rt.request(`/v1/jobs/${job.id}/events?limit=1000`)).text();
+    expect(events).not.toContain('TOP-SECRET');
+  });
+
+  it('runs no Harness-planted hook or fsmonitor when the factory commits leftovers', async () => {
+    const probe = tempDir('factory-probe-');
+    const response = validTaskResponse();
+    response.steps.push(
+      {
+        run:
+          `hooks="$(git rev-parse --git-common-dir)/planted"; mkdir -p "$hooks"; ` +
+          `for h in pre-commit post-commit commit-msg post-checkout reference-transaction fsmonitor; do ` +
+          `printf '#!/bin/sh\\nenv > %s/ran-%s\\n' '${probe}' "$h" > "$hooks/$h"; chmod +x "$hooks/$h"; done; ` +
+          `git config core.hooksPath "$hooks"; git config core.fsmonitor "$hooks/fsmonitor"`,
+      },
+      { write: { path: 'test/leftover.test.ts', content: '// not committed\n' } },
+    );
+    const { rt, repo } = await executionRuntime(scriptWith({}, { 'add-sum': [response] }), {
+      GH_TOKEN: 'ghp_' + 'x'.repeat(36),
+    });
+
+    const job = await runJob(rt, repo.id);
+
+    const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody];
+    expect(attempt.wipCommit, 'the factory made a WIP commit').not.toBeNull();
+    expect(readdirSync(probe), 'no planted hook or fsmonitor ran').toEqual([]);
   });
 
   it('keeps the Worktree active in the Factory Clone while the Harness runs', async () => {
