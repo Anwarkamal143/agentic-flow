@@ -4,7 +4,7 @@
  * decided by runtime configuration alone.
  */
 export { FakeHarness, FakeScriptError, loadFakeScript, parseFakeScript } from './fake.js';
-export type { FakeScript, FakeResponse, FakeTaskResponse } from './fake.js';
+export type { FakeScript, FakeResponse, FakeReviewResponse, FakeTaskResponse } from './fake.js';
 export { ENV_ALLOWLIST, guardrailEnv, spawnGuarded } from './guardrail.js';
 export type { GuardedExit, GuardedOptions, GuardedProcess } from './guardrail.js';
 

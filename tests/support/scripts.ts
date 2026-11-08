@@ -1,7 +1,7 @@
 /**
  * Fake Harness scripts shared by the scenarios. The proposals take the `tiny-ts`
  * fixture to one Task, `add-sum`; its execution response adds `sum()` and
- * commits it. Verification commands are plain shell checks, so no dependency
+ * commits it, and its reviewer approves it with one non-blocking Finding. Verification commands are plain shell checks, so no dependency
  * install is needed in the Worktree.
  */
 import { parse, stringify } from 'yaml';
@@ -85,20 +85,43 @@ tasks:
           - code: AC-01
             claim: met
             how: sum(2, 3) returns 5
+reviews:
+  add-sum:
+    - output:
+        outcome: approved
+        summary: sum() is correct and exported from src/math.ts.
+        findings:
+          - severity: low
+            faultOrigin: implementation
+            location: src/math.ts:6
+            problem: No test covers negative numbers.
+            why: The Specification lists negative numbers as an edge case.
+            recommendation: Add a test for sum(-2, -3).
+            blocking: false
+        criteria:
+          - code: AC-01
+            verdict: pass
+            detail: sum(a, b) returns a + b in the diff, and the test command passed.
 `;
 
 interface Script {
   stages: Record<string, unknown[]>;
   tasks?: Record<string, unknown[]>;
+  reviews?: Record<string, unknown[]>;
 }
 
-/** The valid script with some Stages' (and Tasks') responses replaced. */
-export function scriptWith(stages: Record<string, unknown[]>, tasks?: Record<string, unknown[]>) {
+/** The valid script with some Stages' (and Tasks', and reviews') responses replaced. */
+export function scriptWith(
+  stages: Record<string, unknown[]>,
+  tasks?: Record<string, unknown[]>,
+  reviews?: Record<string, unknown[]>,
+) {
   const script = parse(VALID_SCRIPT) as Script;
   return stringify({
     ...script,
     stages: { ...script.stages, ...stages },
     tasks: { ...script.tasks, ...tasks },
+    reviews: { ...script.reviews, ...reviews },
   });
 }
 
@@ -116,4 +139,19 @@ export function validTaskResponse(): {
 } {
   const script = parse(VALID_SCRIPT) as Script;
   return structuredClone(script.tasks?.['add-sum']?.[0]) as ReturnType<typeof validTaskResponse>;
+}
+
+/** The valid `add-sum` review response, as an object to change. */
+export function validReviewResponse(): {
+  output: {
+    outcome: string;
+    findings: Record<string, unknown>[];
+    criteria: Record<string, unknown>[];
+  };
+  [key: string]: unknown;
+} {
+  const script = parse(VALID_SCRIPT) as Script;
+  return structuredClone(script.reviews?.['add-sum']?.[0]) as ReturnType<
+    typeof validReviewResponse
+  >;
 }

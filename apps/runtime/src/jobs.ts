@@ -5,6 +5,8 @@
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   AttemptSchema,
+  ReviewSchema,
+  type Review,
   WorktreeSchema,
   type Attempt,
   type Worktree,
@@ -306,6 +308,8 @@ export class JobService {
             id: e.id,
             attemptId: e.attemptId,
             kind: e.kind,
+            source: e.reviewId === null ? 'commands' : 'review',
+            reviewId: e.reviewId,
             verificationKey: own.find((r) => r.id === e.verificationRunId)?.commandKey ?? null,
             verificationRunId: e.verificationRunId,
             criterionId: e.criterionId,
@@ -317,6 +321,59 @@ export class JobService {
           })),
       } satisfies Record<keyof Attempt, unknown>);
     });
+  }
+
+  /** Every recorded review of the Job's Attempts, oldest first, with its packet and Findings. */
+  reviews(jobId: string): Review[] {
+    this.get(jobId); // 404 for an unknown Job
+    const rows = this.db
+      .select()
+      .from(schema.reviews)
+      .where(eq(schema.reviews.jobId, jobId))
+      .orderBy(asc(schema.reviews.createdAt), asc(sql`rowid`))
+      .all();
+    if (rows.length === 0) return [];
+    const findings = this.db
+      .select()
+      .from(schema.reviewFindings)
+      .where(
+        inArray(
+          schema.reviewFindings.reviewId,
+          rows.map((r) => r.id),
+        ),
+      )
+      .orderBy(asc(schema.reviewFindings.position))
+      .all();
+    return rows.map((r) =>
+      ReviewSchema.parse({
+        id: r.id,
+        jobId: r.jobId,
+        taskId: r.taskId,
+        attemptId: r.attemptId,
+        reviewer: { harnessId: r.reviewerHarnessId, version: r.reviewerHarnessVersion },
+        sessionRef: r.sessionRef,
+        promptTemplate: { id: r.promptTemplateId, hash: r.promptTemplateHash },
+        headSha: r.headSha,
+        baseSha: r.baseSha,
+        outcome: r.outcome,
+        summary: r.summary,
+        artifactId: r.artifactId,
+        packet: JSON.parse(r.packetJson) as unknown,
+        findings: findings
+          .filter((f) => f.reviewId === r.id)
+          .map((f) => ({
+            id: f.id,
+            severity: f.severity,
+            faultOrigin: f.faultOrigin,
+            location: f.location,
+            problem: f.problem,
+            why: f.why,
+            recommendation: f.recommendation,
+            blocking: f.blocking,
+          })),
+        createdAt: r.createdAt,
+      } satisfies Record<keyof Review, unknown>),
+    );
   }
 
   worktrees(jobId: string): Worktree[] {

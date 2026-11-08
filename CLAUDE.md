@@ -62,7 +62,7 @@ pnpm install
 pnpm build         # tsc -b: compiles every package to dist/
 pnpm typecheck     # tsc -b, plus the tests/ project
 pnpm lint          # ESLint (strict, type-checked) + Prettier --check + migration drift check
-pnpm test          # builds, then runs every Vitest scenario in tests/
+pnpm test          # builds, then runs every Vitest test in tests/ (unit/ and scenarios/)
 pnpm test:e2e      # only the scenario tests (tests/scenarios)
 pnpm format        # Prettier --write
 pnpm --filter @factory/db db:generate   # write a migration after editing packages/db/src/schema.ts
@@ -73,6 +73,7 @@ pnpm dev           # TODO(Phase A) — runtime + dashboard (dashboard not built 
 
 Scenario tests spawn the built runtime and CLI as child processes against a temporary `FACTORY_HOME`
 (helper: `tests/support/factory.ts`). They never import runtime internals or open the database.
+Unit tests (`tests/unit/`) cover pure `@factory/domain` rules only, such as approval and review checks.
 
 ## 7. Questions for the human, before Phase A
 

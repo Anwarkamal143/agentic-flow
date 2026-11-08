@@ -9,12 +9,20 @@
  * verification command is run again by the factory, its exit code recorded as
  * Evidence tied to `(head_sha, base_sha)`.
  */
-import { lstatSync, mkdirSync, readFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   AttemptStateSchema,
   criterionVerdict,
+  decideApproval,
+  EvidenceVerdictSchema,
+  isBlocking,
+  isCurrent,
+  verificationProblems,
+  type ApprovalInput,
+  type ReviewPacket,
+  type ReviewProposal,
   RESULT_FILE,
   schemaIssues,
   SpecificationProposalSchema,
@@ -24,7 +32,6 @@ import {
   TaskResultSchema,
   type AttemptExitReason,
   type AttemptState,
-  type EvidenceVerdict,
   type RuleIssue,
   type TaskDefinition,
   type TaskPacket,
@@ -63,6 +70,14 @@ import {
 } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
+import {
+  buildReviewPacket,
+  evaluateReview,
+  renderReviewPrompt,
+  REVIEW_TEMPLATE_HASH,
+  REVIEW_TEMPLATE_ID,
+  type ReviewEvaluation,
+} from './review.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
   allocatePortBlock,
@@ -79,6 +94,10 @@ const MAX_TURNS = 50;
 const DEFAULT_HARNESS_WALL_CLOCK_MS = 30 * 60_000;
 /** Default wall-clock limit of one verification command. */
 const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60_000;
+/** Default wall-clock limit of one reviewer Harness Run. */
+const DEFAULT_REVIEW_WALL_CLOCK_MS = 10 * 60_000;
+/** Reviewer Harness Runs per review: the first, plus one re-prompt. */
+const REVIEW_RUNS = 2;
 /** Verification commands budgeted for in an Attempt's lease. */
 const LEASE_VERIFICATION_BUDGET = 4;
 /** Slack on top of the budget, for the factory's own git work. */
@@ -86,11 +105,21 @@ const LEASE_SLACK_MS = 60_000;
 
 /**
  * How long an Attempt's leases (its Task, its port block) run before they
- * expire: one Harness Run, a budget of verification commands, and slack.
- * There is no heartbeat yet (#13), so this bounds a whole Attempt.
+ * expire: one developer Harness Run, a budget of verification commands, the
+ * reviewer Runs (with the re-prompt), and slack. There is no heartbeat yet
+ * (#13), so this bounds a whole Attempt.
  */
-export function attemptLeaseMs(limits: { wallClockMs: number; verifyTimeoutMs: number }): number {
-  return limits.wallClockMs + limits.verifyTimeoutMs * LEASE_VERIFICATION_BUDGET + LEASE_SLACK_MS;
+export function attemptLeaseMs(limits: {
+  wallClockMs: number;
+  verifyTimeoutMs: number;
+  reviewWallClockMs: number;
+}): number {
+  return (
+    limits.wallClockMs +
+    limits.verifyTimeoutMs * LEASE_VERIFICATION_BUDGET +
+    limits.reviewWallClockMs * REVIEW_RUNS +
+    LEASE_SLACK_MS
+  );
 }
 
 export interface TaskSchedulerOptions {
@@ -108,6 +137,8 @@ export interface TaskSchedulerOptions {
   wallClockMs?: number;
   /** Wall-clock limit of one verification command. */
   verifyTimeoutMs?: number;
+  /** Wall-clock limit of one reviewer Harness Run. */
+  reviewWallClockMs?: number;
 }
 
 type TaskRow = typeof schema.tasks.$inferSelect;
@@ -133,6 +164,8 @@ interface VerificationRunRecord {
   timedOut: boolean;
   startedAt: string;
   durationMs: number;
+  /** The command's output, as stored in `content`. */
+  output: string;
   content: StoredContent;
 }
 
@@ -150,17 +183,23 @@ export class TaskScheduler {
   private readonly holder = `runtime:${String(process.pid)}`;
   private readonly wallClockMs: number;
   private readonly verifyTimeoutMs: number;
+  private readonly reviewWallClockMs: number;
 
   constructor(private readonly opts: TaskSchedulerOptions) {
     this.wallClockMs = opts.wallClockMs ?? DEFAULT_HARNESS_WALL_CLOCK_MS;
     this.verifyTimeoutMs = opts.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS;
+    this.reviewWallClockMs = opts.reviewWallClockMs ?? DEFAULT_REVIEW_WALL_CLOCK_MS;
   }
 
   /** When an Attempt's leases taken now expire. */
   private leaseExpiry(): string {
     return new Date(
       Date.now() +
-        attemptLeaseMs({ wallClockMs: this.wallClockMs, verifyTimeoutMs: this.verifyTimeoutMs }),
+        attemptLeaseMs({
+          wallClockMs: this.wallClockMs,
+          verifyTimeoutMs: this.verifyTimeoutMs,
+          reviewWallClockMs: this.reviewWallClockMs,
+        }),
     ).toISOString();
   }
 
@@ -413,7 +452,9 @@ export class TaskScheduler {
       CI: 'true',
     });
 
-    const result = await this.harnessRun(harness, {
+    const { result } = await this.harnessRun(harness, {
+      role: 'developer',
+      template: { id: TASK_TEMPLATE_ID, hash: TASK_TEMPLATE_HASH },
       jobId: job.id,
       taskId,
       taskKey: task.key,
@@ -469,16 +510,64 @@ export class TaskScheduler {
       const verified = await this.verify(definition, path, env);
       if (verified === undefined) return; // shutdown during verification
       verificationRuns = verified;
-      const headAfter = await resolveCommit(path, 'HEAD');
-      const changedByVerification = await uncommittedPaths(path);
-      outcome = decide(
-        verificationRuns,
-        criteriaCoveredBy(this.opts.db, job.id, definition.acceptance),
-        {
-          headUnchanged: headAfter === inspection.headSha,
-          changedByVerification,
-        },
-      );
+      const at = { headSha: inspection.headSha, baseSha };
+      const problems = [
+        ...verificationProblems(
+          at,
+          verificationRuns.map((r) => ({ ...r, ...at })),
+        ),
+        ...(await worktreeProblems(path, inspection.headSha, 'verification')),
+        ...commandCriteriaFailures(
+          verificationRuns,
+          criteriaCoveredBy(this.opts.db, job.id, definition.acceptance),
+        ),
+      ];
+      if (problems.length === 0) {
+        // Every factory Gate passed: the independent review decides the rest.
+        const usage = usageOf(result);
+        this.toReview({
+          jobId: job.id,
+          taskId,
+          attemptId,
+          baseSha,
+          inspection,
+          resultContent,
+          verificationRuns,
+          usage,
+        });
+        // The reviewer never sees the implementer's claims (they are stored as an Artifact).
+        rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
+        const reviewed = await this.review(harness, {
+          job,
+          task,
+          definition,
+          attemptId,
+          path,
+          env,
+          at,
+          runs: verificationRuns,
+        });
+        if (reviewed === undefined) return; // shutdown during the review
+        this.finishReview({
+          jobId: job.id,
+          taskId,
+          attemptId,
+          worktreeId,
+          inspection,
+          usage,
+          reviewed,
+          current: { headSha: (await resolveCommit(path, 'HEAD')) ?? '(none)', baseSha },
+          reviewerChanges: await worktreeProblems(path, inspection.headSha, 'the reviewer', {
+            headToo: false,
+          }),
+        });
+        return;
+      }
+      outcome = {
+        state: 'failed',
+        exitReason: 'gates_failed',
+        detail: problems.join('; '),
+      };
     }
 
     this.finish({
@@ -491,10 +580,7 @@ export class TaskScheduler {
       resultContent,
       verificationRuns,
       outcome,
-      usage:
-        result === undefined
-          ? { tag: 'unknown', inputTokens: null, outputTokens: null, costUsd: null, durationMs: 0 }
-          : { ...result.usage, durationMs: Math.round(result.durationMs) },
+      usage: usageOf(result),
     });
   }
 
@@ -562,10 +648,16 @@ export class TaskScheduler {
     } satisfies TaskPacket);
   }
 
-  /** The developer Harness Run, recorded as `harness_run.started` / `.finished` events. */
+  /**
+   * One Harness Run of an Attempt, the developer's or a reviewer's, recorded
+   * as `harness_run.started` / `.finished` events. Always `start`: a new
+   * Session, never a resumed one. `evaluate` judges the output for the record.
+   */
   private async harnessRun(
     harness: AgentHarness,
     input: {
+      role: 'developer' | 'reviewer';
+      template: { id: string; hash: string };
       jobId: string;
       taskId: string;
       taskKey: string;
@@ -575,12 +667,14 @@ export class TaskScheduler {
       cwd: string;
       env: Record<string, string>;
       wallClockMs: number;
+      reprompt?: readonly RuleIssue[];
     },
-  ): Promise<HarnessRawResult | undefined> {
+    evaluate?: (result: HarnessRawResult) => { outcome: string; issues?: RuleIssue[] },
+  ): Promise<{ result: HarnessRawResult | undefined; sessionRef: string | undefined }> {
     let started: HarnessRun;
     try {
       started = await harness.start({
-        role: 'developer',
+        role: input.role,
         prompt: input.prompt,
         cwd: input.cwd,
         env: input.env,
@@ -589,11 +683,11 @@ export class TaskScheduler {
       });
     } catch (err) {
       this.opts.log(`task scheduler: the ${harness.id} Harness did not start: ${String(err)}`);
-      return undefined;
+      return { result: undefined, sessionRef: undefined };
     }
     this.currentRun = started;
     this.opts.db.transaction((tx) => {
-      if (started.sessionRef !== undefined) {
+      if (input.role === 'developer' && started.sessionRef !== undefined) {
         tx.update(schema.attempts)
           .set({ sessionRef: started.sessionRef })
           .where(eq(schema.attempts.id, input.attemptId))
@@ -609,12 +703,13 @@ export class TaskScheduler {
           attemptId: input.attemptId,
           taskId: input.taskId,
           stageId: 'execution',
-          role: 'developer',
+          role: input.role,
           harnessId: harness.id,
           n: input.n,
-          template: { id: TASK_TEMPLATE_ID, hash: TASK_TEMPLATE_HASH },
+          template: input.template,
           ...(started.sessionRef === undefined ? {} : { sessionRef: started.sessionRef }),
           ...(started.pid === undefined ? {} : { pid: started.pid }),
+          ...(input.reprompt === undefined ? {} : { reprompt: { issues: input.reprompt } }),
         },
       });
     });
@@ -628,17 +723,20 @@ export class TaskScheduler {
     const result = await started.result;
     const events = await drained;
     this.currentRun = undefined;
+    const judged = evaluate?.(result);
     this.event(input.jobId, 'harness_run', started.executionId, 'harness_run.finished', {
       attemptId: input.attemptId,
       taskId: input.taskId,
+      role: input.role,
       harnessId: harness.id,
       n: input.n,
       exit: result.exit,
       durationMs: result.durationMs,
       events,
       usage: result.usage,
+      ...(judged === undefined ? {} : judged),
     });
-    return result;
+    return { result, sessionRef: started.sessionRef };
   }
 
   private toVerifying(jobId: string, taskId: string, attemptId: string): void {
@@ -681,6 +779,7 @@ export class TaskScheduler {
         timedOut: exit.timedOut,
         startedAt,
         durationMs: exit.durationMs,
+        output: exit.output,
         content: this.opts.artifacts.writeContent({
           key: v.key,
           command: v.command,
@@ -695,9 +794,9 @@ export class TaskScheduler {
   }
 
   /**
-   * Records everything the factory found, ends the Attempt, moves the Task,
-   * releases its lease, preserves the Worktree and settles `execution`. One
-   * transaction.
+   * Ends an Attempt that never reached review: records everything the factory
+   * found, ends the Attempt, moves the Task, releases its leases, preserves
+   * the Worktree and settles `execution`. One transaction.
    */
   private finish(input: {
     jobId: string;
@@ -711,119 +810,367 @@ export class TaskScheduler {
     outcome: Outcome;
     usage: Usage | null;
   }): void {
-    const { jobId, taskId, attemptId, inspection, outcome } = input;
-    const head = inspection.headSha;
-    const base = input.baseSha;
+    changeJob(
+      this.opts.db,
+      { jobId: input.jobId, expectedVersion: 'current', actor: ACTOR },
+      (tx, state, step) => {
+        this.recordVerification(tx, input);
+        endAttempt(tx, state, step, { ...input, from: 'verifying' });
+      },
+    );
+    this.opts.onCommit();
+  }
+
+  /**
+   * Every factory Gate passed: records the claim, the verification runs and
+   * their Evidence, and moves the Attempt and the Task to `in_review`. One
+   * transaction, before the reviewer starts, so the Evidence it is sent is stored.
+   */
+  private toReview(input: {
+    jobId: string;
+    taskId: string;
+    attemptId: string;
+    baseSha: string;
+    inspection: Inspection;
+    resultContent: StoredContent | undefined;
+    verificationRuns: VerificationRunRecord[];
+    usage: Usage | null;
+  }): void {
+    const { jobId, taskId, attemptId, inspection } = input;
+    changeJob(this.opts.db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx) => {
+      this.recordVerification(tx, input);
+      stepAttempt(
+        tx,
+        { jobId, actor: ACTOR },
+        attemptId,
+        'verifying',
+        { state: 'in_review', ...attemptFindings(inspection, input.usage) },
+        { headSha: inspection.headSha, baseSha: input.baseSha },
+      );
+      stepTask(tx, { jobId, actor: ACTOR }, requireTask(tx, taskId, 'verifying'), 'in_review', {
+        payload: { attemptId, headSha: inspection.headSha },
+      });
+    });
+    this.opts.onCommit();
+  }
+
+  /**
+   * The independent review: a reviewer Harness Run in a new Session, in the
+   * Worktree at the reviewed head, given the Review Packet only. Its output
+   * is checked like any proposal; one re-prompt (again a new Session) carries
+   * the problems. `undefined` on shutdown.
+   */
+  private async review(
+    harness: AgentHarness,
+    input: {
+      job: typeof schema.jobs.$inferSelect;
+      task: TaskRow;
+      definition: TaskDefinition;
+      attemptId: string;
+      path: string;
+      env: Record<string, string>;
+      at: { headSha: string; baseSha: string };
+      runs: readonly VerificationRunRecord[];
+    },
+  ): Promise<Reviewed | undefined> {
+    const { db } = this.opts;
+    const spec = this.opts.artifacts
+      .listForJob(input.job.id)
+      .find((a) => a.kind === 'spec' && a.stageRunId !== null);
+    if (spec === undefined)
+      throw new Error(`Job ${input.job.id} has no Specification to review against`);
+    const criteria = criteriaCoveredBy(db, input.job.id, input.definition.acceptance);
+    const packet = await buildReviewPacket({
+      subject: {
+        jobId: input.job.id,
+        taskId: input.task.id,
+        taskKey: input.task.key,
+        attemptId: input.attemptId,
+        ...input.at,
+      },
+      repo: input.path,
+      specification: SpecificationProposalSchema.parse(this.opts.artifacts.readJson(spec.id)),
+      criteria,
+      runs: input.runs,
+      commandVerdicts: criteria.map((c) => ({
+        code: c.code,
+        ...criterionVerdict(input.runs.filter((r) => r.criteria.includes(c.code))),
+      })),
+    });
+    let rejected: RuleIssue[] | undefined;
+    for (let n = 1; n <= REVIEW_RUNS; n++) {
+      let evaluation: ReviewEvaluation | undefined;
+      const { result, sessionRef } = await this.harnessRun(
+        harness,
+        {
+          role: 'reviewer',
+          template: { id: REVIEW_TEMPLATE_ID, hash: REVIEW_TEMPLATE_HASH },
+          jobId: input.job.id,
+          taskId: input.task.id,
+          taskKey: input.task.key,
+          attemptId: input.attemptId,
+          n,
+          prompt: renderReviewPrompt(packet, rejected),
+          cwd: input.path,
+          env: input.env,
+          wallClockMs: this.reviewWallClockMs,
+          ...(rejected === undefined ? {} : { reprompt: rejected }),
+        },
+        (r) => {
+          evaluation = evaluateReview(r, packet);
+          return evaluation.kind === 'invalid'
+            ? { outcome: 'invalid', issues: evaluation.issues }
+            : { outcome: evaluation.kind };
+        },
+      );
+      if (this.closed) return undefined;
+      evaluation ??= evaluateReview(result, packet);
+      if (evaluation.kind === 'valid') {
+        return {
+          kind: 'valid',
+          packet,
+          value: evaluation.value,
+          sessionRef: sessionRef ?? null,
+          harnessId: harness.id,
+        };
+      }
+      if (evaluation.kind === 'harness_failed') {
+        return { kind: 'failed', detail: evaluation.message };
+      }
+      rejected = evaluation.issues;
+    }
+    return {
+      kind: 'failed',
+      detail: `the review was invalid after ${String(REVIEW_RUNS - 1)} re-prompt: ${(rejected ?? []).map((i) => `[${i.rule}] ${i.message}`).join('; ')}`,
+    };
+  }
+
+  /**
+   * Records a valid review (its Artifact, its row, its Findings and its
+   * criterion verdicts as Evidence), then decides approval with the full rule
+   * against the Task Branch head as git reads it now, and ends the Attempt. One
+   * transaction. An invalid review is not stored; the Attempt fails `review_failed`.
+   */
+  private finishReview(input: {
+    jobId: string;
+    taskId: string;
+    attemptId: string;
+    worktreeId: string;
+    inspection: Inspection;
+    usage: Usage | null;
+    reviewed: Reviewed;
+    current: { headSha: string; baseSha: string };
+    reviewerChanges: string[];
+  }): void {
+    const { jobId, taskId, attemptId, reviewed } = input;
+    const reviewed_head = input.inspection.headSha;
+    const base = input.current.baseSha;
+    const content =
+      reviewed.kind === 'valid' ? this.opts.artifacts.writeContent(reviewed.value) : undefined;
     changeJob(
       this.opts.db,
       { jobId, expectedVersion: 'current', actor: ACTOR },
       (tx, state, step) => {
-        if (input.resultContent !== undefined) {
-          this.opts.artifacts.record(
+        const task = requireTask(tx, taskId, 'in_review');
+        const definition = TaskDefinitionSchema.parse(JSON.parse(task.definitionJson));
+        let review: ApprovalInput['review'] = null;
+        if (reviewed.kind === 'valid' && content !== undefined) {
+          const { value } = reviewed;
+          const artifact = this.opts.artifacts.record(
             tx,
-            { jobId, taskId, attemptId, kind: 'task_result', content: input.resultContent },
+            { jobId, taskId, attemptId, kind: 'review', content },
             ACTOR,
           );
-        }
-        const definition = TaskDefinitionSchema.parse(
-          JSON.parse(requireTask(tx, taskId, 'verifying').definitionJson),
-        );
-        for (const run of input.verificationRuns) {
-          const log = this.opts.artifacts.record(
-            tx,
-            { jobId, taskId, attemptId, kind: 'log', content: run.content },
-            ACTOR,
-          );
-          const id = newId('vr');
-          tx.insert(schema.verificationRuns)
+          const reviewId = newId('rev');
+          tx.insert(schema.reviews)
             .values({
-              id,
+              id: reviewId,
+              jobId,
+              taskId,
               attemptId,
-              commandKey: run.key,
-              command: run.command,
-              required: run.required,
-              headSha: head,
+              reviewerHarnessId: reviewed.harnessId,
+              reviewerHarnessVersion: this.opts.harnessVersion,
+              sessionRef: reviewed.sessionRef,
+              promptTemplateId: REVIEW_TEMPLATE_ID,
+              promptTemplateHash: REVIEW_TEMPLATE_HASH,
+              packetJson: JSON.stringify(reviewed.packet),
+              headSha: reviewed_head,
               baseSha: base,
-              exitCode: run.exitCode,
-              timedOut: run.timedOut,
-              startedAt: run.startedAt,
-              durationMs: run.durationMs,
-              outputArtifactId: log.id,
+              outcome: value.outcome,
+              summary: value.summary,
+              artifactId: artifact.id,
+              createdAt: new Date().toISOString(),
             })
             .run();
-          tx.insert(schema.evidence)
-            .values({
-              id: newId('evd'),
-              attemptId,
-              kind: 'verification',
-              verificationRunId: id,
-              verdict: run.exitCode === 0 ? 'pass' : 'fail',
-              detail: run.timedOut
-                ? 'timed out'
-                : `exit ${String(run.exitCode)}${run.required ? '' : ' (not required)'}`,
-              headSha: head,
-              baseSha: base,
-              artifactId: log.id,
-            })
-            .run();
-        }
-        if (input.verificationRuns.length > 0) {
+          value.findings.forEach((f, position) => {
+            tx.insert(schema.reviewFindings)
+              .values({ id: newId('fnd'), reviewId, position, ...f, blocking: isBlocking(f) })
+              .run();
+          });
           for (const criterion of criteriaCoveredBy(tx, jobId, definition.acceptance)) {
-            const verdict = criterionVerdict(
-              input.verificationRuns.filter((r) => r.criteria.includes(criterion.code)),
-            );
+            const verdict = value.criteria.find((c) => c.code === criterion.code);
             tx.insert(schema.evidence)
               .values({
                 id: newId('evd'),
                 attemptId,
                 kind: 'criterion',
                 criterionId: criterion.id,
-                verdict: verdict.verdict,
-                detail: verdict.detail,
-                headSha: head,
+                reviewId,
+                verdict: verdict?.verdict ?? 'not_tested',
+                detail: verdict?.detail ?? 'the review gave no verdict',
+                headSha: reviewed_head,
                 baseSha: base,
+                artifactId: artifact.id,
               })
               .run();
           }
-        }
-        const now = new Date().toISOString();
-        stepAttempt(
-          tx,
-          { jobId, actor: ACTOR },
-          attemptId,
-          'verifying',
-          {
-            state: outcome.state,
-            exitReason: outcome.exitReason,
-            exitDetail: outcome.detail,
-            headSha: head,
-            commitsJson: JSON.stringify(inspection.commits),
-            wipCommit: inspection.wipCommit,
-            protocolViolationsJson: JSON.stringify(inspection.violations),
-            usageJson: input.usage === null ? null : JSON.stringify(input.usage),
-            finishedAt: now,
-          },
-          {
-            exitReason: outcome.exitReason,
-            headSha: head,
+          appendEvent(tx, {
+            entityKind: 'review',
+            entityId: reviewId,
+            jobId,
+            type: 'review.recorded',
+            actor: ACTOR,
+            payload: {
+              taskId,
+              attemptId,
+              outcome: value.outcome,
+              headSha: reviewed_head,
+              baseSha: base,
+              findings: value.findings.length,
+              blocking: value.findings.filter(isBlocking).length,
+            },
+          });
+          review = {
+            outcome: value.outcome,
+            blockingFindings: value.findings.filter(isBlocking).length,
+            headSha: reviewed_head,
             baseSha: base,
-            wipCommit: inspection.wipCommit,
-          },
-        );
-        stepTask(
-          tx,
-          { jobId, actor: ACTOR },
-          requireTask(tx, taskId, 'verifying'),
-          outcome.state === 'passed' ? 'approved' : 'failed',
-          { reason: outcome.exitReason, payload: { attemptId, headSha: head } },
-        );
-        const worktree = requireWorktree(tx, input.worktreeId);
-        releaseAttemptTokens(tx, taskId, worktree.portBase);
-        stepWorktree(tx, { jobId, actor: ACTOR }, worktree, 'active', 'preserved');
-        settleExecution(tx, state, step);
+          };
+        }
+        let outcome: Outcome;
+        if (reviewed.kind === 'failed') {
+          outcome = { state: 'failed', exitReason: 'review_failed', detail: reviewed.detail };
+        } else {
+          const decision = decideApproval(
+            approvalInput(tx, attemptId, input.current, review, definition, jobId),
+          );
+          const problems = [...decision.problems, ...input.reviewerChanges];
+          outcome =
+            problems.length === 0
+              ? {
+                  state: 'passed',
+                  exitReason: 'completed',
+                  detail: 'every Gate passed and the review approved',
+                }
+              : {
+                  state: 'failed',
+                  exitReason:
+                    review?.outcome === 'changes_requested' && isCurrent(review, input.current)
+                      ? 'changes_requested'
+                      : 'gates_failed',
+                  detail: problems.join('; '),
+                };
+        }
+        endAttempt(tx, state, step, {
+          jobId,
+          taskId,
+          attemptId,
+          worktreeId: input.worktreeId,
+          baseSha: base,
+          inspection: input.inspection,
+          outcome,
+          usage: input.usage,
+          from: 'in_review',
+        });
       },
     );
     this.opts.onCommit();
+  }
+
+  /** Records the Task Result claim, the verification runs, their logs and their Evidence. */
+  private recordVerification(
+    tx: Tx,
+    input: {
+      jobId: string;
+      taskId: string;
+      attemptId: string;
+      baseSha: string;
+      inspection: Inspection;
+      resultContent: StoredContent | undefined;
+      verificationRuns: VerificationRunRecord[];
+    },
+  ): void {
+    const { jobId, taskId, attemptId } = input;
+    const head = input.inspection.headSha;
+    const base = input.baseSha;
+    if (input.resultContent !== undefined) {
+      this.opts.artifacts.record(
+        tx,
+        { jobId, taskId, attemptId, kind: 'task_result', content: input.resultContent },
+        ACTOR,
+      );
+    }
+    const definition = TaskDefinitionSchema.parse(
+      JSON.parse(requireTask(tx, taskId, 'verifying').definitionJson),
+    );
+    for (const run of input.verificationRuns) {
+      const log = this.opts.artifacts.record(
+        tx,
+        { jobId, taskId, attemptId, kind: 'log', content: run.content },
+        ACTOR,
+      );
+      const id = newId('vr');
+      tx.insert(schema.verificationRuns)
+        .values({
+          id,
+          attemptId,
+          commandKey: run.key,
+          command: run.command,
+          required: run.required,
+          headSha: head,
+          baseSha: base,
+          exitCode: run.exitCode,
+          timedOut: run.timedOut,
+          startedAt: run.startedAt,
+          durationMs: run.durationMs,
+          outputArtifactId: log.id,
+        })
+        .run();
+      tx.insert(schema.evidence)
+        .values({
+          id: newId('evd'),
+          attemptId,
+          kind: 'verification',
+          verificationRunId: id,
+          verdict: run.exitCode === 0 ? 'pass' : 'fail',
+          detail: run.timedOut
+            ? 'timed out'
+            : `exit ${String(run.exitCode)}${run.required ? '' : ' (not required)'}`,
+          headSha: head,
+          baseSha: base,
+          artifactId: log.id,
+        })
+        .run();
+    }
+    if (input.verificationRuns.length > 0) {
+      for (const criterion of criteriaCoveredBy(tx, jobId, definition.acceptance)) {
+        const verdict = criterionVerdict(
+          input.verificationRuns.filter((r) => r.criteria.includes(criterion.code)),
+        );
+        tx.insert(schema.evidence)
+          .values({
+            id: newId('evd'),
+            attemptId,
+            kind: 'criterion',
+            criterionId: criterion.id,
+            verdict: verdict.verdict,
+            detail: verdict.detail,
+            headSha: head,
+            baseSha: base,
+          })
+          .run();
+      }
+    }
   }
 
   /** Fails a Task the factory itself could not carry through (`factory_error`). */
@@ -1072,43 +1419,170 @@ async function inspect(worktree: string, baseSha: string): Promise<Inspection> {
   return { headSha, commits, wipCommit, result, violations };
 }
 
-/**
- * Approval before review exists (#8): every required verification command
- * passed, verification left HEAD and the Worktree as they were, and every mandatory criterion
- * the Task covers has passing Evidence.
- */
-function decide(
-  verificationRuns: readonly VerificationRunRecord[],
-  criteria: readonly { code: string; mandatory: boolean }[],
-  worktree: { headUnchanged: boolean; changedByVerification: readonly string[] },
-): Outcome {
-  const problems: string[] = [];
-  for (const run of verificationRuns) {
-    if (run.required && run.exitCode !== 0) {
-      problems.push(
-        `verification ${run.key} ${run.timedOut ? 'timed out' : `exited ${String(run.exitCode)}`}`,
-      );
+/** The reviewer's proposal and what it was given, or why there is none. */
+type Reviewed =
+  | {
+      kind: 'valid';
+      packet: ReviewPacket;
+      value: ReviewProposal;
+      sessionRef: string | null;
+      harnessId: string;
     }
+  | { kind: 'failed'; detail: string };
+
+function usageOf(result: HarnessRawResult | undefined): Usage {
+  return result === undefined
+    ? { tag: 'unknown', inputTokens: null, outputTokens: null, costUsd: null, durationMs: 0 }
+    : { ...result.usage, durationMs: Math.round(result.durationMs) };
+}
+
+/** What the factory read from git about an Attempt, as Attempt columns. */
+function attemptFindings(inspection: Inspection, usage: Usage | null) {
+  return {
+    headSha: inspection.headSha,
+    commitsJson: JSON.stringify(inspection.commits),
+    wipCommit: inspection.wipCommit,
+    protocolViolationsJson: JSON.stringify(inspection.violations),
+    usageJson: usage === null ? null : JSON.stringify(usage),
+  };
+}
+
+/**
+ * Whether the Worktree is still exactly `head`: `who` (verification, the
+ * reviewer) must leave no modified or untracked files, and, for
+ * verification, must not move HEAD (the review's staleness is the approval
+ * rule's to judge).
+ */
+async function worktreeProblems(
+  path: string,
+  head: string,
+  who: string,
+  opts: { headToo: boolean } = { headToo: true },
+): Promise<string[]> {
+  const problems: string[] = [];
+  if (opts.headToo && (await resolveCommit(path, 'HEAD')) !== head) {
+    problems.push(`HEAD moved during ${who}, so the Evidence is stale`);
   }
-  if (!worktree.headUnchanged) {
-    problems.push('HEAD moved during verification, so the Evidence is stale');
-  }
-  if (worktree.changedByVerification.length > 0) {
-    // The commands didn't test exactly head_sha, so their Evidence can't be tied to it.
+  const changed = await uncommittedPaths(path);
+  if (changed.length > 0) {
+    // The Gates didn't see exactly head_sha, so their results can't be tied to it.
     problems.push(
-      `verification changed the Worktree (${worktree.changedByVerification.slice(0, 10).join(', ')}), so the Evidence does not match head_sha; make the commands leave no untracked or modified files (or ignore them)`,
+      `${who} changed the Worktree (${changed.slice(0, 10).join(', ')}), so the Gates do not match head_sha; ${who === 'verification' ? 'make the commands leave no untracked or modified files (or ignore them)' : 'the reviewer must change nothing'}`,
     );
   }
-  for (const c of criteria) {
-    if (!c.mandatory) continue;
-    const verdict: EvidenceVerdict = criterionVerdict(
-      verificationRuns.filter((r) => r.criteria.includes(c.code)),
-    ).verdict;
-    if (verdict !== 'pass') problems.push(`mandatory ${c.code} has Evidence ${verdict}, not pass`);
-  }
-  return problems.length === 0
-    ? { state: 'passed', exitReason: 'completed', detail: 'every factory Gate passed' }
-    : { state: 'failed', exitReason: 'gates_failed', detail: problems.join('; ') };
+  return problems;
+}
+
+/** Mandatory criteria whose verifying commands failed: no review can make them pass. */
+function commandCriteriaFailures(
+  runs: readonly VerificationRunRecord[],
+  criteria: readonly { code: string; mandatory: boolean }[],
+): string[] {
+  return criteria
+    .filter((c) => c.mandatory)
+    .filter(
+      (c) => criterionVerdict(runs.filter((r) => r.criteria.includes(c.code))).verdict === 'fail',
+    )
+    .map((c) => `mandatory ${c.code} has Evidence fail from its verifying commands`);
+}
+
+/** The approval rule's input, read from what is recorded for the Attempt. */
+function approvalInput(
+  tx: Tx,
+  attemptId: string,
+  current: { headSha: string; baseSha: string },
+  review: ApprovalInput['review'],
+  definition: TaskDefinition,
+  jobId: string,
+): ApprovalInput {
+  const runs = tx
+    .select()
+    .from(schema.verificationRuns)
+    .where(eq(schema.verificationRuns.attemptId, attemptId))
+    .all();
+  const evidence = tx
+    .select()
+    .from(schema.evidence)
+    .where(and(eq(schema.evidence.attemptId, attemptId), eq(schema.evidence.kind, 'criterion')))
+    .all();
+  return {
+    current,
+    verification: runs.map((r) => ({
+      key: r.commandKey,
+      required: r.required,
+      exitCode: r.exitCode,
+      timedOut: r.timedOut,
+      headSha: r.headSha,
+      baseSha: r.baseSha,
+    })),
+    criteria: criteriaCoveredBy(tx, jobId, definition.acceptance).map((c) => ({
+      code: c.code,
+      mandatory: c.mandatory,
+      evidence: evidence
+        .filter((e) => e.criterionId === c.id)
+        .map((e) => ({
+          source: e.reviewId === null ? ('commands' as const) : ('review' as const),
+          verdict: EvidenceVerdictSchema.parse(e.verdict),
+          headSha: e.headSha,
+          baseSha: e.baseSha,
+        })),
+    })),
+    review,
+  };
+}
+
+/**
+ * Ends the Attempt with `outcome`, moves the Task to `approved` or `failed`,
+ * releases the Attempt's leases, preserves the Worktree and settles `execution`.
+ */
+function endAttempt(
+  tx: Tx,
+  state: JobState,
+  step: StageRunStepper,
+  input: {
+    jobId: string;
+    taskId: string;
+    attemptId: string;
+    worktreeId: string;
+    baseSha: string;
+    inspection: Inspection;
+    outcome: Outcome;
+    usage: Usage | null;
+    from: 'verifying' | 'in_review';
+  },
+): void {
+  const { jobId, taskId, attemptId, outcome, inspection } = input;
+  const op = { jobId, actor: ACTOR };
+  stepAttempt(
+    tx,
+    op,
+    attemptId,
+    input.from,
+    {
+      state: outcome.state,
+      exitReason: outcome.exitReason,
+      exitDetail: outcome.detail,
+      ...attemptFindings(inspection, input.usage),
+      finishedAt: new Date().toISOString(),
+    },
+    {
+      exitReason: outcome.exitReason,
+      headSha: inspection.headSha,
+      baseSha: input.baseSha,
+      wipCommit: inspection.wipCommit,
+    },
+  );
+  stepTask(
+    tx,
+    op,
+    requireTask(tx, taskId, input.from),
+    outcome.state === 'passed' ? 'approved' : 'failed',
+    { reason: outcome.exitReason, payload: { attemptId, headSha: inspection.headSha } },
+  );
+  const worktree = requireWorktree(tx, input.worktreeId);
+  releaseAttemptTokens(tx, taskId, worktree.portBase);
+  stepWorktree(tx, op, worktree, 'active', 'preserved');
+  settleExecution(tx, state, step);
 }
 
 const MAX_RESULT_BYTES = 1024 * 1024;

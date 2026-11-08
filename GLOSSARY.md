@@ -120,6 +120,14 @@ _Avoid_: Check (on its own), quality bar
 The recorded verdict of a Gate or an acceptance criterion, valid only for the exact code version it was produced against.
 _Avoid_: Gate result, proof, test result
 
+**Review**:
+An independent judgement of one Task's change by a reviewer Harness Run in a fresh Session, which sees only the Review Packet. It approves the change or requests changes, carries Findings and a verdict per acceptance criterion, and is valid only for the `(head_sha, base_sha)` it reviewed. It is a Gate, stored once and never regenerated.
+_Avoid_: Code review (on its own), QA, check
+
+**Review Packet**:
+What a reviewer is sent: the specification, the acceptance criteria the Task covers, the diff of the Task Branch, and the factory's own Evidence. Never the implementer's transcript or its claims.
+_Avoid_: Review context, review prompt
+
 **Finding**:
 A problem raised by a review, with a severity, a Fault Origin, a location and a recommended correction. It may be blocking. Verdicts on acceptance criteria are Evidence, not Findings.
 _Avoid_: Issue, comment, defect
