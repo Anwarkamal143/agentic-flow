@@ -11,6 +11,9 @@ importers:
       '@eslint/js':
         specifier: 10.0.1
         version: 10.0.1(eslint@10.14.0)
+      '@factory/domain':
+        specifier: workspace:*
+        version: link:packages/domain
       '@types/node':
         specifier: 22.20.5
         version: 22.20.5

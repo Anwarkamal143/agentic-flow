@@ -15,6 +15,7 @@ import {
 
 export * from './proposals.js';
 export * from './execution.js';
+export * from './review.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -342,6 +343,7 @@ export const ArtifactKindSchema = z.enum([
   'task_result',
   'log',
   'report',
+  'review',
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 

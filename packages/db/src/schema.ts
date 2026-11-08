@@ -1,5 +1,6 @@
 import {
   index,
+  type AnySQLiteColumn,
   integer,
   primaryKey,
   sqliteTable,
@@ -338,6 +339,67 @@ export const evidence = sqliteTable(
     headSha: text('head_sha').notNull(),
     baseSha: text('base_sha').notNull(),
     artifactId: text('artifact_id').references(() => artifacts.id),
+    /** Set when the verdict is the review's (kind `criterion`); else it came from the commands. */
+    reviewId: text('review_id').references((): AnySQLiteColumn => reviews.id),
   },
   (t) => [index('evidence_attempt').on(t.attemptId)],
+);
+
+/**
+ * An independent review of one Attempt (ARCHITECTURE §9), valid only for its
+ * `(head_sha, base_sha)`. Written once, when the reviewer's proposal is
+ * valid; never regenerated. The packet is what the reviewer was sent.
+ */
+export const reviews = sqliteTable(
+  'reviews',
+  {
+    id: text('id').primaryKey(),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    attemptId: text('attempt_id')
+      .notNull()
+      .references(() => attempts.id),
+    reviewerHarnessId: text('reviewer_harness_id').notNull(),
+    reviewerHarnessVersion: text('reviewer_harness_version'),
+    sessionRef: text('session_ref'),
+    promptTemplateId: text('prompt_template_id').notNull(),
+    promptTemplateHash: text('prompt_template_hash').notNull(),
+    packetJson: text('packet_json').notNull(),
+    headSha: text('head_sha').notNull(),
+    baseSha: text('base_sha').notNull(),
+    outcome: text('outcome').notNull(),
+    summary: text('summary').notNull(),
+    artifactId: text('artifact_id')
+      .notNull()
+      .references(() => artifacts.id),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    index('reviews_job').on(t.jobId),
+    uniqueIndex('reviews_attempt_shas').on(t.attemptId, t.headSha, t.baseSha),
+  ],
+);
+
+/** One Finding of a review. */
+export const reviewFindings = sqliteTable(
+  'review_findings',
+  {
+    id: text('id').primaryKey(),
+    reviewId: text('review_id')
+      .notNull()
+      .references(() => reviews.id),
+    position: integer('position').notNull(),
+    severity: text('severity').notNull(),
+    faultOrigin: text('fault_origin').notNull(),
+    location: text('location').notNull(),
+    problem: text('problem').notNull(),
+    why: text('why').notNull(),
+    recommendation: text('recommendation').notNull(),
+    blocking: integer('blocking', { mode: 'boolean' }).notNull(),
+  },
+  (t) => [uniqueIndex('review_findings_review_position').on(t.reviewId, t.position)],
 );

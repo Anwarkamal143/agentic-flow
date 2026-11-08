@@ -17,6 +17,7 @@
     "fixtures": "node fixtures/create-tiny-ts.mjs"
   },
   "devDependencies": {
+    "@factory/domain": "workspace:*",
     "@eslint/js": "10.0.1",
     "@types/node": "22.20.5",
     "eslint": "10.14.0",

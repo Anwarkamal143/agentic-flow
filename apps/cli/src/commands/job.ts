@@ -9,6 +9,7 @@ import type {
   Job,
   JobSummary,
   Repository,
+  Review,
   Task,
 } from '@factory/domain';
 import { resolveHome } from '@factory/home';
@@ -87,16 +88,17 @@ export async function jobShow(id: string, opts: { json: boolean }): Promise<numb
     return 0;
   }
   const path = `/v1/jobs/${encodeURIComponent(id)}`;
-  const [criteria, tasks, attempts, worktrees, artifacts] = await Promise.all([
+  const [criteria, tasks, attempts, worktrees, artifacts, reviews] = await Promise.all([
     api.json<AcceptanceCriterion[]>('GET', `${path}/acceptance-criteria`),
     api.json<Task[]>('GET', `${path}/tasks`),
     api.json<Attempt[]>('GET', `${path}/attempts`),
     api.json<Worktree[]>('GET', `${path}/worktrees`),
     api.json<Artifact[]>('GET', `${path}/artifacts`),
+    api.json<Review[]>('GET', `${path}/reviews`),
   ]);
   writeJob(job);
   writePlan(criteria, tasks);
-  writeAttempts(tasks, attempts, worktrees);
+  writeAttempts(tasks, attempts, worktrees, reviews);
   const report = artifacts.find((a) => a.kind === 'report');
   if (report !== undefined) {
     writeDelivery(
@@ -186,7 +188,12 @@ function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
   if (lines.length > 0) process.stdout.write(lines.join('\n') + '\n');
 }
 
-function writeAttempts(tasks: Task[], attempts: Attempt[], worktrees: Worktree[]): void {
+function writeAttempts(
+  tasks: Task[],
+  attempts: Attempt[],
+  worktrees: Worktree[],
+  reviews: Review[],
+): void {
   if (attempts.length === 0) return;
   const lines = ['Attempts:'];
   for (const a of attempts) {
@@ -208,8 +215,18 @@ function writeAttempts(tasks: Task[], attempts: Attempt[], worktrees: Worktree[]
       lines.push(
         e.kind === 'verification'
           ? `    ${String(e.verificationKey).padEnd(12)} ${e.verdict.padEnd(10)} exit ${String(run?.exitCode ?? 'none')}`
-          : `    ${String(e.criterionCode).padEnd(12)} ${e.verdict.padEnd(10)} ${e.detail}`,
+          : `    ${String(e.criterionCode).padEnd(12)} ${e.verdict.padEnd(10)} ${e.source}: ${e.detail}`,
       );
+    }
+    for (const r of reviews.filter((x) => x.attemptId === a.id)) {
+      lines.push(
+        `    review       ${r.outcome}  on ${r.headSha.slice(0, 12)} (base ${r.baseSha.slice(0, 12)}), ${r.reviewer.harnessId} in Session ${r.sessionRef ?? '?'}: ${r.summary}`,
+      );
+      for (const f of r.findings) {
+        lines.push(
+          `      ${f.severity.padEnd(8)} ${f.faultOrigin.padEnd(14)} ${f.location}  ${f.blocking ? 'BLOCKING ' : ''}${f.problem}`,
+        );
+      }
     }
   }
   process.stdout.write(lines.join('\n') + '\n');

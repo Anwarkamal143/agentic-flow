@@ -26,6 +26,7 @@ import {
   type TaskDefinition,
 } from '@factory/domain';
 import {
+  describeHarnessExit,
   guardrailEnv,
   type AgentHarness,
   type HarnessRawResult,
@@ -295,13 +296,10 @@ export class StageScheduler {
     ctx: Parameters<ProposalStage['validate']>[1],
   ): Outcome {
     if (result.exit.kind !== 'exited' || result.exit.code !== 0) {
-      const how =
-        result.exit.kind === 'exited'
-          ? `exited with code ${String(result.exit.code)}`
-          : result.exit.kind === 'timed_out'
-            ? `timed out after ${String(result.exit.afterMs)} ms`
-            : 'was cancelled';
-      return { kind: 'harness_failed', message: `the ${stage.stageId} Harness Run ${how}` };
+      return {
+        kind: 'harness_failed',
+        message: `the ${stage.stageId} Harness Run ${describeHarnessExit(result.exit)}`,
+      };
     }
     let json: unknown;
     try {

@@ -29,6 +29,7 @@ interface WorktreeBody {
 interface EvidenceBody {
   id: string;
   kind: string;
+  source: string;
   criterionCode: string | null;
   verificationKey: string | null;
   verdict: string;
@@ -85,6 +86,7 @@ interface DeliveryReport {
     changedFiles: string[];
     wipCommit: string | null;
     criteria: { code: string; mandatory: boolean; verdict: string }[];
+    review: { id: string; outcome: string; headSha: string; baseSha: string };
   }[];
   knownLimitations: string[];
 }
@@ -119,7 +121,7 @@ async function attemptsOf(rt: RunningRuntime, jobId: string) {
 }
 
 describe('Task execution in a Worktree, verified by the factory, delivered locally', () => {
-  it('runs the ready Task, verifies it itself, and completes the Job with a Delivery Report', async () => {
+  it('A1 happy path: runs, verifies and reviews the Task, then completes the Job with a Delivery Report', async () => {
     const { rt, repo, source } = await executionRuntime(VALID_SCRIPT);
     const before = snapshot(source);
 
@@ -174,12 +176,24 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
     for (const e of attempt.evidence) expect([e.headSha, e.baseSha]).toEqual([head, base]);
     for (const v of attempt.verificationRuns) expect([v.headSha, v.baseSha]).toEqual([head, base]);
     expect(
-      attempt.evidence.map((e) => [e.kind, e.verificationKey ?? e.criterionCode, e.verdict]),
+      attempt.evidence.map((e) => [
+        e.kind,
+        e.source,
+        e.verificationKey ?? e.criterionCode,
+        e.verdict,
+      ]),
     ).toEqual([
-      ['verification', 'test', 'pass'],
-      ['verification', 'typecheck', 'pass'],
-      ['criterion', 'AC-01', 'pass'],
+      ['verification', 'commands', 'test', 'pass'],
+      ['verification', 'commands', 'typecheck', 'pass'],
+      ['criterion', 'commands', 'AC-01', 'pass'],
+      ['criterion', 'review', 'AC-01', 'pass'],
     ]);
+
+    // The independent review approved exactly this (head, base).
+    const [review] = await json<
+      [{ id: string; outcome: string; headSha: string; baseSha: string }]
+    >(rt.request(`/v1/jobs/${job.id}/reviews`));
+    expect(review).toMatchObject({ outcome: 'approved', headSha: head, baseSha: base });
     const typecheck = attempt.verificationRuns.find((v) => v.key === 'typecheck');
     const log = await json<{ output: string; exitCode: number }>(
       rt.request(`/v1/artifacts/${String(typecheck?.outputArtifactId)}/content`),
@@ -203,8 +217,10 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       changedFiles: ['src/math.ts'],
       commits: [{ sha: head, subject: 'Add sum() to math.ts' }],
       criteria: [{ code: 'AC-01', mandatory: true, verdict: 'pass' }],
+      review: { id: review.id, outcome: 'approved', headSha: head, baseSha: base },
     });
-    expect(report.knownLimitations.join('\n')).toMatch(/not .*review/i);
+    expect(report.knownLimitations.join('\n')).not.toMatch(/not .*reviewed/i);
+    expect(report.knownLimitations.join('\n')).toMatch(/open low review finding/);
 
     // The Worktree went active → preserved → removed, and was removed only after delivery.
     const events = await json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events?limit=1000`));

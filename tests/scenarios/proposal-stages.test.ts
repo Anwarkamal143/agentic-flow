@@ -117,12 +117,15 @@ describe('proposal Stages, driven by the Fake Harness', () => {
 
     const events = await json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events`));
     const runs = events.filter((e) => e.type === 'harness_run.started');
-    expect(runs.map((e) => [e.payload['stageId'], e.payload['harnessId']])).toEqual([
-      ['triage', 'fake'],
-      ['discovery', 'fake'],
-      ['specification', 'fake'],
-      ['planning', 'fake'],
-      ['execution', 'fake'],
+    expect(
+      runs.map((e) => [e.payload['stageId'], e.payload['role'], e.payload['harnessId']]),
+    ).toEqual([
+      ['triage', 'triager', 'fake'],
+      ['discovery', 'researcher', 'fake'],
+      ['specification', 'specifier', 'fake'],
+      ['planning', 'planner', 'fake'],
+      ['execution', 'developer', 'fake'],
+      ['execution', 'reviewer', 'fake'],
     ]);
   });
 

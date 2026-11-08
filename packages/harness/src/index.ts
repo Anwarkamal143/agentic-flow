@@ -4,7 +4,7 @@
  * decided by runtime configuration alone.
  */
 export { FakeHarness, FakeScriptError, loadFakeScript, parseFakeScript } from './fake.js';
-export type { FakeScript, FakeResponse, FakeTaskResponse } from './fake.js';
+export type { FakeScript, FakeResponse, FakeReviewResponse, FakeTaskResponse } from './fake.js';
 export { ENV_ALLOWLIST, guardrailEnv, spawnGuarded } from './guardrail.js';
 export type { GuardedExit, GuardedOptions, GuardedProcess } from './guardrail.js';
 
@@ -49,6 +49,13 @@ export type HarnessEvent =
 /** How the Run ended. Exit code 0 is not evidence that the output is valid. */
 export type HarnessExit =
   { kind: 'exited'; code: number } | { kind: 'cancelled' } | { kind: 'timed_out'; afterMs: number };
+
+/** How a Harness Run ended, in words: `exited with code 2`, `timed out after 600000 ms`, `was cancelled`. */
+export function describeHarnessExit(exit: HarnessExit): string {
+  if (exit.kind === 'exited') return `exited with code ${String(exit.code)}`;
+  if (exit.kind === 'timed_out') return `timed out after ${String(exit.afterMs)} ms`;
+  return 'was cancelled';
+}
 
 /** Usage as the Harness reported it, tagged with how much it can be trusted (ARCHITECTURE §13). */
 export interface HarnessUsage {

@@ -28,11 +28,17 @@
  *         # resultRaw: "not json"                            # written verbatim instead
  *         exitCode: 0
  *         delayMs: 0                                         # after the steps, before exiting
+ *   reviews:                                                 # reviewer Harness Runs, by Task key
+ *     add-sum:
+ *       - steps: []                                          # optional, in the Worktree, as above
+ *         output: { outcome: approved, … }                   # emitted as JSON (or raw: "…")
+ *         exitCode: 0
  *
  * A Task's Harness Runs happen in a child process started under the Tier 0 guardrail
  * (the environment, stdin and working directory the factory chose), so the
  * Fake is contained exactly like a real Harness. The n-th Run of a Task for a
- * Job gets the n-th response.
+ * Job gets the n-th response, counted separately per Role (developer, reviewer).
+ * Every Run is a new Session with its own `sessionRef`; the Fake never resumes one.
  */
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -89,11 +95,28 @@ const FakeTaskResponseSchema = z
   });
 export type FakeTaskResponse = z.infer<typeof FakeTaskResponseSchema>;
 
+const FakeReviewResponseSchema = z
+  .object({
+    steps: z.array(FakeStepSchema).default([]),
+    /** Any value; the Run's output is its JSON. */
+    output: z.unknown().optional(),
+    /** The Run's output, verbatim. */
+    raw: z.string().optional(),
+    exitCode: z.number().int().min(0).max(255).default(0),
+    delayMs: z.number().int().min(0).max(600_000).default(0),
+  })
+  .strict()
+  .refine((r) => r.output === undefined || r.raw === undefined, {
+    message: 'give either output or raw, not both',
+  });
+export type FakeReviewResponse = z.infer<typeof FakeReviewResponseSchema>;
+
 const FakeScriptSchema = z
   .object({
     version: z.literal(1),
     stages: z.partialRecord(StageIdSchema, z.array(FakeResponseSchema).min(1)).default({}),
     tasks: z.record(z.string(), z.array(FakeTaskResponseSchema).min(1)).default({}),
+    reviews: z.record(z.string(), z.array(FakeReviewResponseSchema).min(1)).default({}),
   })
   .strict();
 export type FakeScript = z.infer<typeof FakeScriptSchema>;
@@ -148,9 +171,12 @@ export class FakeHarness implements AgentHarness {
 
   start(input: HarnessStartInput): Promise<HarnessRun> {
     const taskKey = input.subject.taskKey;
-    const key = `${input.subject.jobId}/${input.subject.stageId}/${taskKey ?? ''}`;
+    const key = `${input.subject.jobId}/${input.subject.stageId}/${taskKey ?? ''}/${input.role}`;
     const n = (this.runs.get(key) ?? 0) + 1;
     this.runs.set(key, n);
+    if (taskKey !== undefined && input.role === 'reviewer') {
+      return Promise.resolve(reviewRun(input, this.script.reviews[taskKey]?.[n - 1], n));
+    }
     if (taskKey !== undefined) {
       return Promise.resolve(taskRun(input, this.script.tasks[taskKey]?.[n - 1], n));
     }
@@ -208,6 +234,7 @@ function scriptedRun(
 
   return {
     executionId: `fake_${randomBytes(8).toString('hex')}`,
+    sessionRef: newSessionRef(),
     events: events(),
     result,
     cancel: () => {
@@ -220,39 +247,94 @@ function scriptedRun(
 
 const WORKER = fileURLToPath(new URL('./fake-worker.js', import.meta.url));
 
+/** A new Session id: every Fake Run starts a fresh Session. */
+function newSessionRef(): string {
+  return `fake-session_${randomBytes(8).toString('hex')}`;
+}
+
 /** A developer Harness Run: the scripted steps, performed by a guarded child process. */
 function taskRun(
   input: HarnessStartInput,
   response: FakeTaskResponse | undefined,
   n: number,
 ): HarnessRun {
-  const missing = `fake harness: the script has no response #${String(n)} for task ${String(input.subject.taskKey)}\n`;
+  return guardedRun(
+    input,
+    response === undefined ? undefined : JSON.stringify(response),
+    `fake harness: the script has no response #${String(n)} for task ${String(input.subject.taskKey)}\n`,
+    (_exit, processOutput) => processOutput,
+  );
+}
+
+/**
+ * A reviewer Harness Run: its scripted steps (if any) in a guarded child
+ * process, then the scripted output as the Run's final text.
+ */
+function reviewRun(
+  input: HarnessStartInput,
+  response: FakeReviewResponse | undefined,
+  n: number,
+): HarnessRun {
+  const output =
+    response === undefined
+      ? ''
+      : response.raw !== undefined
+        ? response.raw
+        : response.output === undefined
+          ? ''
+          : JSON.stringify(response.output);
+  return guardedRun(
+    input,
+    response === undefined
+      ? undefined
+      : JSON.stringify({
+          steps: response.steps,
+          exitCode: response.exitCode,
+          delayMs: response.delayMs,
+        } satisfies FakeTaskResponse),
+    `fake harness: the script has no review response #${String(n)} for task ${String(input.subject.taskKey)}\n`,
+    (exit, processOutput) =>
+      exit.kind === 'exited' && exit.code === 0 && response !== undefined ? output : processOutput,
+  );
+}
+
+/** Runs the Fake worker under the guardrail, or a process that prints `missing` and exits 1. */
+function guardedRun(
+  input: HarnessStartInput,
+  workerArg: string | undefined,
+  missing: string,
+  outputOf: (exit: HarnessExit, processOutput: string) => string,
+): HarnessRun {
   const proc = spawnGuarded({
     command: process.execPath,
     args:
-      response === undefined
+      workerArg === undefined
         ? ['-e', `process.stdout.write(${JSON.stringify(missing)}); process.exit(1)`]
-        : [WORKER, JSON.stringify(response)],
+        : [WORKER, workerArg],
     cwd: input.cwd,
     env: input.env,
     timeoutMs: input.limits.wallClockMs,
   });
-  const result: Promise<HarnessRawResult> = proc.exit.then((e) => ({
-    exit: e.cancelled
+  const result: Promise<HarnessRawResult> = proc.exit.then((e) => {
+    const exit: HarnessExit = e.cancelled
       ? { kind: 'cancelled' }
       : e.timedOut
         ? { kind: 'timed_out', afterMs: input.limits.wallClockMs }
-        : { kind: 'exited', code: e.code ?? 128 },
-    output: e.output,
-    usage: { tag: 'unknown', inputTokens: null, outputTokens: null, costUsd: null },
-    durationMs: e.durationMs,
-  }));
+        : { kind: 'exited', code: e.code ?? 128 };
+    return {
+      exit,
+      output: outputOf(exit, e.output),
+      usage: { tag: 'unknown', inputTokens: null, outputTokens: null, costUsd: null },
+      durationMs: e.durationMs,
+    };
+  });
   async function* events(): AsyncGenerator<HarnessEvent> {
     const res = await result;
     if (res.output !== '') yield { kind: 'text', text: res.output };
   }
   return {
     executionId: `fake_${randomBytes(8).toString('hex')}`,
+    sessionRef: newSessionRef(),
     ...(proc.pid === undefined ? {} : { pid: proc.pid }),
     events: events(),
     result,

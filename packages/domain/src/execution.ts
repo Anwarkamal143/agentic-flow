@@ -53,12 +53,14 @@ export function initialTaskState(dependsOn: readonly string[]): TaskState {
 
 /**
  * `running`: the Harness Run is alive. `verifying`: the factory is checking the
- * result itself. `passed`: every factory Gate passed. `failed`: see the exit
+ * result itself. `in_review`: the independent reviewer is reviewing it.
+ * `passed`: every Gate passed and the Task is approved. `failed`: see the exit
  * reason. `interrupted` and `cancelled` are set by recovery and cancellation.
  */
 export const AttemptStateSchema = z.enum([
   'running',
   'verifying',
+  'in_review',
   'passed',
   'failed',
   'interrupted',
@@ -68,14 +70,20 @@ export type AttemptState = z.infer<typeof AttemptStateSchema>;
 
 /**
  * Why an Attempt ended. `completed`: it ran to the end and every Gate passed.
- * `gates_failed`: a required verification command failed, or a mandatory
- * criterion has no passing Evidence. `invalid_output`: no valid Task Result.
+ * `gates_failed`: a required verification command failed, a mandatory
+ * criterion has no passing Evidence, or Evidence or the review is stale
+ * (recorded for another `(head, base)`). `changes_requested`: the review requested changes.
+ * `review_failed`: the reviewer Harness Run did not exit 0 (it crashed, timed
+ * out or did not start), so there is no review. `invalid_output`: no valid
+ * Task Result, or the review was still invalid after its one re-prompt.
  * `not_done`: the Task Result's status is not `done`. `harness_failed`: the
  * Harness Run did not exit 0. `factory_error`: the factory itself broke.
  */
 export const AttemptExitReasonSchema = z.enum([
   'completed',
   'gates_failed',
+  'changes_requested',
+  'review_failed',
   'invalid_output',
   'not_done',
   'harness_failed',
@@ -215,12 +223,21 @@ export type EvidenceVerdict = z.infer<typeof EvidenceVerdictSchema>;
 /**
  * A recorded verdict, valid only for its `(headSha, baseSha)`. Kind
  * `verification`: one factory-run command. Kind `criterion`: one Acceptance
- * Criterion, from the commands that verify it.
+ * Criterion, from the commands that verify it (source `commands`) or from the
+ * independent review (source `review`).
  */
+/** Where a criterion verdict came from: the commands that name it, or the review that gave it. */
+export function evidenceSource(row: { reviewId: string | null }): 'commands' | 'review' {
+  return row.reviewId === null ? 'commands' : 'review';
+}
+
 export const EvidenceSchema = z.object({
   id: z.string(),
   attemptId: z.string(),
   kind: z.enum(['verification', 'criterion']),
+  source: z.enum(['commands', 'review']),
+  /** The review that gave the verdict, for source `review`. */
+  reviewId: z.string().nullable(),
   verificationKey: z.string().nullable(),
   verificationRunId: z.string().nullable(),
   criterionId: z.string().nullable(),
@@ -286,7 +303,7 @@ export type Attempt = z.infer<typeof AttemptSchema>;
 // ---- Delivery Report (Phase A: a local branch) --------------------------------
 
 export const DeliveryReportSchema = z.object({
-  reportVersion: z.literal(1),
+  reportVersion: z.literal(2),
   job: z.object({ id: z.string(), title: z.string() }),
   repository: z.object({
     id: z.string(),
@@ -315,6 +332,7 @@ export const DeliveryReportSchema = z.object({
           verdict: EvidenceVerdictSchema,
         }),
       ),
+      /** Each covered criterion's verdict from all its current Evidence (commands and review). */
       criteria: z.array(
         z.object({
           code: z.string(),
@@ -324,6 +342,24 @@ export const DeliveryReportSchema = z.object({
           detail: z.string(),
         }),
       ),
+      /** The independent review that approved the Task, on its `(headSha, baseSha)`. */
+      review: z.object({
+        id: z.string(),
+        outcome: z.enum(['approved', 'changes_requested']),
+        summary: z.string(),
+        headSha: z.string(),
+        baseSha: z.string(),
+        reviewer: z.object({ harnessId: z.string(), version: z.string().nullable() }),
+        findings: z.array(
+          z.object({
+            severity: z.string(),
+            faultOrigin: z.string(),
+            location: z.string(),
+            problem: z.string(),
+            blocking: z.boolean(),
+          }),
+        ),
+      }),
     }),
   ),
   knownLimitations: z.array(z.string()),
