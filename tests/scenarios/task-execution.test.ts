@@ -323,8 +323,8 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
         .split('\n')
         .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
     );
-    // The shell itself adds PWD, SHLVL and _.
-    const shellAdded = ['PWD', 'SHLVL', '_', 'OLDPWD'];
+    // The shell itself adds PWD, SHLVL and _; macOS adds __CF_USER_TEXT_ENCODING to every process.
+    const shellAdded = ['PWD', 'SHLVL', '_', 'OLDPWD', '__CF_USER_TEXT_ENCODING'];
     const allowed = [
       'PATH',
       'HOME',

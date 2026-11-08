@@ -9,6 +9,9 @@
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   canTransitionStageRun,
+  canTransitionTask,
+  TaskStateSchema,
+  type TaskState,
   deriveJobStatus,
   FINISHED_STAGE_RUN_STATES,
   StageIdSchema,
@@ -169,4 +172,53 @@ function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper 
 
 function isFinished(state: StageRunState): boolean {
   return FINISHED_STAGE_RUN_STATES.includes(state);
+}
+
+type TaskRow = typeof schema.tasks.$inferSelect;
+
+/**
+ * Moves one Task of the Job being changed (call inside {@link changeJob}, which
+ * has already bumped the Job version), writing its `task.<to>` event. The
+ * update is guarded by the Task's state and version; zero rows is a conflict.
+ */
+export function stepTask(
+  tx: Tx,
+  op: { jobId: string; actor: string },
+  task: TaskRow,
+  to: TaskState,
+  opts: { reason?: string | undefined; payload?: Record<string, unknown> } = {},
+): TaskRow {
+  const from = TaskStateSchema.parse(task.state);
+  if (!canTransitionTask(from, to)) {
+    throw new Error(`illegal Task transition ${from} → ${to} (${task.id})`);
+  }
+  const updated = tx
+    .update(schema.tasks)
+    .set({ state: to, version: sql`${schema.tasks.version} + 1` })
+    .where(
+      and(
+        eq(schema.tasks.id, task.id),
+        eq(schema.tasks.state, from),
+        eq(schema.tasks.version, task.version),
+      ),
+    )
+    .run();
+  if (updated.changes !== 1) {
+    throw new Error(`Task ${task.id} changed under a versioned Job operation`);
+  }
+  appendEvent(tx, {
+    entityKind: 'task',
+    entityId: task.id,
+    jobId: op.jobId,
+    type: `task.${to}`,
+    actor: op.actor,
+    payload: {
+      key: task.key,
+      from,
+      to,
+      ...(opts.reason === undefined ? {} : { reason: opts.reason }),
+      ...opts.payload,
+    },
+  });
+  return { ...task, state: to, version: task.version + 1 };
 }
