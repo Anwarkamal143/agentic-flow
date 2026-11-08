@@ -4,7 +4,16 @@
  * later, SSE). Never import runtime internals or open the database here.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { onTestFinished } from 'vitest';
@@ -96,18 +105,24 @@ export interface RunningRuntime {
   readonly port: number;
   readonly pid: number;
   request(path: string, init?: RequestOptions): Promise<Response>;
+  /** Everything the runtime wrote to stdout and stderr so far. */
+  output(): string;
   /** Stops the runtime with SIGTERM and resolves with its exit code. */
   stop(): Promise<number | null>;
 }
 
 /**
  * Starts the runtime as a child process against a temporary, initialized home.
- * It is torn down (and the home removed) when the test finishes.
+ * It is torn down (and the home removed) when the test finishes. `opts.env` is
+ * merged over the home's environment (for example a restricted PATH).
  */
-export async function startRuntime(home?: TestHome): Promise<RunningRuntime> {
+export async function startRuntime(
+  home?: TestHome,
+  opts?: { env?: NodeJS.ProcessEnv },
+): Promise<RunningRuntime> {
   const h = home ?? (await initializedHome());
   const child = spawn(process.execPath, [runtimeEntry], {
-    env: h.env,
+    env: { ...h.env, ...opts?.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -136,6 +151,7 @@ export async function startRuntime(home?: TestHome): Promise<RunningRuntime> {
       if (token !== null) headers.set('authorization', `Bearer ${token}`);
       return fetch(url + path, { ...rest, headers });
     },
+    output: () => output,
     stop: () => terminate(child, exited),
   };
 }
@@ -173,4 +189,24 @@ async function waitForRuntimeRecord(
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error(`runtime did not become ready within 10s:\n${output()}`);
+}
+
+/**
+ * A temporary directory of fake executables, for use as PATH. Each entry maps a
+ * command name to the body of a POSIX shell script (`$1` is the first argument).
+ */
+export function fakeBin(tools: Record<string, string>): string {
+  const dir = join(tempDir('factory-bin-'), 'bin');
+  mkdirSync(dir);
+  for (const [name, body] of Object.entries(tools)) {
+    const path = join(dir, name);
+    writeFileSync(path, `#!/bin/sh\n${body}\n`);
+    chmodSync(path, 0o755);
+  }
+  return dir;
+}
+
+/** A fake tool body that prints `output` for `--version` and fails otherwise. */
+export function versionTool(output: string, otherwise = 'exit 1'): string {
+  return `if [ "$1" = "--version" ]; then\n  printf '%s\\n' '${output}'\n  exit 0\nfi\n${otherwise}`;
 }
