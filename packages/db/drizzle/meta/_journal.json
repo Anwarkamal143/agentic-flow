@@ -29,6 +29,13 @@
       "when": 1794146270223,
       "tag": "0003_odd_steel_serpent",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794147749980,
+      "tag": "0004_thick_redwing",
+      "breakpoints": true
     }
   ]
 }

@@ -59,6 +59,11 @@ export const VerificationCommandSchema = z.object({
   key: slug,
   command: z.string().trim().min(1).max(1000),
   required: z.boolean().default(true),
+  /**
+   * Codes of the Task's Acceptance Criteria this command verifies. Its exit
+   * code becomes their Evidence; a criterion no command names has none yet.
+   */
+  criteria: z.array(z.string()).default([]),
 });
 export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
 
@@ -184,6 +189,16 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
           rule: 'plan.criteria_exist',
           message: `${at} covers ${ac}, which the Specification does not define`,
         });
+      }
+    }
+    for (const v of task.verification) {
+      for (const ac of v.criteria) {
+        if (!task.acceptance.includes(ac)) {
+          issues.push({
+            rule: 'plan.verification_criteria',
+            message: `${at}: verification ${v.key} verifies ${ac}, which the Task does not cover`,
+          });
+        }
       }
     }
     for (const dup of duplicates(task.verification.map((v) => v.key))) {

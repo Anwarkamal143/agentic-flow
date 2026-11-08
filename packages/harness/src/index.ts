@@ -4,7 +4,9 @@
  * decided by runtime configuration alone.
  */
 export { FakeHarness, FakeScriptError, loadFakeScript, parseFakeScript } from './fake.js';
-export type { FakeScript, FakeResponse } from './fake.js';
+export type { FakeScript, FakeResponse, FakeTaskResponse } from './fake.js';
+export { ENV_ALLOWLIST, guardrailEnv, spawnGuarded } from './guardrail.js';
+export type { GuardedExit, GuardedOptions, GuardedProcess } from './guardrail.js';
 
 export type HarnessCapability = 'resume' | 'structured_output' | 'cancel';
 
@@ -23,14 +25,20 @@ export interface HarnessStartInput {
   role: HarnessRole;
   /** The fully rendered prompt. */
   prompt: string;
-  /** Working directory of the Run. */
+  /** Working directory of the Run: a Worktree, or the Factory Clone for proposals. */
   cwd: string;
+  /**
+   * The complete environment of every process the Run starts (Tier 0
+   * guardrail, built by `guardrailEnv`). A Harness never adds the runtime's
+   * own environment to it.
+   */
+  env: Readonly<Record<string, string>>;
   /**
    * What the Run is for. A Harness may use it to name logs or Sessions, or to
    * pick a scripted response (Fake). It never grants anything.
    */
   subject: { jobId: string; stageId: string; taskKey?: string };
-  limits: { wallClockMs: number };
+  limits: { wallClockMs: number; maxTurns?: number };
 }
 
 export type HarnessEvent =
@@ -63,6 +71,8 @@ export interface HarnessRun {
   readonly executionId: string;
   /** The Harness's own Session id, when it has Sessions. */
   readonly sessionRef?: string;
+  /** The process id, when the Run is a child process (for recovery, #13). */
+  readonly pid?: number;
   readonly events: AsyncIterable<HarnessEvent>;
   readonly result: Promise<HarnessRawResult>;
   /** Stops the Run. `result` then settles with exit `cancelled`. */

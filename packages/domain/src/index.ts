@@ -4,6 +4,7 @@
  */
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import { TaskStateSchema } from './execution.js';
 import {
   RiskSchema,
   RuleIssueSchema,
@@ -13,6 +14,7 @@ import {
 } from './proposals.js';
 
 export * from './proposals.js';
+export * from './execution.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -326,8 +328,20 @@ export type CancelJobInput = z.infer<typeof CancelJobInputSchema>;
 
 // ---- Artifacts, Acceptance Criteria, Tasks (ARCHITECTURE §5) -----------------
 
-/** The proposal Stage each Artifact kind comes from: triage, discovery, specification, planning. */
-export const ArtifactKindSchema = z.enum(['triage', 'discovery', 'spec', 'plan']);
+/**
+ * `triage`, `discovery`, `spec`, `plan`: the proposal Stages' outputs.
+ * `task_result`: what a Harness Run claimed. `log`: a verification command's
+ * output. `report`: the Delivery Report.
+ */
+export const ArtifactKindSchema = z.enum([
+  'triage',
+  'discovery',
+  'spec',
+  'plan',
+  'task_result',
+  'log',
+  'report',
+]);
 export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 
 /** An immutable stored output, addressed by the SHA-256 of its bytes. */
@@ -335,6 +349,8 @@ export const ArtifactSchema = z.object({
   id: z.string(),
   jobId: z.string(),
   stageRunId: z.string().nullable(),
+  taskId: z.string().nullable(),
+  attemptId: z.string().nullable(),
   kind: ArtifactKindSchema,
   /** `sha256:<hex>` of the content bytes served by `GET /v1/artifacts/:id/content`. */
   contentHash: z.string(),
@@ -354,28 +370,6 @@ export const AcceptanceCriterionSchema = z.object({
   artifactId: z.string(),
 });
 export type AcceptanceCriterion = z.infer<typeof AcceptanceCriterionSchema>;
-
-/** ARCHITECTURE §4.4. */
-export const TaskStateSchema = z.enum([
-  'pending',
-  'ready',
-  'claimed',
-  'running',
-  'verifying',
-  'in_review',
-  'changes_requested',
-  'approved',
-  'integrated',
-  'blocked',
-  'failed',
-  'cancelled',
-]);
-export type TaskState = z.infer<typeof TaskStateSchema>;
-
-/** A Task starts `ready` when it depends on nothing, else `pending` (its dependencies are unmet). */
-export function initialTaskState(dependsOn: readonly string[]): TaskState {
-  return dependsOn.length === 0 ? 'ready' : 'pending';
-}
 
 /** What the Plan says about a Task, stored with it (`tasks.definition_json`). */
 export const TaskDefinitionSchema = z.object({

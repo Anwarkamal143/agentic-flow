@@ -142,6 +142,9 @@ export const artifacts = sqliteTable(
       .references(() => jobs.id),
     /** The Stage Run whose proposal it is, for proposal Artifacts. */
     stageRunId: text('stage_run_id').references(() => stageRuns.id),
+    /** The Task and Attempt it belongs to, for an Attempt's Artifacts. */
+    taskId: text('task_id'),
+    attemptId: text('attempt_id'),
     kind: text('kind').notNull(),
     contentHash: text('content_hash').notNull(),
     /** Relative to the factory home. */
@@ -210,4 +213,131 @@ export const taskDependencies = sqliteTable(
       .references(() => tasks.id),
   },
   (t) => [primaryKey({ columns: [t.taskId, t.dependsOnTaskId] })],
+);
+
+/**
+ * One try at a Task (ARCHITECTURE §5). The Task Packet, the template hash and
+ * the Harness version are recorded when it starts; the head commit, the
+ * commits, the WIP commit and the usage are read by the factory after the Run.
+ */
+export const attempts = sqliteTable(
+  'attempts',
+  {
+    id: text('id').primaryKey(),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    n: integer('n').notNull(),
+    state: text('state').notNull(),
+    harnessId: text('harness_id').notNull(),
+    harnessVersion: text('harness_version'),
+    sessionRef: text('session_ref'),
+    promptTemplateId: text('prompt_template_id').notNull(),
+    promptTemplateHash: text('prompt_template_hash').notNull(),
+    packetJson: text('packet_json').notNull(),
+    worktreeId: text('worktree_id')
+      .notNull()
+      .references(() => worktrees.id),
+    baseSha: text('base_sha').notNull(),
+    headSha: text('head_sha'),
+    /** JSON array of the commits `base_sha..head_sha`, read from git. */
+    commitsJson: text('commits_json').notNull(),
+    wipCommit: text('wip_commit'),
+    /** JSON array of `RuleIssue`: where the Task Result disagreed with git. */
+    protocolViolationsJson: text('protocol_violations_json').notNull(),
+    startedAt: text('started_at').notNull(),
+    finishedAt: text('finished_at'),
+    exitReason: text('exit_reason'),
+    exitDetail: text('exit_detail'),
+    usageJson: text('usage_json'),
+    version: integer('version').notNull(),
+  },
+  (t) => [uniqueIndex('attempts_task_n').on(t.taskId, t.n)],
+);
+
+/**
+ * Exclusive claims on a resource: a Task (held by the dispatcher) or a block
+ * of ports (held by a Worktree). One row per resource; releasing deletes it.
+ */
+export const leases = sqliteTable(
+  'leases',
+  {
+    resourceKind: text('resource_kind').notNull(),
+    resourceId: text('resource_id').notNull(),
+    holder: text('holder').notNull(),
+    leaseId: text('lease_id').notNull(),
+    acquiredAt: text('acquired_at').notNull(),
+    expiresAt: text('expires_at').notNull(),
+    heartbeatAt: text('heartbeat_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.resourceKind, t.resourceId] })],
+);
+
+/** A Worktree of a Factory Clone, for one Task. */
+export const worktrees = sqliteTable(
+  'worktrees',
+  {
+    id: text('id').primaryKey(),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    repositoryId: text('repository_id')
+      .notNull()
+      .references(() => repositories.id),
+    path: text('path').notNull(),
+    branch: text('branch').notNull(),
+    baseSha: text('base_sha').notNull(),
+    state: text('state').notNull(),
+    /** First port of the block leased to this Worktree (a `port_block` lease while held). */
+    portBase: integer('port_base').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('worktrees_task').on(t.taskId), uniqueIndex('worktrees_path').on(t.path)],
+);
+
+/** One factory-run verification command, against one `(head_sha, base_sha)`. */
+export const verificationRuns = sqliteTable(
+  'verification_runs',
+  {
+    id: text('id').primaryKey(),
+    attemptId: text('attempt_id')
+      .notNull()
+      .references(() => attempts.id),
+    commandKey: text('command_key').notNull(),
+    command: text('command').notNull(),
+    required: integer('required', { mode: 'boolean' }).notNull(),
+    headSha: text('head_sha').notNull(),
+    baseSha: text('base_sha').notNull(),
+    exitCode: integer('exit_code'),
+    timedOut: integer('timed_out', { mode: 'boolean' }).notNull(),
+    startedAt: text('started_at').notNull(),
+    durationMs: integer('duration_ms').notNull(),
+    outputArtifactId: text('output_artifact_id')
+      .notNull()
+      .references(() => artifacts.id),
+  },
+  (t) => [index('verification_runs_attempt').on(t.attemptId)],
+);
+
+/** A recorded verdict, valid only for its `(head_sha, base_sha)`. */
+export const evidence = sqliteTable(
+  'evidence',
+  {
+    id: text('id').primaryKey(),
+    attemptId: text('attempt_id')
+      .notNull()
+      .references(() => attempts.id),
+    kind: text('kind').notNull(),
+    verificationRunId: text('verification_run_id').references(() => verificationRuns.id),
+    criterionId: text('criterion_id').references(() => acceptanceCriteria.id),
+    verdict: text('verdict').notNull(),
+    detail: text('detail').notNull(),
+    headSha: text('head_sha').notNull(),
+    baseSha: text('base_sha').notNull(),
+    artifactId: text('artifact_id').references(() => artifacts.id),
+  },
+  (t) => [index('evidence_attempt').on(t.attemptId)],
 );

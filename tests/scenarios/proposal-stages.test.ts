@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { parse, stringify } from 'yaml';
 import { initializedHome, startRuntime, useFakeHarness } from '../support/factory.js';
 import {
   createJob,
@@ -11,79 +10,7 @@ import {
   waitForJob,
   type EventBody,
 } from '../support/api.js';
-
-/** A Fake Harness script whose every proposal is valid. */
-const VALID_SCRIPT = `
-version: 1
-stages:
-  triage:
-    - output:
-        summary: Add a sum() helper to the math module.
-        type: feature
-        risk: low
-  discovery:
-    - output:
-        summary: math.ts exports add(); tests live in test/math.test.ts.
-        files:
-          - path: src/math.ts
-            reason: the module to extend
-          - path: test/math.test.ts
-            reason: where the new test goes
-  specification:
-    - output:
-        problem: There is no way to sum two numbers.
-        objective: Export sum(a, b) from src/math.ts.
-        scope: [src/math.ts, test/math.test.ts]
-        outOfScope: [other modules]
-        requirements:
-          - code: FR-01
-            text: sum(a, b) returns a + b.
-        acceptanceCriteria:
-          - code: AC-01
-            text: sum(2, 3) returns 5.
-            mandatory: true
-            verification: a Vitest test in test/math.test.ts
-          - code: AC-02
-            text: sum is documented with a JSDoc comment.
-            mandatory: false
-            verification: review
-        edgeCases: [negative numbers]
-        securityConsiderations: []
-        definitionOfDone: [AC-01 passes under the factory's own test run]
-  planning:
-    - output:
-        tasks:
-          - key: add-sum
-            title: Add sum() to math.ts
-            objective: Export sum(a, b) and test it.
-            repository: tiny-ts
-            role: developer
-            risk: low
-            scope:
-              writable: [src/math.ts, test/**]
-              forbidden: [package.json, .github/**]
-            dependsOn: []
-            acceptance: [AC-01]
-            verification:
-              - key: test
-                command: npm test
-                required: true
-              - key: typecheck
-                command: npm run typecheck
-                required: true
-`;
-
-/** The valid script with some Stages' responses replaced. */
-function scriptWith(stages: Record<string, unknown[]>): string {
-  const script = parse(VALID_SCRIPT) as { stages: Record<string, unknown[]> };
-  return stringify({ ...script, stages: { ...script.stages, ...stages } });
-}
-
-/** The valid response of a Stage, as an object to change. */
-function validOutput(stage: string): Record<string, unknown> {
-  const script = parse(VALID_SCRIPT) as { stages: Record<string, [{ output: object }]> };
-  return structuredClone(script.stages[stage]?.[0].output) as Record<string, unknown>;
-}
+import { scriptWith, validOutput, VALID_SCRIPT } from '../support/scripts.js';
 
 interface ArtifactBody {
   id: string;
