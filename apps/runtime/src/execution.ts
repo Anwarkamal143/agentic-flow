@@ -56,6 +56,7 @@ import {
   type TaskResult,
   type Usage,
   toolPolicyOf,
+  type SecurityTier,
 } from '@factory/domain';
 import {
   addWorktree,
@@ -127,6 +128,9 @@ const DEVELOPER_RUNS = 2;
 /** Reviewer Harness Runs per review: the first, plus one re-prompt. */
 const REVIEW_RUNS = 2;
 /** How often the runtime renews the leases it holds (ARCHITECTURE §12 step 4). */
+/** The security tier every Harness Run runs under in Phase A: Tier 0, the local guardrail. */
+const TIER: SecurityTier = 'local';
+
 export const LEASE_HEARTBEAT_MS = 15_000;
 /** A lease expires this long after its last heartbeat. */
 export const LEASE_TTL_MS = 90_000;
@@ -683,6 +687,7 @@ export class TaskScheduler {
             state: 'running',
             harnessId: harness.id,
             harnessVersion: this.opts.harnessVersion,
+            tier: TIER,
             promptTemplateId: TASK_TEMPLATE_ID,
             promptTemplateHash: TASK_TEMPLATE_HASH,
             packetJson: JSON.stringify(packet),
@@ -706,6 +711,7 @@ export class TaskScheduler {
             cause,
             harnessId: harness.id,
             harnessVersion: this.opts.harnessVersion,
+            tier: TIER,
             template: { id: TASK_TEMPLATE_ID, hash: TASK_TEMPLATE_HASH },
             worktreeId,
             baseSha,

@@ -22,6 +22,7 @@ import {
 
 export * from './proposals.js';
 export * from './execution.js';
+export * from './event-log.js';
 export * from './findings.js';
 export * from './review.js';
 export * from './rework.js';

@@ -7,6 +7,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./event-log": {
+      "types": "./dist/event-log.d.ts",
+      "default": "./dist/event-log.js"
     }
   },
   "dependencies": {

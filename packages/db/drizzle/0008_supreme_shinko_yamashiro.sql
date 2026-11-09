@@ -1,0 +1,1 @@
+ALTER TABLE `attempts` ADD `tier` text DEFAULT 'local' NOT NULL;

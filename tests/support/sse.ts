@@ -22,7 +22,7 @@ export interface SseStream {
 }
 
 export async function openStream(
-  rt: RunningRuntime,
+  rt: Pick<RunningRuntime, 'request'>,
   path: string,
   opts: { lastEventId?: string } = {},
 ): Promise<SseStream> {

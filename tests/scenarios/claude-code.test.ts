@@ -160,6 +160,9 @@ describe('the Claude Code Harness adapter', () => {
     expect(show.stdout).toContain('claude-code 9.8.7');
     expect(show.stdout).toContain('15 in / 3 out tokens (actual), cost unknown/subscription');
     expect(show.stdout).toContain(`session:   ${String(attempt?.sessionRef)}`);
+    expect(show.stdout).toContain(
+      'tier:      Tier 0 · local guardrail (Guardrails only: the Harness runs as your user',
+    );
   });
 
   it('records the reason the CLI gave when a Harness Run fails, not only its exit code', async () => {

@@ -286,6 +286,7 @@ export class JobService {
         exitReason: a.exitReason,
         exitDetail: a.exitDetail,
         harness: { id: a.harnessId, version: a.harnessVersion },
+        tier: a.tier,
         sessionRef: a.sessionRef,
         promptTemplate: { id: a.promptTemplateId, hash: a.promptTemplateHash },
         packet: JSON.parse(a.packetJson) as unknown,

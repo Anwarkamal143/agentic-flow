@@ -6,3 +6,5 @@ SOFTWARE_FACTORY.md
 .claude/
 .agents/
 *.md
+.next/
+next-env.d.ts

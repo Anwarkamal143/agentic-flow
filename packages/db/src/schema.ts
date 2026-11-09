@@ -238,6 +238,8 @@ export const attempts = sqliteTable(
     state: text('state').notNull(),
     harnessId: text('harness_id').notNull(),
     harnessVersion: text('harness_version'),
+    /** The security tier the Attempt ran under (`SecurityTier`); `local` is the Tier 0 guardrail. */
+    tier: text('tier').notNull().default('local'),
     sessionRef: text('session_ref'),
     promptTemplateId: text('prompt_template_id').notNull(),
     promptTemplateHash: text('prompt_template_hash').notNull(),

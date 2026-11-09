@@ -6,3 +6,5 @@ dist/
 *.tsbuildinfo
 fixtures/repos/
 tests/real/results/
+.next/
+next-env.d.ts
