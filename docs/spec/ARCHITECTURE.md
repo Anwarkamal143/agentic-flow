@@ -129,7 +129,7 @@ The API exposes **operations** (`approvePlan`, `cancelJob`, `answerQuestion`), n
 
 ### 4.6 Rework routing
 
-Review and QA findings carry a `fault_origin`:
+Blocking review, QA and Gate Findings route by `fault_origin`. Non-blocking Findings never route. They are reported as open in the Delivery Report (and the PR body, from Phase C).
 
 | fault_origin | Routes to |
 |---|---|

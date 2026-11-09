@@ -196,7 +196,7 @@ function scriptedRun(
   const started = Date.now();
   const output =
     response === undefined
-      ? `fake harness: the script has no response #${String(n)} for stage ${input.subject.stageId}\n`
+      ? exhausted(`${FAKE_SCRIPT_EXHAUSTED} #${String(n)} for stage ${input.subject.stageId}\n`)
       : response.raw !== undefined
         ? response.raw
         : response.output === undefined
@@ -245,6 +245,19 @@ function scriptedRun(
   };
 }
 
+/**
+ * Every message about a script without the response a Run asks for starts
+ * with this. Such a Run fails (exit 1), and the message also goes to the
+ * runtime's stderr: an exhausted script is a bug in the script, and the test
+ * helpers fail any scenario whose runtime logged it.
+ */
+export const FAKE_SCRIPT_EXHAUSTED = 'fake harness: the script has no response';
+
+function exhausted(message: string): string {
+  process.stderr.write(message);
+  return message;
+}
+
 const WORKER = fileURLToPath(new URL('./fake-worker.js', import.meta.url));
 
 /** A new Session id: every Fake Run starts a fresh Session. */
@@ -261,7 +274,11 @@ function taskRun(
   return guardedRun(
     input,
     response === undefined ? undefined : JSON.stringify(response),
-    `fake harness: the script has no response #${String(n)} for task ${String(input.subject.taskKey)}\n`,
+    response === undefined
+      ? exhausted(
+          `${FAKE_SCRIPT_EXHAUSTED} #${String(n)} for task ${String(input.subject.taskKey)}\n`,
+        )
+      : '',
     (_exit, processOutput) => processOutput,
   );
 }
@@ -292,7 +309,11 @@ function reviewRun(
           exitCode: response.exitCode,
           delayMs: response.delayMs,
         } satisfies FakeTaskResponse),
-    `fake harness: the script has no review response #${String(n)} for task ${String(input.subject.taskKey)}\n`,
+    response === undefined
+      ? exhausted(
+          `${FAKE_SCRIPT_EXHAUSTED} #${String(n)} for the review of task ${String(input.subject.taskKey)}\n`,
+        )
+      : '',
     (exit, processOutput) =>
       exit.kind === 'exited' && exit.code === 0 && response !== undefined ? output : processOutput,
   );

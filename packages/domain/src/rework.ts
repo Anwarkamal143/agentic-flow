@@ -126,6 +126,9 @@ export function routeFailedAttempt(input: {
   maxAttempts: number;
 }): ReworkRoute {
   if (!REWORKABLE.includes(input.exitReason)) return { kind: 'fail' };
+  // Only blocking Findings route; a non-blocking one is advice (ARCHITECTURE §4.6).
+  // Phase B extension point (B4): the spec and plan routes below stop for a human
+  // today; Phase B sends them back to the specification or planning Stage instead.
   const origins = new Set(input.findings.filter((f) => f.blocking).map((f) => f.faultOrigin));
   if (origins.has('spec')) {
     return {

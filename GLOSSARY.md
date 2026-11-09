@@ -129,7 +129,7 @@ What a reviewer is sent: the specification, the acceptance criteria the Task cov
 _Avoid_: Review context, review prompt
 
 **Finding**:
-A problem raised by a review, with a severity, a Fault Origin, a location and a recommended correction. It may be blocking. Verdicts on acceptance criteria are Evidence, not Findings.
+A problem raised by a review or a failed Gate, with a source (review | gate), a severity, a Fault Origin, a location and a recommended correction. It may be blocking. A failed-Gate Finding always blocks, and its Fault Origin is the implementation unless the Gate itself broke (then it is the infrastructure). Verdicts on acceptance criteria are Evidence, not Findings.
 _Avoid_: Issue, comment, defect
 
 **Fault Origin**:

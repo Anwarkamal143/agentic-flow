@@ -15,7 +15,16 @@ import {
   useFakeHarness,
   type RunningRuntime,
 } from '../support/factory.js';
-import { json, post, waitForJob, type EventBody, type JobBody } from '../support/api.js';
+import {
+  capAttempts,
+  expectStoppedAtCap,
+  json,
+  onlyAttempt,
+  post,
+  waitForJob,
+  type EventBody,
+  type JobBody,
+} from '../support/api.js';
 import { scriptWith, validReviewResponse, validTaskResponse } from '../support/scripts.js';
 
 interface FindingBody {
@@ -69,13 +78,16 @@ interface TaskBody {
 const settled = (job: JobBody) =>
   ['completed', 'failed', 'cancelled', 'waiting_human', 'blocked'].includes(job.status);
 
-async function runWith(script: string) {
+async function runWith(script: string, opts: { maxAttempts?: number } = {}) {
   const home = await initializedHome();
   useFakeHarness(home, script);
   const rt = await startRuntime(home);
   const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
-  const [repo] = await json<[{ id: string; clonePath: string }]>(rt.request('/v1/repositories'));
+  const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
+    rt.request('/v1/repositories'),
+  );
+  if (opts.maxAttempts !== undefined) await capAttempts(rt, repo.projectId, opts.maxAttempts);
   const created = await post(rt, '/v1/jobs', {
     repositoryId: repo.id,
     title: 'Add sum() to math.ts',
@@ -209,7 +221,7 @@ describe('The path-scope Gate and Rework', () => {
     );
   });
 
-  it('judges nested paths, renames, deletions and dotfiles, naming each rule and its paths', async () => {
+  it('judges nested paths, renames, deletions and dotfiles, naming each rule and its paths (one Attempt at cap 1)', async () => {
     const developer = validTaskResponse();
     developer.steps.push(
       { write: { path: 'test/deep/nested/more.test.ts', content: 'export {};\n' } },
@@ -219,9 +231,12 @@ describe('The path-scope Gate and Rework', () => {
       { delete: 'package.json' },
       { commit: 'Move things around' },
     );
-    const { rt, job } = await runWith(scriptWith({}, { 'add-sum': [developer] }));
+    const { rt, job } = await runWith(scriptWith({}, { 'add-sum': [developer] }), {
+      maxAttempts: 1,
+    });
 
-    const [first] = (await attemptsOf(rt, job.id)) as [AttemptBody];
+    await expectStoppedAtCap(rt, job);
+    const first = await onlyAttempt<AttemptBody>(rt, job.id);
     expect(first).toMatchObject({ state: 'failed', exitReason: 'gates_failed' });
     expect(first.findings.map((f) => [f.rule, f.paths])).toEqual([
       ['scope.forbidden', ['.github/workflows/ci.yml', 'package.json']],
