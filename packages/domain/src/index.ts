@@ -19,6 +19,8 @@ export * from './execution.js';
 export * from './findings.js';
 export * from './review.js';
 export * from './rework.js';
+export * from './redaction.js';
+export * from './logs.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 

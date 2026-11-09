@@ -7,7 +7,12 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
-import { ArtifactKindSchema, type Artifact, type ArtifactKind } from '@factory/domain';
+import {
+  ArtifactKindSchema,
+  type Artifact,
+  type ArtifactKind,
+  type Redactor,
+} from '@factory/domain';
 import { asc, eq, sql } from 'drizzle-orm';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
@@ -26,15 +31,23 @@ export class ArtifactStore {
     private readonly db: FactoryDb,
     /** The factory home root; content paths are relative to it. */
     private readonly homeRoot: string,
+    /** Applied to every string in the content before it is written (ADR-0011). */
+    private readonly redact: Redactor,
   ) {}
 
   /**
-   * Writes `value` as canonical JSON under its content hash. Writing the same
-   * content again is a no-op; an existing file that no longer matches its
-   * name is refused rather than overwritten.
+   * Writes `value` as canonical JSON under its content hash, with every
+   * string redacted first, so the hash is over the redacted bytes. Writing
+   * the same content again is a no-op; an existing file that no longer
+   * matches its name is refused rather than overwritten.
    */
   writeContent(value: unknown): StoredContent {
-    const bytes = Buffer.from(JSON.stringify(value, null, 2) + '\n', 'utf8');
+    const text = JSON.stringify(
+      value,
+      (_key, v: unknown) => (typeof v === 'string' ? this.redact(v) : v),
+      2,
+    );
+    const bytes = Buffer.from(text + '\n', 'utf8');
     const hex = sha256(bytes);
     const path = join('artifacts', 'sha256', hex.slice(0, 2), `${hex}.json`);
     const abs = join(this.homeRoot, path);
