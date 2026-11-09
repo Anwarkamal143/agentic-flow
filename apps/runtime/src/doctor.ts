@@ -12,6 +12,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
+import { API_KEY_EXPOSURE, type Billing } from '@factory/domain';
 import { findExecutable, probeClaudeCode } from '@factory/harness';
 
 export interface ToolCheck {
@@ -42,10 +43,28 @@ export interface CredentialCheck {
   present: boolean;
 }
 
+/**
+ * How the configured Claude Code Harness is billed, and what that exposes
+ * (ADR-0015). `subscription`: no credential is passed (the CLI's own login).
+ * `api_key`: `ANTHROPIC_API_KEY` is passed to every Harness Run.
+ */
+export type BillingCheck =
+  | { mode: 'subscription' }
+  | {
+      mode: 'api_key';
+      credential: 'ANTHROPIC_API_KEY';
+      /** Whether it is in the runtime's environment (presence only). */
+      present: boolean;
+      /** Who can read it. */
+      exposure: string;
+    };
+
 export interface DoctorReport {
   checkedAt: string;
   tools: ToolCheck[];
   credentials: CredentialCheck[];
+  /** `null` when the configured Harness isn't Claude Code. */
+  billing: BillingCheck | null;
 }
 
 interface ToolSpec {
@@ -97,6 +116,7 @@ const ENV_CREDENTIALS: readonly Omit<CredentialCheck, 'present'>[] = [
 export async function runDoctor(
   env: NodeJS.ProcessEnv,
   claudeCommand = 'claude',
+  billing?: Billing,
 ): Promise<DoctorReport> {
   const tools = await Promise.all(
     TOOLS.map((spec) =>
@@ -137,7 +157,22 @@ export async function runDoctor(
     // reflects gh's stored login, not GH_TOKEN/GITHUB_TOKEN (reported above).
     present: gh?.path !== undefined && (await run(gh.path, ['auth', 'status'], toolEnv(env))).ok,
   });
-  return { checkedAt: new Date().toISOString(), tools, credentials };
+  return {
+    checkedAt: new Date().toISOString(),
+    tools,
+    credentials,
+    billing: billing === undefined ? null : billingCheck(billing, env),
+  };
+}
+
+function billingCheck(billing: Billing, env: NodeJS.ProcessEnv): BillingCheck {
+  if (billing === 'subscription') return { mode: 'subscription' };
+  return {
+    mode: 'api_key',
+    credential: 'ANTHROPIC_API_KEY',
+    present: (env['ANTHROPIC_API_KEY'] ?? '') !== '',
+    exposure: API_KEY_EXPOSURE,
+  };
 }
 
 async function checkTool(spec: ToolSpec, env: NodeJS.ProcessEnv): Promise<ToolCheck> {

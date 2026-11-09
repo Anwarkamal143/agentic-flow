@@ -17,6 +17,12 @@
  *     { steps, result }          developer: write/commit steps, then the Task Result file
  *     { error: { subtype, errors, exitCode } }   a failed Harness Run
  *     { hang: true }             starts a child `sleep` (its pid recorded) and never ends
+ *     { printEnv: [names] }      puts those environment variables' values in the final text (a leak, for redaction checks)
+ *   apiKeySource   what the `init` event reports as the credential (as Claude Code 2.1.x does):
+ *                  default `ANTHROPIC_API_KEY` when that variable is set, else `none` (the login)
+ *
+ * The `result` event carries `usage` and a per-model `modelUsage` with a
+ * list-price `costUSD`, shaped like Claude Code 2.1.x's (seen 2026-11-09).
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -90,6 +96,9 @@ emit({
   subtype: 'init',
   session_id: sessionId,
   claude_code_version: scenario.version,
+  apiKeySource:
+    scenario.apiKeySource ??
+    ((process.env.ANTHROPIC_API_KEY ?? '') === '' ? 'none' : 'ANTHROPIC_API_KEY'),
 });
 
 if (response === undefined) {
@@ -144,7 +153,9 @@ if (response.hang === true) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify(response.result));
   }
-  const text = response.output === undefined ? 'Done.' : JSON.stringify(response.output);
+  const printed = (response.printEnv ?? []).map((name) => `${name}=${process.env[name] ?? ''}\n`);
+  const text =
+    response.output === undefined ? `${printed.join('')}Done.` : JSON.stringify(response.output);
   emit({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
   emit({
     type: 'result',
@@ -154,5 +165,15 @@ if (response.hang === true) {
     session_id: sessionId,
     total_cost_usd: 0.42,
     usage: { input_tokens: 10, cache_read_input_tokens: 5, output_tokens: 3 },
+    modelUsage: {
+      'claude-stub-model': {
+        inputTokens: 10,
+        outputTokens: 3,
+        cacheReadInputTokens: 5,
+        cacheCreationInputTokens: 0,
+        costUSD: 0.42,
+        costBasis: 'list',
+      },
+    },
   });
 }

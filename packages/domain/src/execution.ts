@@ -4,6 +4,7 @@
  * claims, and what the factory records about both. No I/O.
  */
 import { z } from 'zod';
+import { BillingSchema, CostTagSchema, type CostTag } from './billing.js';
 import { AttemptFindingSchema } from './findings.js';
 import { RiskSchema, RuleIssueSchema, TaskRoleSchema } from './proposals.js';
 
@@ -128,13 +129,6 @@ export const UsageTagSchema = z.enum(['actual', 'estimated', 'unknown']);
 export type UsageTag = z.infer<typeof UsageTagSchema>;
 
 /**
- * How far the cost can be trusted. `unknown/subscription`: the Run was billed
- * to a subscription, so it has no per-Run cost (ARCHITECTURE §13).
- */
-export const CostTagSchema = z.enum(['actual', 'estimated', 'unknown/subscription', 'unknown']);
-export type CostTag = z.infer<typeof CostTagSchema>;
-
-/**
  * Usage as recorded per Attempt (ARCHITECTURE §13). `tag` is the trust of the
  * token counts; `costTag` the trust of `costUsd`. Usage recorded before #14 has
  * no `costTag`: its `tag` covered both.
@@ -145,6 +139,12 @@ export const UsageSchema = z.object({
   outputTokens: z.number().nullable(),
   costUsd: z.number().nullable(),
   costTag: CostTagSchema.optional(),
+  /**
+   * The billing the factory set up for the Harness Run: `api_key` means the key was in
+   * its environment (whatever the Harness then reported paying with; that is `costTag`).
+   * Absent before ADR-0015 and for the Fake.
+   */
+  billing: BillingSchema.optional(),
   durationMs: z.number().int().nonnegative(),
 });
 export type Usage = z.infer<typeof UsageSchema>;
@@ -167,6 +167,12 @@ export function addUsage(a: Usage, b: Usage): Usage {
     costTag:
       costTrust[Math.max(costTrust.indexOf(costTagOf(a)), costTrust.indexOf(costTagOf(b)))] ??
       'unknown',
+    // An API key used by either Harness Run was exposed to it: say so.
+    ...(a.billing === undefined && b.billing === undefined
+      ? {}
+      : {
+          billing: a.billing === 'api_key' || b.billing === 'api_key' ? 'api_key' : 'subscription',
+        }),
     durationMs: a.durationMs + b.durationMs,
   };
 }
