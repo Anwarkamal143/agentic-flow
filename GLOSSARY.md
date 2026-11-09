@@ -56,6 +56,18 @@ _Avoid_: Subtask, ticket, step
 The Task graph for a Job, together with each Task's scope and dependencies. Once approved it never changes; replanning produces a new Plan, and Tasks already approved carry over.
 _Avoid_: Roadmap, breakdown, schedule
 
+**Plan Edit**:
+A human's replacement of the Plan while it awaits approval. It produces a new Plan without the planner, and it is not a Replan.
+_Avoid_: Plan change, revision
+
+**Replan**:
+The planner producing a new Plan for a Job that already has one, after a request from a human or a Finding whose Fault Origin is the plan or the Specification. Tasks it leaves unaffected carry over; every Replan counts against the Job's replan limit.
+_Avoid_: Re-plan, plan revision, Plan Edit
+
+**Dependency Base**:
+The commit a dependent Task's Worktree starts from: the approved results of the Tasks it depends on, merged together. It is local to the Job and is not the Integration Branch.
+_Avoid_: Integration base, merge base
+
 **Attempt**:
 One try at a Task: implementing it, the factory's own verification, and independent review. A Retry, a Rework, or resuming after a human answer always starts a new Attempt.
 _Avoid_: Execution, try, iteration
@@ -105,6 +117,10 @@ _Avoid_: Quota, rate limit (on its own), allowance
 **Worktree**:
 The isolated checkout of a Repository where exactly one Task is carried out.
 _Avoid_: Workspace, sandbox, environment
+
+**Lease**:
+A time-limited, renewable claim that gives one holder exclusive use of a Task, a port block or a unit of capacity. A Lease that is not renewed expires, and work under it is treated as interrupted.
+_Avoid_: Lock, reservation
 
 **Security Tier**:
 How strongly a Harness Run is contained, either as a local guardrail or in an isolated container. A guardrail is never called a sandbox.

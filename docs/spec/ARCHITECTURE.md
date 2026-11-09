@@ -23,6 +23,7 @@ flowchart LR
 - **Single DB writer.** Only the runtime writes. This sidesteps SQLite's single-writer limit and keeps transactions in one process. The dashboard may open the DB **read-only** for heavy queries. Every mutation goes through the runtime API.
 - **The CLI is an API client.** It never touches the DB directly. `factory start` launches the runtime as a background process with a pidfile and a log file.
 - The runtime binds to `127.0.0.1` only, and every request needs a bearer token stored in `~/.factory/token` (mode 0600).
+- **Dashboard writes [Phase B].** The dashboard's only write controls are on the Inbox. Each action is a server-side call to the runtime API (the token stays server-side and never reaches the HTML), with actor `user:local`. Every mutation checks `Host` (loopback) and `Origin` (the dashboard's own loopback origin), and names the Inbox Item and its expected version, so a stale decision is refused with a message. Job pages have no write controls.
 
 ## 2. Repository layout [MVP]
 
@@ -116,7 +117,11 @@ Every blocked or waiting stage run stores `resume_stage_id` (usually itself) and
 | `changes_requested` | A gate failed and routes back to this task, creating a new attempt |
 | `approved` | **All task gates passed on `head_sha` X.** Not yet integrated. |
 | `integrated` | Merged into the job integration branch. **Terminal success.** |
-| `blocked` / `failed` / `cancelled` | As named. `failed` means retries were exhausted. |
+| `blocked` | A Blocker holds the Task (e.g. `awaiting_human` for a Question, a cap reached, `base_merge_conflict`, `recovery_uncertain`). No process is alive; the Worktree is kept. |
+| `failed` | A non-routable end, such as `invalid_output` after its one re-prompt or `factory_error`. Hitting a cap is never `failed`; it is a human Blocker (§4.6). |
+| `cancelled` | By a human, by a Replan, or with reason `dependency_failed` when a Task it depends on `failed`. Never carried over by a Replan. |
+
+**Independent branches keep going [Phase B].** When one Task is `blocked` or `failed`, Tasks that don't depend on it keep dispatching; only its dependents wait (`pending`) or, for `failed`, become `cancelled` (`dependency_failed`, one event each, same transaction). The Job is `failed` only when nothing else can make progress.
 
 ### 4.5 Transitions
 
@@ -142,6 +147,21 @@ Blocking review, QA and Gate Findings route by `fault_origin`. Non-blocking Find
 
 Rework attempts are capped per task (`max_attempts`, default 3) and replans per job (`max_replans`, default 2). When a cap is hit, the work is `waiting_human`, never looped.
 
+Route details [Phase B]:
+- **`plan`:** immediately cancels the Task that raised the Finding and its transitive dependents (they can't have started), in one transaction with one event per Task; their open Inbox Items become `cancelled`. The raising Task's Worktree is `preserved` and its branch kept. Every other Task follows the requested-Replan rule (§4.7). Counts against `max_replans`.
+- **`spec`:** re-runs `specification` with the Findings, producing a new spec Artifact (the old one is kept, never regenerated), then a `spec_change` Approval. Approve → `planning` → `plan_approval` under the same policy. Request changes → specification re-runs with the human's feedback. Reject → the new spec is discarded (its Artifact kept) and the original Finding becomes a human Blocker with options: replan under the old spec, Rework with guidance, or cancel the Job. Re-specification counts against `max_replans`; Rework counts against `max_attempts`. No option escapes the caps.
+- **Caps** that create Attempts: `max_attempts` (Rework), `max_retries` (Retry, default 2) and `max_questions` (answers, default 3). Each, and `max_replans`, ends in a human Blocker with an Inbox Approval (§8.1), never `failed`.
+
+### 4.7 Replanning and carry-over [Phase B]
+
+A **Replan** (GLOSSARY) is started by a human (`requestReplan`, or "request changes" at `plan_approval`), by a blocking `plan` or `spec` Finding, or by an Inbox option. A **Plan Edit** (a human's full replacement Plan at `plan_approval`) is not a Replan and doesn't count against `max_replans`.
+
+- **Requested Replan:** the Job's `replan_requested` is set (persisted, with its event). No new Task or Rework is dispatched. `planning` starts only once every in-flight Attempt has settled (`claimed`, `running`, `verifying` and `in_review` are in flight). An Attempt ending `needs_decision` in the window settles its Task as `blocked`. Cancelling the Job still works during the wait.
+- **The planner** receives the current Plan, the Findings or feedback, and returns a new Plan, validated as usual. The new Plan always goes through `plan_approval` under the same policy.
+- **Carry-over:** a Task is unaffected, and carries over, only if its key, definition and whole dependency chain are identical in the new Plan. It keeps its id, Task Branch, Worktree and every Attempt, and its cap counts continue. `approved` stays `approved` only if its current Evidence and review still match its `(head_sha, base_sha)`. `blocked` keeps its Inbox Item unless this Replan resolved it (an item whose "replan" option triggered the Replan is closed as decided). `pending`/`ready` is recomputed.
+- **Everything else** that is unfinished is `cancelled`, its Worktree `preserved`. An approved Task whose definition changed is re-run; the old approved head is kept on record. A `cancelled` Task is never carried over: an identical definition becomes a new Task (new id, fresh counts, bounded by `max_replans`), with a fresh Worktree. The old branch is kept, never reused.
+- Base staleness between carried-over and new Tasks (mixed bases) is a Phase C concern (§14).
+
 ## 5. Core data model [MVP subset]
 
 ```text
@@ -149,15 +169,16 @@ projects(id, name, config_json, created_at)
 repositories(id, project_id, name, source /*path or URL given at registration*/,
              remote_url?, clone_path /*factory clone*/, default_branch, profile_json)
 jobs(id, project_id, title, description, type, priority, status, workflow_snapshot_json,
-     config_snapshot_json, created_by, created_at, version)
+     config_snapshot_json, created_by, created_at, version,
+     replan_requested_json? /*Phase B, §4.7*/, replans_used)
 job_repositories(job_id, repository_id)
 stage_runs(id, job_id, stage_id, position /*recipe order, ADR-0005*/, state, attempt,
            resume_stage_id, blocker_json, started_at, finished_at, version)
 artifacts(id, job_id, task_id?, attempt_id?, kind, content_hash, path, schema_version, created_at)
          -- kind: discovery | spec | plan | task_result | review | qa | report | log
 acceptance_criteria(id, job_id, code /*AC-01*/, text, mandatory)
-tasks(id, job_id, repository_id, key, title, packet_json, state, priority,
-      max_attempts, version)
+tasks(id, job_id, repository_id, key, title, packet_json, state, priority /*low|normal|high*/,
+      max_attempts, max_retries, max_questions, cancel_reason?, plan_artifact_id, version)
 task_dependencies(task_id, depends_on_task_id)
 attempts(id, task_id, n, state, harness_id, session_ref, worktree_id,
          base_sha, head_sha, started_at, finished_at, exit_reason, usage_json)
@@ -171,8 +192,12 @@ evidence(id, attempt_id, criterion_id?, kind, verdict, head_sha, base_sha, artif
 reviews(id, attempt_id, reviewer_harness_id, head_sha, outcome, artifact_id)
 review_findings(id, review_id, severity, fault_origin, location, problem, why,
                 recommendation, blocking)
-approvals(id, job_id, kind, subject_ref, question, options_json, recommended,
-          state, decided_by, decided_at, decision_json, expires_policy)
+approvals(id, job_id, task_id?, kind, subject_ref, question, options_json, recommended,
+          state, deferred, decided_by, decided_at, decision_json, expires_policy, version)
+         -- kind: question | plan | spec_change | blocker | cleanup   (an "Inbox Item")
+         -- state: open | decided | cancelled | superseded;  expires_policy: remain_pending
+         -- subject_ref: what is decided on (e.g. the plan Artifact id); a decision naming
+         --   another subject or version is refused
 events(seq INTEGER PK AUTOINCREMENT, ts, entity_kind, entity_id, job_id?, type,
        actor, payload_json, published_at?)
 audit_log(id, ts, actor, action, target, before_json, after_json, policy_ref, correlation_id)
@@ -243,12 +268,31 @@ TaskResult = {
 4. Run every `verification` command in the worktree. Store the exit code and the redacted output as evidence tied to `head_sha`.
 5. Missing or invalid result → the attempt is `failed` with `invalid_output`. The commits are preserved.
 
+Question rules [Phase B]: the developer packet sets `may_ask_questions: true`; the reviewer can't ask. `needs_decision` without a blocking question, and `done` with a blocking question, are protocol violations that get the one re-prompt (ADR-0010). A `scope_change_request` is treated as `needs_decision` (§8); scope never changes mid-Plan ([Phase E] `scope_change` Approval).
+
+Plan Task fields [Phase B], beside those in PRODUCT_SPEC §7: `priority: low | normal | high` (default `normal`) and an optional `maxAttempts` that may only **narrow** the Effective Configuration. The Plan validator also rejects overlapping writable paths between Tasks no dependency path orders (either direction, transitively): a static-prefix overlap decides, and matching against the tracked files at the planning base in the Factory Clone names the paths. A planner's invalid Plan gets the one re-prompt; a Plan Edit's errors go back to the human.
+
 ## 8. Human questions during execution [MVP protocol, Phase B UI]
 
 1. The agent ends with `status: needs_decision` and its questions.
-2. The factory creates an `approvals` row (kind `question`), sets the task to `blocked` with blocker `awaiting_human`, **releases the agent lease** (no process stays alive), and keeps the worktree.
-3. When the human answers: if the harness supports `resume` and the session is fresh enough, the factory calls `resume(sessionRef, answerMessage)` as a new attempt. Otherwise it starts a fresh attempt with the answer added to `context`.
+2. In one transaction the factory creates **one** `approvals` row (kind `question`) batching the Attempt's questions (blocking ones, plus non-blocking ones marked optional), sets the task to `blocked` with blocker `awaiting_human`, **releases the agent lease and its tokens** (no process stays alive), and keeps the worktree. Question text and options are agent output: redacted before storage and shown as agent-proposed. An answer never grants permissions.
+3. When the human answers (each question by option or free text, in one `answerQuestion`), the factory starts a **fresh attempt** (`cause: answer`) on the same Task Branch, with the questions and answers in `context`. It counts against `max_questions` (default 3), not `max_attempts` or `max_retries`. `resume(sessionRef, …)` stays an extension point of the Harness contract, unused in Phase B.
 4. Interactive skills are never loaded into unattended runs. The harness is started in a mode that can't prompt on stdin, and stdin is closed.
+5. Non-blocking questions under `status: done` create no Inbox Item; they are recorded on the Attempt and listed as open in the Delivery Report.
+6. A `scope_change_request` becomes the same kind of Question, showing the request, answered with guidance or "replan with this request as feedback" (a Replan; the wider scope is then approved at `plan_approval`).
+
+### 8.1 Blocker Approvals [Phase B]
+
+Every human-kind Blocker opens an Inbox Approval (kind `blocker`) with fixed options:
+
+| Blocker | Options |
+|---|---|
+| `rework_cap_reached`, `question_cap_reached` | grant +N Attempts (optional guidance into `context`), replan, cancel the Job |
+| `replan_cap_reached` | grant +1 replan, cancel the Job |
+| `recovery_uncertain`, `retry_cap_reached` | retry now, cancel the Job |
+| `base_merge_conflict` | replan, cancel the Job |
+
+"Retry now" re-checks the pid and start time first; if the process is still alive it offers "kill and retry" instead. A human's word alone never starts a second process. A "replan" option counts against `max_replans`. Raising a cap is written to `audit_log` (`decided_by user:local`). Approvals stay pending (`remain_pending`, §17) and never auto-approve; "defer" only hides an item from the default view and can be undone.
 
 ## 9. Independent review [MVP]
 
@@ -270,10 +314,11 @@ Independence means:
   - In Phase A, delivery is a branch **inside the factory clone**. The Delivery Report gives the clone path, branch name and a ready-to-run `git fetch <clone_path> <branch>` command, so the user can pull the result into their own checkout.
   - In Phase C, the factory pushes from its clone to the remote.
 - One worktree per task: `<workspace_root>/<repo>/<job-id>/<task-key>` on branch `factory/<job-id>/<task-key>-<slug>`, created from a freshly fetched `base_sha`.
+- **Dependency Base [Phase B].** A Task with dependencies starts from the approved heads of the Tasks it depends on: one dependency's head directly, several merged in Plan order into a local commit in the Factory Clone. `base_sha` is that exact commit. This is **not** the Integration Branch (§14). A merge conflict is a human Blocker `base_merge_conflict` (§8.1), never an automatic replan.
 - **Port allocation:** each worktree leases a block of 10 ports. The factory exports `FACTORY_PORT_BASE` and `PORT`, and records the lease.
 - **Test databases and services:** export `FACTORY_TASK_ID` and recommend repo commands use it in DB names and container names. The repo profile can declare `services` that need serializing (`lock: shared-db`).
 - **Dependency installs:** use the shared package-manager store (pnpm store, npm cache, uv cache). Record disk usage per worktree. A cleanup job removes worktrees in `removed`-eligible states only.
-- Worktree lifecycle: `active` → `preserved` (attempt over, not yet integrated) → `removed` (after integration + delivery, or explicit human discard). Any worktree with unknown status after a crash becomes `quarantined`, never auto-deleted.
+- Worktree lifecycle: `active` → `preserved` (attempt over, not yet integrated) → `removed` (after integration + delivery, or explicit human discard). On cancel, a `cleanup` Approval asks whether to discard the preserved Worktrees (default keep); Task Branches are always kept. Any worktree with unknown status after a crash becomes `quarantined`, never auto-deleted.
 
 ## 11. Security tiers [MVP: Tier 0; v1: Tier 1]
 
@@ -291,11 +336,12 @@ The UI always shows the tier of every running attempt. Dangerous-operation polic
 ## 12. Scheduler [MVP basic; v1 fairness]
 
 Loop (every 1–2 s, plus a wake-up after any relevant event):
-1. Select `ready` tasks ordered by `effective_priority = priority_weight + aging(wait_time) − project_share_penalty`.
-2. For each, check the capacity counters (global, per-project, per-repo, per-harness, per-job) and the usage-window state (§13).
+1. Select `ready` tasks ordered by `effective_priority = priority_weight + aging(wait_time) − project_share_penalty`. [Phase B: task priority, then time ready; aging and project share are v1.]
+2. For each, check the capacity counters (global, per-project, per-repo, per-harness, per-job) and the usage-window state (§13). [Phase B: global (factory `config.json` `concurrency.global`, default 3), per repo and per job (Effective Configuration `concurrency.perRepository` / `perJob`, default 2 each, Job overrides may raise or lower). Per-project waits for v1, per-harness for Phase E. The proposal Stages keep their own one-slot scheduler.]
 3. Claim in one transaction: `INSERT INTO leases (...) ON CONFLICT DO NOTHING` for `('task', id)` plus the capacity tokens, then transition `ready → claimed` with an optimistic version check. If any step fails, roll back.
 4. Dispatch: create the worktree if needed, then `harness.start`. Heartbeat the lease every 15 s. A lease expires after 90 s without a heartbeat.
 5. On exit: release the lease and tokens in the same transaction as the attempt's state change.
+6. **Lease expiry [Phase B].** A sweeper checks every heartbeat. For an Attempt whose lease is past `expires_at`, it kills the process group (pid + start time checked), marks the Attempt `interrupted`, preserves the Worktree, and releases the lease and tokens in the same transaction. It requeues the Task as a Retry **only if the process is confirmed dead**; otherwise the Task is `blocked` with `recovery_uncertain`.
 
 **Recovery on startup:** for each `claimed` or `running` attempt, check whether the PID (stored together with its start time) is alive *and* still ours. If it is alive, re-attach to its log file or let it finish and read the result file. If it is dead, mark the attempt `interrupted`, preserve the worktree, and requeue only if the task's retry policy allows and the worktree is clean or committed. Otherwise the task is `blocked` with reason `recovery_uncertain`. The factory never starts a second process for a lease that could still be live.
 

@@ -69,7 +69,7 @@ Exit tests (a fake GitHub adapter by default, plus `[real]` against the test rep
 
 ## Phase D — Multi-project, multi-repo, onboarding
 
-Scope: multiple projects; repo discovery profiles (language, package manager, commands, CI files, sensitive paths, instruction files) with a confirmation step; the config hierarchy with `resolveEffectiveConfig` and per-job snapshots; config export and import; multi-repo jobs (one task per repo, contract tasks, `delivery_order`, one PR per repo, a partial-completion report); fair scheduling across projects (aging + per-project quotas); the onboarding wizard; the effective-config page; GitHub Issues intake.
+Scope: multiple projects; repo discovery profiles (language, package manager, commands, CI files, sensitive paths, instruction files) with a confirmation step; the config hierarchy with `resolveEffectiveConfig` and per-job snapshots; config export and import; multi-repo jobs (one task per repo, contract tasks, `delivery_order`, one PR per repo, a partial-completion report); fair scheduling across projects (aging + per-project quotas); the onboarding wizard; the effective-config page; GitHub Issues intake; the clarification engine for proposal Stages (questions during triage and specification through the Phase B Inbox, PRODUCT_SPEC §5).
 
 Exit tests:
 1. **D1** A multi-repo job (api + web fixtures): an expand-style API task comes before the web task, with separate worktrees and PRs, and the delivery order is respected. The report states that the PRs are not atomic.
@@ -80,7 +80,7 @@ Exit tests:
 
 ## Phase E — Policy hardening, budgets, evals
 
-Scope: the Tier 1 container execution (if Docker is available); the dangerous-operation policy through harness hooks; the secret redaction test corpus; budgets (warn, soft, hard) and usage-window pausing; the eval harness (`pnpm eval`) with a baseline; skills registry v1; approved learnings; RBAC and separation of duties, if the human chose multi-user; backup, restore and retention jobs; analytics pages.
+Scope: the Tier 1 container execution (if Docker is available); the dangerous-operation policy through harness hooks; the `scope_change` Approval (a human with approver rights widens a Task's writable paths, PRODUCT_SPEC §5 and §8); the secret redaction test corpus; budgets (warn, soft, hard) and usage-window pausing; the eval harness (`pnpm eval`) with a baseline; skills registry v1; approved learnings; RBAC and separation of duties, if the human chose multi-user; backup, restore and retention jobs; analytics pages.
 
 Exit tests:
 1. **E1** A soft budget limit is hit → new dispatch pauses, running work finishes per policy, and a human authorizes continuation.
