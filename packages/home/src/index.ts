@@ -11,7 +11,7 @@
  *   logs/runtime.log
  */
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
@@ -134,8 +134,11 @@ export function readRuntimeRecord(home: FactoryHome): RuntimeRecord | undefined 
   return parsed.success ? parsed.data : undefined;
 }
 
+/** Written atomically (a temp file, then a rename), so a reader never sees it half-written. */
 export function writeRuntimeRecord(home: FactoryHome, record: RuntimeRecord): void {
-  writeFileSync(home.runtimeRecordPath, JSON.stringify(record) + '\n', { mode: 0o600 });
+  const tmp = `${home.runtimeRecordPath}.${String(process.pid)}.tmp`;
+  writeFileSync(tmp, JSON.stringify(record) + '\n', { mode: 0o600 });
+  renameSync(tmp, home.runtimeRecordPath);
 }
 
 export function removeRuntimeRecord(home: FactoryHome): void {
