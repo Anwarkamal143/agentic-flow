@@ -5,6 +5,7 @@
  */
 import { schema, type FactoryDb } from '@factory/db';
 import {
+  AttemptFindingSchema,
   combineVerdicts,
   DeliveryReportSchema,
   evidenceSource,
@@ -47,7 +48,6 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   if (job === undefined || repo === undefined) throw new Error(`Job ${jobId} has no Repository`);
 
   const limitations = [
-    'The path-scope Gate is not built yet: changed paths were not checked against the Task’s writable and forbidden scope.',
     'The Harness ran under the Tier 0 local guardrail (environment allowlist, closed stdin, the Worktree as working directory). It ran as your user; this is not a sandbox.',
     'Harness and verification output is not redacted yet.',
     'Delivery is a local branch in the Factory Clone; nothing was pushed.',
@@ -109,6 +109,30 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       .orderBy(asc(schema.reviewFindings.position))
       .all();
 
+    if (attempt.n > 1) {
+      limitations.push(
+        `Task ${task.key}: approved on Attempt ${String(attempt.n)}; the ${String(attempt.n - 1)} earlier Attempt(s) failed a Gate or their review, and their commits stay on the branch beneath the fixes (each Attempt's head is kept at refs/factory/attempts/<attempt-id> in the Factory Clone).`,
+      );
+      const earlier = db
+        .select()
+        .from(schema.attempts)
+        .where(eq(schema.attempts.taskId, task.id))
+        .orderBy(asc(schema.attempts.n))
+        .all()
+        .filter((a) => a.n < attempt.n);
+      for (const a of earlier) {
+        const paths = z
+          .array(AttemptFindingSchema)
+          .parse(JSON.parse(a.gateFindingsJson))
+          .filter((f) => f.rule?.startsWith('scope.') === true)
+          .flatMap((f) => f.paths);
+        if (paths.length > 0) {
+          limitations.push(
+            `Task ${task.key}: Attempt ${String(a.n)} committed changes to out-of-scope paths (${paths.join(', ')}). The delivered diff base..head no longer touches them, but those commits are in the branch history.`,
+          );
+        }
+      }
+    }
     if (attempt.wipCommit !== null) {
       limitations.push(
         `Task ${task.key}: the Harness left uncommitted changes; the factory committed them as WIP commit ${attempt.wipCommit}. Review them before using the branch.`,

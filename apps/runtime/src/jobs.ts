@@ -5,6 +5,7 @@
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   AttemptSchema,
+  BlockerSchema,
   evidenceSource,
   ReviewSchema,
   type Review,
@@ -38,6 +39,7 @@ import {
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { changeJob, changeJobIn, readJobState, stepTask, type JobState } from './engine.js';
 import { ApiFailure } from './errors.js';
+import { attemptFindings } from './findings.js';
 import { newId } from './ids.js';
 
 const OPERATOR = 'user:local';
@@ -273,6 +275,7 @@ export class JobService {
         id: a.id,
         taskId: a.taskId,
         n: a.n,
+        cause: a.cause,
         state: a.state,
         exitReason: a.exitReason,
         exitDetail: a.exitDetail,
@@ -286,6 +289,7 @@ export class JobService {
         commits: JSON.parse(a.commitsJson) as unknown,
         wipCommit: a.wipCommit,
         protocolViolations: JSON.parse(a.protocolViolationsJson) as unknown,
+        findings: attemptFindings(this.db, a),
         usage: a.usageJson === null ? null : (JSON.parse(a.usageJson) as unknown),
         startedAt: a.startedAt,
         finishedAt: a.finishedAt,
@@ -413,15 +417,21 @@ export class JobService {
 }
 
 /**
- * Tasks that have not started are cancelled with their Job, so the Task
- * scheduler can never pick up work of a cancelled Job. Running Tasks don't
+ * Tasks that have not started, or are blocked, are cancelled with their Job,
+ * so the Task scheduler can never pick up work of a cancelled Job. A blocked
+ * Task's Worktree stays preserved. Running Tasks don't
  * exist before #7; stopping them is #12.
  */
 function cancelOpenTasks(tx: Tx, jobId: string, reason: string | undefined): void {
   const open = tx
     .select()
     .from(schema.tasks)
-    .where(and(eq(schema.tasks.jobId, jobId), inArray(schema.tasks.state, ['pending', 'ready'])))
+    .where(
+      and(
+        eq(schema.tasks.jobId, jobId),
+        inArray(schema.tasks.state, ['pending', 'ready', 'blocked']),
+      ),
+    )
     .all();
   for (const task of open) {
     stepTask(tx, { jobId, actor: OPERATOR }, task, 'cancelled', { reason });
@@ -439,6 +449,7 @@ function toTask(row: typeof schema.tasks.$inferSelect): Task {
     state: TaskStateSchema.parse(row.state),
     ...definition,
     maxAttempts: row.maxAttempts,
+    blocker: row.blockerJson === null ? null : BlockerSchema.parse(JSON.parse(row.blockerJson)),
     planArtifactId: row.planArtifactId,
     version: row.version,
   };
@@ -453,6 +464,7 @@ function toStageRun(row: JobState['stageRuns'][number]): StageRun {
     finishedAt: row.finishedAt,
     failure:
       row.failureJson === null ? null : StageFailureSchema.parse(JSON.parse(row.failureJson)),
+    blocker: row.blockerJson === null ? null : BlockerSchema.parse(JSON.parse(row.blockerJson)),
     version: row.version,
   };
 }

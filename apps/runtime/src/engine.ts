@@ -19,6 +19,7 @@ import {
   StageIdSchema,
   StageRunStateSchema,
   type JobStatus,
+  type Blocker,
   type StageFailure,
   type StageRunState,
 } from '@factory/domain';
@@ -114,20 +115,25 @@ export function readJobState(tx: Tx | FactoryDb, jobId: string): JobState {
 
 /**
  * Moves one Stage Run of the Job being changed, writing its event. A `failure`
- * is stored on the Stage Run (only with `to: failed`).
+ * is stored on the Stage Run (only with `to: failed`); a `blocker` (only with
+ * `to: blocked | waiting_human`) is stored with the Stage Run itself as the
+ * Stage to resume once it is cleared.
  */
 export type StageRunStepper = (
   run: typeof schema.stageRuns.$inferSelect,
   to: StageRunState,
-  opts?: { reason?: string | undefined; failure?: StageFailure },
+  opts?: { reason?: string | undefined; failure?: StageFailure; blocker?: Blocker },
 ) => void;
 
 function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper {
   return (run, to, opts = {}) => {
-    const { failure } = opts;
-    const reason = opts.reason ?? failure?.reason;
+    const { failure, blocker } = opts;
+    const reason = opts.reason ?? failure?.reason ?? blocker?.reason;
     if (failure !== undefined && to !== 'failed') {
       throw new Error(`a failure is recorded only when a Stage Run fails (${run.id} → ${to})`);
+    }
+    if (blocker !== undefined && to !== 'blocked' && to !== 'waiting_human') {
+      throw new Error(`a Blocker is recorded only when a Stage Run stops (${run.id} → ${to})`);
     }
     const from = StageRunStateSchema.parse(run.state);
     if (!canTransitionStageRun(from, to)) {
@@ -142,6 +148,9 @@ function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper 
         ...(to === 'running' ? { startedAt: now } : {}),
         ...(isFinished(to) ? { finishedAt: now } : {}),
         ...(failure === undefined ? {} : { failureJson: JSON.stringify(failure) }),
+        ...(blocker === undefined
+          ? {}
+          : { blockerJson: JSON.stringify(blocker), resumeStageId: run.stageId }),
       })
       .where(
         and(
@@ -167,6 +176,7 @@ function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper 
         to,
         ...(reason === undefined ? {} : { reason }),
         ...(failure === undefined ? {} : { failure }),
+        ...(blocker === undefined ? {} : { blocker }),
       },
     });
   };
@@ -182,21 +192,26 @@ type TaskRow = typeof schema.tasks.$inferSelect;
  * Moves one Task of the Job being changed (call inside {@link changeJob}, which
  * has already bumped the Job version), writing its `task.<to>` event. The
  * update is guarded by the Task's state and version; zero rows is a conflict.
+ * A Task goes `blocked` with its `blocker`, which is cleared when it leaves.
  */
 export function stepTask(
   tx: Tx,
   op: { jobId: string; actor: string },
   task: TaskRow,
   to: TaskState,
-  opts: { reason?: string | undefined; payload?: Record<string, unknown> } = {},
+  opts: { reason?: string | undefined; payload?: Record<string, unknown>; blocker?: Blocker } = {},
 ): TaskRow {
   const from = TaskStateSchema.parse(task.state);
   if (!canTransitionTask(from, to)) {
     throw new Error(`illegal Task transition ${from} → ${to} (${task.id})`);
   }
+  if ((opts.blocker === undefined) !== (to !== 'blocked')) {
+    throw new Error(`a Task is blocked with a Blocker, and only then (${task.id} → ${to})`);
+  }
+  const blockerJson = opts.blocker === undefined ? null : JSON.stringify(opts.blocker);
   const updated = tx
     .update(schema.tasks)
-    .set({ state: to, version: sql`${schema.tasks.version} + 1` })
+    .set({ state: to, blockerJson, version: sql`${schema.tasks.version} + 1` })
     .where(
       and(
         eq(schema.tasks.id, task.id),
@@ -219,10 +234,11 @@ export function stepTask(
       from,
       to,
       ...(opts.reason === undefined ? {} : { reason: opts.reason }),
+      ...(opts.blocker === undefined ? {} : { blocker: opts.blocker }),
       ...opts.payload,
     },
   });
-  return { ...task, state: to, version: task.version + 1 };
+  return { ...task, state: to, blockerJson, version: task.version + 1 };
 }
 
 /**
@@ -263,6 +279,7 @@ export function stepWorktree(
   row: typeof schema.worktrees.$inferSelect,
   from: WorktreeState,
   to: WorktreeState,
+  extra: Record<string, unknown> = {},
 ): void {
   const updated = tx
     .update(schema.worktrees)
@@ -276,6 +293,6 @@ export function stepWorktree(
     jobId: op.jobId,
     type: `worktree.${to}`,
     actor: op.actor,
-    payload: { taskId: row.taskId, from, to, path: row.path, branch: row.branch },
+    payload: { taskId: row.taskId, from, to, path: row.path, branch: row.branch, ...extra },
   });
 }

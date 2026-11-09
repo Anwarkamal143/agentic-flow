@@ -7,7 +7,16 @@ import {
   useFakeHarness,
   type RunningRuntime,
 } from '../support/factory.js';
-import { json, post, waitForJob, type EventBody, type JobBody } from '../support/api.js';
+import {
+  capAttempts,
+  expectStoppedAtCap,
+  json,
+  onlyAttempt,
+  post,
+  waitForJob,
+  type EventBody,
+  type JobBody,
+} from '../support/api.js';
 import {
   scriptWith,
   validOutput,
@@ -59,15 +68,23 @@ interface AttemptBody {
   evidence: { kind: string; source: string; criterionCode: string | null; verdict: string }[];
 }
 
-const done = (job: JobBody) => ['completed', 'failed', 'cancelled'].includes(job.status);
+const done = (job: JobBody) =>
+  ['completed', 'failed', 'cancelled', 'waiting_human'].includes(job.status);
 
-async function runWith(script: string) {
+/**
+ * Runs one Job on `script`. `maxAttempts: 1` is for a scenario about one Attempt's
+ * verdict: it ends at the Rework cap instead of starting a Rework it didn't script.
+ */
+async function runWith(script: string, opts: { maxAttempts?: number } = {}) {
   const home = await initializedHome();
   useFakeHarness(home, script);
   const rt = await startRuntime(home);
   const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
-  const [repo] = await json<[{ id: string; clonePath: string }]>(rt.request('/v1/repositories'));
+  const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
+    rt.request('/v1/repositories'),
+  );
+  if (opts.maxAttempts !== undefined) await capAttempts(rt, repo.projectId, opts.maxAttempts);
   const created = await post(rt, '/v1/jobs', {
     repositoryId: repo.id,
     title: 'Add sum() to math.ts',
@@ -201,7 +218,7 @@ describe('The independent review Gate', () => {
     expect(show.stdout).toMatch(/low +implementation +src\/math\.ts:6/);
   });
 
-  it('treats a review recorded for an older head SHA as stale', async () => {
+  it('treats a review recorded for an older head SHA as stale → one Attempt, then waiting_human at cap 1', async () => {
     // The reviewer commits during its Run, so the Task Branch moves past the reviewed head.
     const reviewer = {
       ...validReviewResponse(),
@@ -210,10 +227,12 @@ describe('The independent review Gate', () => {
         { commit: 'A commit by the reviewer' },
       ],
     };
-    const { rt, repo, job } = await runWith(scriptWith({}, {}, { 'add-sum': [reviewer] }));
+    const { rt, repo, job } = await runWith(scriptWith({}, {}, { 'add-sum': [reviewer] }), {
+      maxAttempts: 1,
+    });
 
-    expect(job.status).toBe('failed');
-    const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody];
+    await expectStoppedAtCap(rt, job);
+    const attempt = await onlyAttempt<AttemptBody>(rt, job.id);
     const [review] = (await reviewsOf(rt, job.id)) as [ReviewBody];
     const [task] = await json<[{ id: string; state: string }]>(
       rt.request(`/v1/jobs/${job.id}/tasks`),
@@ -222,12 +241,12 @@ describe('The independent review Gate', () => {
     expect(review.outcome).toBe('approved');
     expect(review.headSha).toBe(attempt.headSha);
     expect(review.headSha, 'the Task Branch moved after the review').not.toBe(head);
-    expect(task.state).toBe('failed');
+    expect(task.state).toBe('blocked');
     expect(attempt).toMatchObject({ state: 'failed', exitReason: 'gates_failed' });
     expect(attempt.exitDetail).toMatch(/review .*stale/);
   });
 
-  it('blocks approval when a mandatory AC has no passing Evidence', async () => {
+  it('blocks approval when a mandatory AC has no passing Evidence → one Attempt, then waiting_human at cap 1', async () => {
     // No command verifies AC-01, and the reviewer could not test it either.
     const plan = validOutput('planning') as {
       tasks: { verification: { criteria?: string[] }[] }[];
@@ -239,17 +258,18 @@ describe('The independent review Gate', () => {
     ];
     const { rt, job } = await runWith(
       scriptWith({ planning: [{ output: plan }] }, {}, { 'add-sum': [reviewer] }),
+      { maxAttempts: 1 },
     );
 
-    expect(job.status).toBe('failed');
-    const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody];
+    await expectStoppedAtCap(rt, job);
+    const attempt = await onlyAttempt<AttemptBody>(rt, job.id);
     expect(attempt).toMatchObject({ state: 'failed', exitReason: 'gates_failed' });
     expect(attempt.exitDetail).toContain('mandatory AC-01 has Evidence not_tested, not pass');
     const [review] = (await reviewsOf(rt, job.id)) as [ReviewBody];
     expect(review.outcome, 'the review itself approved').toBe('approved');
   });
 
-  it('does not approve a Task whose review requests changes', async () => {
+  it('does not approve a Task whose review requests changes → one Attempt, then waiting_human at cap 1', async () => {
     const reviewer = validReviewResponse();
     reviewer.output.outcome = 'changes_requested';
     reviewer.output.findings = [
@@ -263,10 +283,12 @@ describe('The independent review Gate', () => {
         blocking: true,
       },
     ];
-    const { rt, job } = await runWith(scriptWith({}, {}, { 'add-sum': [reviewer] }));
+    const { rt, job } = await runWith(scriptWith({}, {}, { 'add-sum': [reviewer] }), {
+      maxAttempts: 1,
+    });
 
-    expect(job.status).toBe('failed');
-    const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody];
+    await expectStoppedAtCap(rt, job);
+    const attempt = await onlyAttempt<AttemptBody>(rt, job.id);
     expect(attempt).toMatchObject({ state: 'failed', exitReason: 'changes_requested' });
     const [review] = (await reviewsOf(rt, job.id)) as [ReviewBody];
     expect(review.findings.map((f) => [f.severity, f.blocking])).toEqual([['high', true]]);
@@ -292,8 +314,9 @@ describe('The independent review Gate', () => {
     expect(reviewerRuns[1]?.payload['reprompt']).toMatchObject({ issues: [{ rule: 'json' }] });
     expect(new Set(reviewerRuns.map((e) => e.payload['sessionRef'])).size).toBe(2);
 
+    // invalid_output is no verdict on the work, so no Rework follows: the Job fails on Attempt 1.
     expect(twiceInvalid.job.status).toBe('failed');
-    const [attempt] = (await attemptsOf(twiceInvalid.rt, twiceInvalid.job.id)) as [AttemptBody];
+    const attempt = await onlyAttempt<AttemptBody>(twiceInvalid.rt, twiceInvalid.job.id);
     expect(attempt).toMatchObject({ state: 'failed', exitReason: 'invalid_output' });
     expect(attempt.exitDetail).toMatch(/review was invalid after 1 re-prompt/);
     expect(
@@ -305,8 +328,9 @@ describe('The independent review Gate', () => {
   it('fails the Attempt with review_failed when the reviewer Harness Run crashes', async () => {
     const { rt, job } = await runWith(scriptWith({}, {}, { 'add-sum': [{ exitCode: 2 }] }));
 
+    // review_failed is no verdict on the work, so no Rework follows: the Job fails on Attempt 1.
     expect(job.status).toBe('failed');
-    const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody];
+    const attempt = await onlyAttempt<AttemptBody>(rt, job.id);
     expect(attempt).toMatchObject({ state: 'failed', exitReason: 'review_failed' });
     expect(attempt.exitDetail).toMatch(/reviewer Harness Run exited with code 2/);
     expect(await reviewsOf(rt, job.id)).toEqual([]);

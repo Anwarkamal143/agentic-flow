@@ -12,7 +12,16 @@ import {
   useFakeHarness,
   type RunningRuntime,
 } from '../support/factory.js';
-import { json, post, waitForJob, type EventBody, type JobBody } from '../support/api.js';
+import {
+  capAttempts,
+  expectStoppedAtCap,
+  json,
+  onlyAttempt,
+  post,
+  waitForJob,
+  type EventBody,
+  type JobBody,
+} from '../support/api.js';
 import { scriptWith, SUM_SOURCE, validTaskResponse, VALID_SCRIPT } from '../support/scripts.js';
 
 interface WorktreeBody {
@@ -91,7 +100,8 @@ interface DeliveryReport {
   knownLimitations: string[];
 }
 
-const done = (job: JobBody) => ['completed', 'failed', 'cancelled'].includes(job.status);
+const done = (job: JobBody) =>
+  ['completed', 'failed', 'cancelled', 'waiting_human'].includes(job.status);
 
 /** A runtime with the Fake Harness on `script`, a registered `tiny-ts`, and its source path. */
 async function executionRuntime(script: string, env?: NodeJS.ProcessEnv) {
@@ -101,7 +111,9 @@ async function executionRuntime(script: string, env?: NodeJS.ProcessEnv) {
   const source = tinyTsRepo();
   const res = await rt.home.cli(['repo', 'add', source, '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
-  const [repo] = await json<[{ id: string; clonePath: string }]>(rt.request('/v1/repositories'));
+  const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
+    rt.request('/v1/repositories'),
+  );
   return { rt, repo, source };
 }
 
@@ -164,7 +176,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       usage: { tag: 'unknown' },
       worktreeId: worktree.id,
     });
-    expect(attempt.promptTemplate.id).toBe('task-packet@1');
+    expect(attempt.promptTemplate.id).toBe('task-packet@2');
     expect(attempt.promptTemplate.hash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(git(repo.clonePath, ['show', `${head}:src/math.ts`])).toBe(SUM_SOURCE);
 
@@ -374,22 +386,23 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
     expect(readFileSync(join(probe, 'cwd.txt'), 'utf8').trim()).toBe(worktree.path);
   });
 
-  it('releases the port block when the Attempt ends, also when the Job fails', async () => {
-    // The Harness commits nothing, so the factory's `test` command fails and the Job fails.
+  it('releases the port block when the Attempt ends, also when its Task stops at the Rework cap', async () => {
+    // The Harness commits nothing, so the factory's `test` command fails; at cap 1 no Rework follows.
     const response = { ...validTaskResponse(), steps: [] };
     const { rt, repo } = await executionRuntime(scriptWith({}, { 'add-sum': [response] }));
+    await capAttempts(rt, repo.projectId, 1);
 
     const first = await runJob(rt, repo.id);
     const second = await runJob(rt, repo.id);
 
     for (const job of [first, second]) {
-      expect(job.status).toBe('failed');
-      const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody];
+      await expectStoppedAtCap(rt, job);
+      const attempt = await onlyAttempt<AttemptBody>(rt, job.id);
       expect(attempt).toMatchObject({ state: 'failed', exitReason: 'gates_failed' });
     }
     const [kept] = await json<[WorktreeBody]>(rt.request(`/v1/jobs/${first.id}/worktrees`));
     const [next] = await json<[WorktreeBody]>(rt.request(`/v1/jobs/${second.id}/worktrees`));
-    expect(kept.state, 'the failed Job keeps its Worktree').toBe('preserved');
+    expect(kept.state, 'the blocked Task keeps its Worktree').toBe('preserved');
     expect(kept.portBase).toBe(42_000);
     expect(next.portBase, 'the first block was free again: no port_block lease was left').toBe(
       42_000,
@@ -408,8 +421,9 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
 
     const job = await runJob(rt, repo.id);
 
+    // invalid_output is no verdict on the work, so no Rework follows (its re-prompt is #10).
     expect(job.status).toBe('failed');
-    const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody & { exitDetail: string }];
+    const attempt = await onlyAttempt<AttemptBody & { exitDetail: string }>(rt, job.id);
     expect(attempt).toMatchObject({ state: 'failed', exitReason: 'invalid_output' });
     expect(attempt.exitDetail).toContain('result.regular_file');
     const artifacts = await json<ArtifactBody[]>(rt.request(`/v1/jobs/${job.id}/artifacts`));

@@ -57,6 +57,38 @@ export async function registeredRepo(
   return repo;
 }
 
+/**
+ * Sets the Project's `maxAttempts` (Effective Configuration), so a scenario about one
+ * Attempt's verdict ends at the Rework cap instead of starting Rework it didn't script.
+ * Call before creating the Job: its configuration is frozen at creation.
+ */
+export async function capAttempts(
+  rt: RunningRuntime,
+  projectId: string,
+  maxAttempts: number,
+): Promise<void> {
+  const res = await post(rt, `/v1/projects/${projectId}/config`, { maxAttempts });
+  if (!res.ok) throw new Error(`setting maxAttempts failed: ${String(res.status)}`);
+}
+
+/** The Job's one Attempt; fails the test when there is not exactly one. */
+export async function onlyAttempt<T>(rt: RunningRuntime, jobId: string): Promise<T> {
+  const attempts = await json<T[]>(rt.request(`/v1/jobs/${jobId}/attempts`));
+  expect(attempts, 'exactly one Attempt').toHaveLength(1);
+  return attempts[0] as T;
+}
+
+/** Asserts the Job stopped at the Rework cap: `waiting_human`, its Task blocked by a human Blocker. */
+export async function expectStoppedAtCap(rt: RunningRuntime, job: JobBody): Promise<void> {
+  expect(job.status).toBe('waiting_human');
+  const tasks = await json<{ state: string; blocker: { kind: string; reason: string } | null }[]>(
+    rt.request(`/v1/jobs/${job.id}/tasks`),
+  );
+  expect(tasks.map((t) => [t.state, t.blocker?.kind, t.blocker?.reason])).toEqual([
+    ['blocked', 'human', 'rework_cap_reached'],
+  ]);
+}
+
 export async function json<T>(res: Response | Promise<Response>): Promise<T> {
   return (await (await res).json()) as T;
 }

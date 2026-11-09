@@ -4,6 +4,7 @@
  * claims, and what the factory records about both. No I/O.
  */
 import { z } from 'zod';
+import { AttemptFindingSchema } from './findings.js';
 import { RiskSchema, RuleIssueSchema, TaskRoleSchema } from './proposals.js';
 
 // ---- Task states (ARCHITECTURE §4.4) ---------------------------------------
@@ -31,8 +32,8 @@ export const TASK_TRANSITIONS: Readonly<Record<TaskState, readonly TaskState[]>>
   claimed: ['running', 'failed', 'cancelled'],
   running: ['verifying', 'failed', 'blocked', 'cancelled'],
   verifying: ['in_review', 'approved', 'changes_requested', 'failed', 'blocked', 'cancelled'],
-  in_review: ['approved', 'changes_requested', 'failed', 'cancelled'],
-  changes_requested: ['ready', 'failed', 'cancelled'],
+  in_review: ['approved', 'changes_requested', 'failed', 'blocked', 'cancelled'],
+  changes_requested: ['ready', 'blocked', 'failed', 'cancelled'],
   approved: ['integrated'],
   blocked: ['ready', 'cancelled'],
   integrated: [],
@@ -91,6 +92,9 @@ export const AttemptExitReasonSchema = z.enum([
 ]);
 export type AttemptExitReason = z.infer<typeof AttemptExitReasonSchema>;
 
+export const AttemptCauseSchema = z.enum(['initial', 'rework']);
+export type AttemptCause = z.infer<typeof AttemptCauseSchema>;
+
 /** Usage as recorded per Attempt, tagged with how much it can be trusted (ARCHITECTURE §13). */
 export const UsageSchema = z.object({
   tag: z.enum(['actual', 'estimated', 'unknown']),
@@ -136,6 +140,8 @@ export const TaskPacketSchema = z.object({
   context: z.object({
     artifacts: z.array(z.object({ id: z.string(), kind: z.string(), contentHash: z.string() })),
     files: z.array(z.string()),
+    /** A Rework Attempt: the Findings of the Attempt before it, to fix first. */
+    priorFindings: z.array(AttemptFindingSchema).default([]),
   }),
   limits: z.object({ maxTurns: z.number().int().positive(), wallClockS: z.number().positive() }),
   protocol: z.object({ resultFile: z.literal(RESULT_FILE), mayAskQuestions: z.boolean() }),
@@ -273,6 +279,8 @@ export const AttemptSchema = z.object({
   id: z.string(),
   taskId: z.string(),
   n: z.number().int().positive(),
+  /** `initial`: the Task's first Attempt. `rework`: started because the one before failed a Gate or its review. */
+  cause: AttemptCauseSchema,
   state: AttemptStateSchema,
   exitReason: AttemptExitReasonSchema.nullable(),
   /** A human-readable account of the exit reason. */
@@ -292,6 +300,8 @@ export const AttemptSchema = z.object({
   wipCommit: z.string().nullable(),
   /** Ways the Task Result disagreed with git. */
   protocolViolations: z.array(RuleIssueSchema),
+  /** The Findings raised against it, by the factory's Gates and by its review. */
+  findings: z.array(AttemptFindingSchema),
   usage: UsageSchema.nullable(),
   startedAt: z.string(),
   finishedAt: z.string().nullable(),

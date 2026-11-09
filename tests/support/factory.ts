@@ -93,6 +93,9 @@ export function runCli(
   });
 }
 
+/** The Fake Harness's message for a Run its script has no response for (`FAKE_SCRIPT_EXHAUSTED`). */
+const FAKE_SCRIPT_EXHAUSTED = 'fake harness: the script has no response';
+
 export interface RequestOptions extends RequestInit {
   /** Override the bearer token: a string to send instead, or null to send none. */
   token?: string | null;
@@ -135,6 +138,16 @@ export async function startRuntime(
   );
   onTestFinished(async () => {
     await terminate(child, exited);
+  });
+  // An exhausted Fake Harness script is a bug in the test, never an expected outcome:
+  // a scenario that passed only because a Run found no response is a false green.
+  onTestFinished(() => {
+    const line = output.split('\n').find((l) => l.includes(FAKE_SCRIPT_EXHAUSTED));
+    if (line !== undefined) {
+      throw new Error(
+        `the Fake Harness script ran out during this test (${line.trim()}); script every Run the scenario causes`,
+      );
+    }
   });
 
   const record = await waitForRuntimeRecord(h.dir, child, () => output);

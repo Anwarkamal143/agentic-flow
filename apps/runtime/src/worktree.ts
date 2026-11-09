@@ -5,7 +5,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { schema, type Tx } from '@factory/db';
+import { schema, type FactoryDb, type Tx } from '@factory/db';
 import { RESULT_FILE } from '@factory/domain';
 import { infoExcludePath } from '@factory/git';
 import { and, eq } from 'drizzle-orm';
@@ -31,7 +31,7 @@ export function taskWorktree(input: {
   };
 }
 
-export function requireWorktree(tx: Tx, id: string): WorktreeRow {
+export function requireWorktree(tx: FactoryDb | Tx, id: string): WorktreeRow {
   const row = tx.select().from(schema.worktrees).where(eq(schema.worktrees.id, id)).get();
   if (row === undefined) throw new Error(`no Worktree ${id}`);
   return row;

@@ -266,6 +266,46 @@ export async function changedPaths(repo: string, base: string, head: string): Pr
   return out.split('\0').filter((p) => p !== '');
 }
 
+/**
+ * Every path changed between two commits, with how. Renames and copies are
+ * off (`--no-renames`), so a rename is its old path `deleted` and its new
+ * path `added`: a scope check sees both.
+ */
+export async function changedPathKinds(
+  repo: string,
+  base: string,
+  head: string,
+): Promise<{ path: string; kind: 'added' | 'modified' | 'deleted' | 'type_changed' }[]> {
+  const out = await worktreeGit(repo, [
+    'diff',
+    '--name-status',
+    '--no-renames',
+    '-z',
+    `${base}..${head}`,
+  ]);
+  const fields = out.split('\0').filter((p) => p !== '');
+  const changes: { path: string; kind: 'added' | 'modified' | 'deleted' | 'type_changed' }[] = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const status = fields[i] ?? '';
+    const path = fields[i + 1] ?? '';
+    const kind =
+      status === 'A'
+        ? 'added'
+        : status === 'D'
+          ? 'deleted'
+          : status === 'T'
+            ? 'type_changed'
+            : 'modified';
+    changes.push({ path, kind });
+  }
+  return changes;
+}
+
+/** Points `ref` (a full ref name, such as `refs/factory/attempts/<id>`) at `sha`. */
+export async function updateRef(repo: string, ref: string, sha: string): Promise<void> {
+  await worktreeGit(repo, ['update-ref', ref, sha]);
+}
+
 /** The repository's `info/exclude` file (shared by all its Worktrees). */
 export async function infoExcludePath(repo: string): Promise<string> {
   const common = (

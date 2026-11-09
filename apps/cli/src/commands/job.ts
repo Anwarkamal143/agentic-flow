@@ -158,7 +158,8 @@ function writeJob(job: Job): void {
     ...job.stageRuns.map(
       (s) =>
         `  ${s.stageId.padEnd(14)} ${s.state}` +
-        (s.failure === null ? '' : `: ${s.failure.reason}: ${s.failure.message}`),
+        (s.failure === null ? '' : `: ${s.failure.reason}: ${s.failure.message}`) +
+        (s.blocker === null ? '' : `: ${s.blocker.kind} Blocker ${s.blocker.reason}`),
     ),
   ];
   if (job.description !== '') lines.splice(1, 0, `  ${job.description}`);
@@ -183,6 +184,12 @@ function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
         `    verify:    ${t.verification.map((v) => `${v.key}: ${v.command}`).join('; ')}`,
       );
       if (t.dependsOn.length > 0) lines.push(`    after:     ${t.dependsOn.join(', ')}`);
+      if (t.blocker !== null) {
+        lines.push(
+          `    blocker    ${t.blocker.kind} ${t.blocker.reason}: ${t.blocker.detail}`,
+          `    to clear:  ${t.blocker.requiredAction}`,
+        );
+      }
     }
   }
   if (lines.length > 0) process.stdout.write(lines.join('\n') + '\n');
@@ -201,6 +208,7 @@ function writeAttempts(
     const wt = worktrees.find((w) => w.id === a.worktreeId);
     lines.push(
       `  ${task?.key ?? a.taskId} attempt ${String(a.n)}  ${a.state}` +
+        (a.cause === 'rework' ? ' [rework]' : '') +
         (a.exitReason === null
           ? ''
           : ` (${a.exitReason}${a.exitDetail === null ? '' : `: ${a.exitDetail}`})`),
@@ -210,6 +218,16 @@ function writeAttempts(
         (a.wipCommit === null ? '' : `, WIP commit ${a.wipCommit.slice(0, 12)} by the factory`),
     );
     for (const v of a.protocolViolations) lines.push(`    violation: [${v.rule}] ${v.message}`);
+    for (const f of a.findings.filter((x) => x.source === 'gate')) {
+      lines.push(
+        `    gate         ${String(f.rule)}  ${f.paths.length > 0 ? f.paths.join(', ') : f.location}  ${f.problem}`,
+      );
+    }
+    if (a.packet.context.priorFindings.length > 0) {
+      lines.push(
+        `    carries:   ${String(a.packet.context.priorFindings.length)} Finding(s) of attempt ${String(a.n - 1)}`,
+      );
+    }
     for (const e of a.evidence) {
       const run = a.verificationRuns.find((r) => r.id === e.verificationRunId);
       lines.push(

@@ -198,6 +198,8 @@ export const tasks = sqliteTable(
     state: text('state').notNull(),
     priority: integer('priority').notNull(),
     maxAttempts: integer('max_attempts').notNull(),
+    /** Why a `blocked` Task can't go on (`Blocker`), while it is blocked. */
+    blockerJson: text('blocker_json'),
     version: integer('version').notNull(),
   },
   (t) => [uniqueIndex('tasks_job_key').on(t.jobId, t.key), index('tasks_state').on(t.state)],
@@ -229,6 +231,8 @@ export const attempts = sqliteTable(
       .notNull()
       .references(() => tasks.id),
     n: integer('n').notNull(),
+    /** `initial` or `rework` (`AttemptCause`). */
+    cause: text('cause').notNull().default('initial'),
     state: text('state').notNull(),
     harnessId: text('harness_id').notNull(),
     harnessVersion: text('harness_version'),
@@ -246,6 +250,8 @@ export const attempts = sqliteTable(
     wipCommit: text('wip_commit'),
     /** JSON array of `RuleIssue`: where the Task Result disagreed with git. */
     protocolViolationsJson: text('protocol_violations_json').notNull(),
+    /** JSON array of `AttemptFinding`: what the factory's Gates found (the review's are in `review_findings`). */
+    gateFindingsJson: text('gate_findings_json').notNull().default('[]'),
     startedAt: text('started_at').notNull(),
     finishedAt: text('finished_at'),
     exitReason: text('exit_reason'),
