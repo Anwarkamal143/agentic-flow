@@ -5,9 +5,16 @@
  */
 export { FakeHarness, FakeScriptError, loadFakeScript, parseFakeScript } from './fake.js';
 export type { FakeScript, FakeResponse, FakeReviewResponse, FakeTaskResponse } from './fake.js';
-export { ENV_ALLOWLIST, guardrailEnv, spawnGuarded } from './guardrail.js';
+export {
+  ENV_ALLOWLIST,
+  attachGuarded,
+  guardrailEnv,
+  inspectSpool,
+  processStartTime,
+  spawnGuarded,
+} from './guardrail.js';
 export { redactingHarness } from './redacting.js';
-export type { GuardedExit, GuardedOptions, GuardedProcess } from './guardrail.js';
+export type { GuardedExit, GuardedOptions, GuardedProcess, SpoolState } from './guardrail.js';
 
 export type HarnessCapability = 'resume' | 'structured_output' | 'cancel';
 
@@ -40,6 +47,22 @@ export interface HarnessStartInput {
    */
   subject: { jobId: string; stageId: string; taskKey?: string };
   limits: { wallClockMs: number; maxTurns?: number };
+  /**
+   * A directory the runtime owns for this Run's process files (guardrail
+   * spool, ADR-0012). A Harness whose Run is a process keeps them there, so a
+   * later runtime can re-attach.
+   */
+  spool: string;
+}
+
+/** What a later runtime needs to re-attach to a Run (see {@link AgentHarness.reattach}). */
+export interface HarnessReattachInput {
+  spool: string;
+  /** The Run's `process.token`. */
+  token: string;
+  /** When the Run started (ms since the epoch): its time limit counts from then. */
+  startedAt: number;
+  limits: { wallClockMs: number };
 }
 
 export type HarnessEvent =
@@ -72,8 +95,13 @@ export interface HarnessRun {
   readonly executionId: string;
   /** The Harness's own Session id, when it has Sessions. */
   readonly sessionRef?: string;
-  /** The process id, when the Run is a child process (for recovery, #13). */
+  /** The process id (and group id), when the Run is a process. */
   readonly pid?: number;
+  /**
+   * Set when the Run is a process that can outlive the runtime: its pid and
+   * an opaque token the Harness needs to re-attach. The runtime stores both.
+   */
+  readonly process?: { pid: number; token: string };
   readonly events: AsyncIterable<HarnessEvent>;
   readonly result: Promise<HarnessRawResult>;
   /** Stops the Run. `result` then settles with exit `cancelled`. */
@@ -86,6 +114,12 @@ export interface AgentHarness {
   readonly capabilities: readonly HarnessCapability[];
   detect(): Promise<HarnessDetection>;
   start(input: HarnessStartInput): Promise<HarnessRun>;
+  /**
+   * Re-attaches to a Run a previous runtime started (ADR-0012): the returned
+   * Run settles when the process is gone, with what it left. `undefined` when
+   * there is nothing to attach to. Never starts a process.
+   */
+  reattach?(input: HarnessReattachInput): Promise<HarnessRun | undefined>;
   /** Continues a Session with a new message. Not used in Phase A. */
   resume?(
     sessionRef: string,

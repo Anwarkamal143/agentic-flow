@@ -21,6 +21,7 @@ export * from './review.js';
 export * from './rework.js';
 export * from './redaction.js';
 export * from './logs.js';
+export * from './recovery.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -52,6 +53,8 @@ export const ProjectConfigSchema = z
   .object({
     /** Attempts per Task, Rework included (ARCHITECTURE §4.6). */
     maxAttempts: z.number().int().min(1).max(10).optional(),
+    /** Retries per Task: new Attempts after an interrupted one. They don't count toward `maxAttempts`. */
+    maxRetries: z.number().int().min(0).max(10).optional(),
   })
   .strict();
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -252,10 +255,18 @@ const effectiveValue = <T extends z.ZodType>(value: T) =>
 /** The settings for one Job once every level is resolved; each value records its source level. */
 export const EffectiveConfigSchema = z.object({
   maxAttempts: effectiveValue(z.number().int().positive()),
+  /** Jobs created before #13 have none frozen; they get the recipe default. */
+  maxRetries: effectiveValue(z.number().int().nonnegative()).default({
+    value: 2,
+    source: 'recipe',
+  }),
 });
 export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
 
-export const RECIPE_DEFAULTS: { readonly maxAttempts: number } = { maxAttempts: 3 };
+export const RECIPE_DEFAULTS: { readonly maxAttempts: number; readonly maxRetries: number } = {
+  maxAttempts: 3,
+  maxRetries: 2,
+};
 
 /** Resolves the Effective Configuration. Pure; frozen onto the Job at creation. */
 export function resolveEffectiveConfig(levels: { project: ProjectConfig }): EffectiveConfig {
@@ -265,6 +276,10 @@ export function resolveEffectiveConfig(levels: { project: ProjectConfig }): Effe
       project.maxAttempts === undefined
         ? { value: RECIPE_DEFAULTS.maxAttempts, source: 'recipe' }
         : { value: project.maxAttempts, source: 'project' },
+    maxRetries:
+      project.maxRetries === undefined
+        ? { value: RECIPE_DEFAULTS.maxRetries, source: 'recipe' }
+        : { value: project.maxRetries, source: 'project' },
   };
 }
 
@@ -403,6 +418,8 @@ export const TaskSchema = TaskDefinitionSchema.extend({
   repositoryId: z.string(),
   state: TaskStateSchema,
   maxAttempts: z.number().int().positive(),
+  /** Retries allowed after interrupted Attempts (not counted toward `maxAttempts`). */
+  maxRetries: z.number().int().nonnegative(),
   /** Why a `blocked` Task can't go on, and what would clear it. */
   blocker: BlockerSchema.nullable(),
   /** The Plan Artifact it was taken from. */

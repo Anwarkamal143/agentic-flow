@@ -28,6 +28,12 @@ export interface FactoryHome {
   readonly artifactDir: string;
   readonly logDir: string;
   readonly runtimeLogPath: string;
+  /**
+   * Spool directories of the processes the factory starts (pid, start time,
+   * exit status, raw output), so they can outlive a runtime crash. Each is
+   * removed once its process's end is recorded (ADR-0012).
+   */
+  readonly spoolDir: string;
 }
 
 export function resolveHome(env: NodeJS.ProcessEnv = process.env): FactoryHome {
@@ -42,6 +48,7 @@ export function resolveHome(env: NodeJS.ProcessEnv = process.env): FactoryHome {
     artifactDir: join(root, 'artifacts'),
     logDir,
     runtimeLogPath: join(logDir, 'runtime.log'),
+    spoolDir: join(root, 'run'),
   };
 }
 
@@ -50,6 +57,7 @@ export function ensureHomeDirs(home: FactoryHome): void {
   chmodSync(home.root, 0o700);
   mkdirSync(home.logDir, { recursive: true, mode: 0o700 });
   mkdirSync(home.artifactDir, { recursive: true, mode: 0o700 });
+  mkdirSync(home.spoolDir, { recursive: true, mode: 0o700 });
 }
 
 // ---- config ---------------------------------------------------------------

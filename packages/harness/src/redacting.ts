@@ -12,17 +12,27 @@ export function redactingHarness(inner: AgentHarness, redact: Redactor): AgentHa
     executionId: run.executionId,
     ...(run.sessionRef === undefined ? {} : { sessionRef: run.sessionRef }),
     ...(run.pid === undefined ? {} : { pid: run.pid }),
+    ...(run.process === undefined ? {} : { process: run.process }),
     events: redactEvents(run.events, redact),
     result: run.result.then((r) => ({ ...r, output: redact(r.output) })),
     cancel: () => run.cancel(),
   });
   const input = (i: HarnessStartInput): HarnessStartInput => ({ ...i, prompt: redact(i.prompt) });
   const resume = inner.resume?.bind(inner);
+  const reattach = inner.reattach?.bind(inner);
   return {
     id: inner.id,
     capabilities: inner.capabilities,
     detect: () => inner.detect(),
     start: async (i) => wrap(await inner.start(input(i))),
+    ...(reattach === undefined
+      ? {}
+      : {
+          reattach: async (i) => {
+            const run = await reattach(i);
+            return run === undefined ? undefined : wrap(run);
+          },
+        }),
     ...(resume === undefined
       ? {}
       : {

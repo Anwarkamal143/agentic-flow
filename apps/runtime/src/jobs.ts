@@ -49,6 +49,11 @@ export class JobService {
     private readonly db: FactoryDb,
     /** Called after every committed change, so the outbox publishes promptly. */
     private readonly onCommit: () => void = () => undefined,
+    /**
+     * Stops a cancelled Job's work in flight (its Harness Run or verification
+     * command, by process group) and records it; settles once that is done.
+     */
+    private readonly stopWork: (jobId: string) => Promise<void> = () => Promise.resolve(),
   ) {}
 
   /**
@@ -178,11 +183,14 @@ export class JobService {
   }
 
   /**
-   * Cancels a Job that the caller saw at `expectedVersion`. Stage Runs that are
-   * not running are cancelled; a running Stage Run needs its Harness process
-   * stopped, which this operation can't do yet, so it is refused.
+   * Cancels a Job that the caller saw at `expectedVersion` (PRODUCT_SPEC §12).
+   * One versioned transaction cancels every unfinished Stage Run, running ones
+   * included, and the Tasks not in flight. Then the work in flight is stopped:
+   * its process group gets SIGTERM, then SIGKILL after a grace period, and its
+   * Attempt and Task are recorded `cancelled` with the Worktree preserved and
+   * the leases released. Settles when all of that is recorded.
    */
-  cancel(id: string, input: CancelJobInput): Job {
+  async cancel(id: string, input: CancelJobInput): Promise<Job> {
     changeJob(
       this.db,
       { jobId: id, expectedVersion: input.expectedVersion, actor: OPERATOR },
@@ -190,14 +198,6 @@ export class JobService {
         const status = JobStatusSchema.parse(state.job.status);
         if (TERMINAL_JOB_STATUSES.includes(status)) {
           throw new ApiFailure(409, 'job_terminal', `Job ${id} is already ${status}`);
-        }
-        const running = state.stageRuns.find((r) => r.state === 'running');
-        if (running !== undefined) {
-          throw new ApiFailure(
-            409,
-            'stage_running',
-            `Stage ${running.stageId} of Job ${id} is running; cancelling a running Stage is not supported yet`,
-          );
         }
         for (const run of state.stageRuns) {
           if (canTransitionStageRun(StageRunStateSchema.parse(run.state), 'cancelled')) {
@@ -215,6 +215,12 @@ export class JobService {
         });
       },
     );
+    this.onCommit();
+    await this.stopWork(id);
+    // A Task the work in flight moved on (say, to Rework) just before it stopped is cancelled too.
+    changeJob(this.db, { jobId: id, expectedVersion: 'current', actor: OPERATOR }, (tx) => {
+      cancelOpenTasks(tx, id, input.reason);
+    });
     this.onCommit();
     return this.get(id);
   }
@@ -417,10 +423,10 @@ export class JobService {
 }
 
 /**
- * Tasks that have not started, or are blocked, are cancelled with their Job,
- * so the Task scheduler can never pick up work of a cancelled Job. A blocked
- * Task's Worktree stays preserved. Running Tasks don't
- * exist before #7; stopping them is #12.
+ * Tasks that have not started, are blocked, or wait for Rework are cancelled
+ * with their Job, so the Task scheduler can never pick up work of a cancelled
+ * Job. Their Worktrees stay preserved. A Task in flight is the Task
+ * scheduler's to stop and record (`TaskScheduler.cancelJob`).
  */
 function cancelOpenTasks(tx: Tx, jobId: string, reason: string | undefined): void {
   const open = tx
@@ -429,7 +435,7 @@ function cancelOpenTasks(tx: Tx, jobId: string, reason: string | undefined): voi
     .where(
       and(
         eq(schema.tasks.jobId, jobId),
-        inArray(schema.tasks.state, ['pending', 'ready', 'blocked']),
+        inArray(schema.tasks.state, ['pending', 'ready', 'blocked', 'changes_requested']),
       ),
     )
     .all();
@@ -449,6 +455,7 @@ function toTask(row: typeof schema.tasks.$inferSelect): Task {
     state: TaskStateSchema.parse(row.state),
     ...definition,
     maxAttempts: row.maxAttempts,
+    maxRetries: row.maxRetries,
     blocker: row.blockerJson === null ? null : BlockerSchema.parse(JSON.parse(row.blockerJson)),
     planArtifactId: row.planArtifactId,
     version: row.version,

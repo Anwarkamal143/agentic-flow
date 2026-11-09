@@ -10,6 +10,8 @@
  * the same transaction that completes the Stage Run, so a finished Stage is
  * never run (or generated) again.
  */
+import { rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   EffectiveConfigSchema,
@@ -57,6 +59,8 @@ export interface SchedulerOptions {
   harness: AgentHarness | undefined;
   artifacts: ArtifactStore;
   onCommit: () => void;
+  /** Where each Harness Run's spool directory goes (ADR-0012). */
+  spoolRoot: string;
   /** Wall-clock limit of one proposal Harness Run. */
   wallClockMs?: number;
   /** Reports an unexpected error (the scheduler keeps going). */
@@ -74,6 +78,8 @@ type Outcome =
 export class StageScheduler {
   private readonly loop = new PassLoop(() => this.pass(), POLL_MS);
   private current: HarnessRun | undefined;
+  /** The Job whose Stage the slot runs, and when that work ends. */
+  private inflight: { jobId: string; done: Promise<unknown> } | undefined;
   private closed = false;
   /** Stage Runs left `running` by a previous runtime; resumed first. */
   private orphans: string[] = [];
@@ -115,6 +121,19 @@ export class StageScheduler {
     await this.loop.idle();
   }
 
+  /**
+   * Stops a cancelled Job's running Stage (#12): its Harness Run is cancelled
+   * (a process group gets SIGTERM, then SIGKILL), and nothing is recorded for
+   * the Stage Run beyond the Run's end: the cancellation already ended it.
+   * Settles when the slot is free of the Job.
+   */
+  async cancelJob(jobId: string): Promise<void> {
+    const inflight = this.inflight;
+    if (inflight?.jobId !== jobId) return;
+    await this.current?.cancel();
+    await inflight.done;
+  }
+
   /** Runs at most one Stage. `true` when it did some work. */
   private async pass(): Promise<boolean> {
     const harness = this.opts.harness;
@@ -123,13 +142,23 @@ export class StageScheduler {
     try {
       stageRunId = this.orphans.shift() ?? this.claimNext();
       if (stageRunId === undefined) return false;
-      await this.runStage(harness, stageRunId);
+      const done = this.runStage(harness, stageRunId);
+      this.inflight = { jobId: this.stageRun(stageRunId).jobId, done: done.catch(() => undefined) };
+      try {
+        await done;
+      } finally {
+        this.inflight = undefined;
+      }
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.opts.log(`stage scheduler: ${err instanceof Error ? (err.stack ?? message) : message}`);
       // Never leave a claimed Stage Run silently `running`: fail it where it can be seen.
-      if (stageRunId !== undefined && !this.closed) {
+      if (
+        stageRunId !== undefined &&
+        !this.closed &&
+        this.stageRun(stageRunId).state === 'running'
+      ) {
         try {
           this.fail(this.stageRun(stageRunId), {
             reason: 'factory_error',
@@ -199,6 +228,7 @@ export class StageScheduler {
         rejected,
       });
       if (this.closed) return; // shutdown: left running, resumed at the next start
+      if (this.stageRun(stageRunId).state !== 'running') return; // the Job was cancelled
       if (outcome.kind === 'valid') {
         this.succeed(run, stage, outcome.value);
         return;
@@ -229,6 +259,9 @@ export class StageScheduler {
       rejected: RuleIssue[] | undefined;
     },
   ): Promise<Outcome> {
+    // A proposal Run is never re-attached: a Stage Run left running starts again.
+    const spool = join(this.opts.spoolRoot, `${run.id}-${String(input.n)}`);
+    rmSync(spool, { recursive: true, force: true });
     let started: HarnessRun;
     try {
       started = await harness.start({
@@ -238,6 +271,7 @@ export class StageScheduler {
         env: guardrailEnv(process.env, { FACTORY_JOB_ID: run.jobId }),
         subject: { jobId: run.jobId, stageId: run.stageId },
         limits: { wallClockMs: this.opts.wallClockMs ?? 600_000 },
+        spool,
       });
     } catch (err) {
       return {
@@ -265,6 +299,7 @@ export class StageScheduler {
     const result = await started.result;
     const eventCount = await drained;
     this.current = undefined;
+    rmSync(spool, { recursive: true, force: true });
     const outcome = this.evaluate(stage, result, {
       repositories: input.repositories,
       // Read after the Run: the Specification's criteria, for planning.
@@ -411,6 +446,7 @@ export class StageScheduler {
             state,
             priority: 0,
             maxAttempts: config.maxAttempts.value,
+            maxRetries: config.maxRetries.value,
             version: 0,
           })
           .run();

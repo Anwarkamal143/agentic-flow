@@ -24,7 +24,7 @@ Commands:
   job list [--json]               List Jobs, newest first
   job show <id> [--json]          Show a Job: status, Stages, Workflow Snapshot, config
   job cancel <id> [--reason <text>]
-                                  Cancel a Job that has no running Stage
+                                  Cancel a Job, stopping its running work
   logs <job> [--json]             Show the (redacted) Harness and verification output
                                   of a Job's Attempts
 

@@ -61,7 +61,7 @@ One try at a Task: implementing it, the factory's own verification, and independ
 _Avoid_: Execution, try, iteration
 
 **Retry**:
-A new Attempt started because the previous one was cut short by an infrastructure failure, such as a crash or a timeout, rather than by a verdict on the work. It carries no Findings and doesn't count against the Rework limit.
+A new Attempt started because the previous one was cut short by an infrastructure failure, such as a crash or a timeout, rather than by a verdict on the work. It adds no Findings of its own (it redoes the interrupted Attempt, with that Attempt's prior Findings), and it counts against the Retry limit (`max_retries`), not the Rework limit.
 _Avoid_: Rework, rerun
 
 **Rework**:

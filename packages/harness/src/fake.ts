@@ -39,9 +39,14 @@
  * Fake is contained exactly like a real Harness. The n-th Run of a Task for a
  * Job gets the n-th response, counted separately per Role (developer, reviewer).
  * Every Run is a new Session with its own `sessionRef`; the Fake never resumes one.
+ *
+ * The Run counts are kept in a state file next to the script (`<script>.runs.json`)
+ * when the Fake is given one, so a restarted runtime goes on with the next
+ * response instead of the first. A Task's Run can be re-attached after a
+ * restart (`reattach`): its child process outlives the runtime (ADR-0012).
  */
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { StageIdSchema } from '@factory/domain';
 import { parse as parseYaml } from 'yaml';
@@ -52,10 +57,11 @@ import type {
   HarnessEvent,
   HarnessExit,
   HarnessRawResult,
+  HarnessReattachInput,
   HarnessRun,
   HarnessStartInput,
 } from './index.js';
-import { spawnGuarded } from './guardrail.js';
+import { attachGuarded, spawnGuarded, type GuardedProcess } from './guardrail.js';
 
 const FakeResponseSchema = z
   .object({
@@ -160,10 +166,22 @@ export function loadFakeScript(path: string): FakeScript {
 export class FakeHarness implements AgentHarness {
   readonly id = 'fake';
   readonly capabilities = ['cancel'] as const;
-  /** Runs started so far per `job/stage`, to pick the next response. */
-  private readonly runs = new Map<string, number>();
+  /** Runs started so far per `job/stage/task/role`, to pick the next response. */
+  private readonly runs: Map<string, number>;
 
-  constructor(private readonly script: FakeScript) {}
+  /** `statePath`: where the Run counts are kept across restarts (none: in memory only). */
+  constructor(
+    private readonly script: FakeScript,
+    private readonly statePath?: string,
+  ) {
+    this.runs = new Map(
+      statePath !== undefined && existsSync(statePath)
+        ? Object.entries(
+            z.record(z.string(), z.number()).parse(JSON.parse(readFileSync(statePath, 'utf8'))),
+          )
+        : [],
+    );
+  }
 
   detect(): Promise<HarnessDetection> {
     return Promise.resolve({ installed: true, version: '1', credentials: 'not_required' });
@@ -174,11 +192,24 @@ export class FakeHarness implements AgentHarness {
     const key = `${input.subject.jobId}/${input.subject.stageId}/${taskKey ?? ''}/${input.role}`;
     const n = (this.runs.get(key) ?? 0) + 1;
     this.runs.set(key, n);
-    if (taskKey !== undefined && input.role === 'reviewer') {
-      return Promise.resolve(reviewRun(input, this.script.reviews[taskKey]?.[n - 1], n));
+    if (this.statePath !== undefined) {
+      writeFileSync(this.statePath, JSON.stringify(Object.fromEntries(this.runs)));
     }
     if (taskKey !== undefined) {
-      return Promise.resolve(taskRun(input, this.script.tasks[taskKey]?.[n - 1], n));
+      const token: RunToken = { review: input.role === 'reviewer', taskKey, n };
+      const proc = (args: { workerArg: string | undefined; missing: string }) =>
+        spawnGuarded({
+          command: process.execPath,
+          args:
+            args.workerArg === undefined
+              ? ['-e', `process.stdout.write(${JSON.stringify(args.missing)}); process.exit(1)`]
+              : [WORKER, args.workerArg],
+          cwd: input.cwd,
+          env: input.env,
+          timeoutMs: input.limits.wallClockMs,
+          spool: input.spool,
+        });
+      return Promise.resolve(this.processRun(token, input.limits.wallClockMs, proc));
     }
     const responses = StageIdSchema.safeParse(input.subject.stageId).success
       ? this.script.stages[StageIdSchema.parse(input.subject.stageId)]
@@ -186,7 +217,80 @@ export class FakeHarness implements AgentHarness {
     const response = responses?.[n - 1];
     return Promise.resolve(scriptedRun(input, response, n));
   }
+
+  /** A Task's Run started by an earlier runtime: watched to its end, never started again. */
+  reattach(input: HarnessReattachInput): Promise<HarnessRun | undefined> {
+    const token = RunTokenSchema.parse(JSON.parse(input.token));
+    const proc = attachGuarded({
+      spool: input.spool,
+      startedAt: input.startedAt,
+      timeoutMs: input.limits.wallClockMs,
+    });
+    if (proc === undefined) return Promise.resolve(undefined);
+    return Promise.resolve(this.processRun(token, input.limits.wallClockMs, () => proc));
+  }
+
+  /** A developer or reviewer Run of a Task: its scripted response, performed by a guarded process. */
+  private processRun(
+    token: RunToken,
+    wallClockMs: number,
+    proc: (args: { workerArg: string | undefined; missing: string }) => GuardedProcess,
+  ): HarnessRun {
+    const { taskKey, n } = token;
+    if (token.review) {
+      const response = this.script.reviews[taskKey]?.[n - 1];
+      const output =
+        response === undefined
+          ? ''
+          : response.raw !== undefined
+            ? response.raw
+            : response.output === undefined
+              ? ''
+              : JSON.stringify(response.output);
+      return guardedRun(
+        token,
+        wallClockMs,
+        proc({
+          workerArg:
+            response === undefined
+              ? undefined
+              : JSON.stringify({
+                  steps: response.steps,
+                  exitCode: response.exitCode,
+                  delayMs: response.delayMs,
+                } satisfies FakeTaskResponse),
+          missing:
+            response === undefined
+              ? exhausted(
+                  `${FAKE_SCRIPT_EXHAUSTED} #${String(n)} for the review of task ${taskKey}\n`,
+                )
+              : '',
+        }),
+        (exit, processOutput) =>
+          exit.kind === 'exited' && exit.code === 0 && response !== undefined
+            ? output
+            : processOutput,
+      );
+    }
+    const response = this.script.tasks[taskKey]?.[n - 1];
+    return guardedRun(
+      token,
+      wallClockMs,
+      proc({
+        workerArg: response === undefined ? undefined : JSON.stringify(response),
+        missing:
+          response === undefined
+            ? exhausted(`${FAKE_SCRIPT_EXHAUSTED} #${String(n)} for task ${taskKey}\n`)
+            : '',
+      }),
+      (_exit, processOutput) => processOutput,
+    );
+  }
 }
+
+/** What the Fake needs to re-attach to a Task's Run: which response it was given. */
+const RunTokenSchema = z.object({ review: z.boolean(), taskKey: z.string(), n: z.number().int() });
+type RunToken = z.infer<typeof RunTokenSchema>;
 
 function scriptedRun(
   input: HarnessStartInput,
@@ -265,82 +369,18 @@ function newSessionRef(): string {
   return `fake-session_${randomBytes(8).toString('hex')}`;
 }
 
-/** A developer Harness Run: the scripted steps, performed by a guarded child process. */
-function taskRun(
-  input: HarnessStartInput,
-  response: FakeTaskResponse | undefined,
-  n: number,
-): HarnessRun {
-  return guardedRun(
-    input,
-    response === undefined ? undefined : JSON.stringify(response),
-    response === undefined
-      ? exhausted(
-          `${FAKE_SCRIPT_EXHAUSTED} #${String(n)} for task ${String(input.subject.taskKey)}\n`,
-        )
-      : '',
-    (_exit, processOutput) => processOutput,
-  );
-}
-
-/**
- * A reviewer Harness Run: its scripted steps (if any) in a guarded child
- * process, then the scripted output as the Run's final text.
- */
-function reviewRun(
-  input: HarnessStartInput,
-  response: FakeReviewResponse | undefined,
-  n: number,
-): HarnessRun {
-  const output =
-    response === undefined
-      ? ''
-      : response.raw !== undefined
-        ? response.raw
-        : response.output === undefined
-          ? ''
-          : JSON.stringify(response.output);
-  return guardedRun(
-    input,
-    response === undefined
-      ? undefined
-      : JSON.stringify({
-          steps: response.steps,
-          exitCode: response.exitCode,
-          delayMs: response.delayMs,
-        } satisfies FakeTaskResponse),
-    response === undefined
-      ? exhausted(
-          `${FAKE_SCRIPT_EXHAUSTED} #${String(n)} for the review of task ${String(input.subject.taskKey)}\n`,
-        )
-      : '',
-    (exit, processOutput) =>
-      exit.kind === 'exited' && exit.code === 0 && response !== undefined ? output : processOutput,
-  );
-}
-
-/** Runs the Fake worker under the guardrail, or a process that prints `missing` and exits 1. */
+/** A Task's Run, from its guarded process. */
 function guardedRun(
-  input: HarnessStartInput,
-  workerArg: string | undefined,
-  missing: string,
+  token: RunToken,
+  wallClockMs: number,
+  proc: GuardedProcess,
   outputOf: (exit: HarnessExit, processOutput: string) => string,
 ): HarnessRun {
-  const proc = spawnGuarded({
-    command: process.execPath,
-    args:
-      workerArg === undefined
-        ? ['-e', `process.stdout.write(${JSON.stringify(missing)}); process.exit(1)`]
-        : [WORKER, workerArg],
-    cwd: input.cwd,
-    env: input.env,
-    timeoutMs: input.limits.wallClockMs,
-  });
   const result: Promise<HarnessRawResult> = proc.exit.then((e) => {
     const exit: HarnessExit = e.cancelled
       ? { kind: 'cancelled' }
       : e.timedOut
-        ? { kind: 'timed_out', afterMs: input.limits.wallClockMs }
+        ? { kind: 'timed_out', afterMs: wallClockMs }
         : { kind: 'exited', code: e.code ?? 128 };
     return {
       exit,
@@ -356,7 +396,9 @@ function guardedRun(
   return {
     executionId: `fake_${randomBytes(8).toString('hex')}`,
     sessionRef: newSessionRef(),
-    ...(proc.pid === undefined ? {} : { pid: proc.pid }),
+    ...(proc.pid === undefined
+      ? {}
+      : { pid: proc.pid, process: { pid: proc.pid, token: JSON.stringify(token) } }),
     events: events(),
     result,
     cancel: () => proc.cancel().then(() => undefined),
