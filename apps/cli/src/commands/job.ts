@@ -112,21 +112,37 @@ export async function jobShow(id: string, opts: { json: boolean }): Promise<numb
 }
 
 /** `factory job cancel`: cancels the Job as it is now; refused if it changes meanwhile. */
+/**
+ * Waits for the runtime to stop the work in flight: its processes get SIGTERM,
+ * then SIGKILL after a 5 s grace period (#12).
+ */
+const CANCEL_TIMEOUT_MS = 30_000;
+/** A Job in flight changes version as its work moves on; the cancel re-reads it this often. */
+const CANCEL_TRIES = 3;
+
 export async function jobCancel(id: string, opts: { reason: string | undefined }): Promise<number> {
   const api = client();
   if (api === undefined) return EXIT_NOT_RUNNING;
-  const job = await getJob(api, id);
-  if (job === undefined) return 1;
-  const input: CancelJobInput = {
-    expectedVersion: job.version,
-    ...(opts.reason === undefined ? {} : { reason: opts.reason }),
-  };
-  const cancelled = await api.json<Job>('POST', `/v1/jobs/${encodeURIComponent(id)}/cancel`, {
-    body: input,
-  });
-  process.stdout.write(`Cancelled Job ${cancelled.id}\n`);
-  writeJob(cancelled);
-  return 0;
+  for (let attempt = 1; ; attempt++) {
+    const job = await getJob(api, id);
+    if (job === undefined) return 1;
+    const input: CancelJobInput = {
+      expectedVersion: job.version,
+      ...(opts.reason === undefined ? {} : { reason: opts.reason }),
+    };
+    try {
+      const cancelled = await api.json<Job>('POST', `/v1/jobs/${encodeURIComponent(id)}/cancel`, {
+        body: input,
+        timeoutMs: CANCEL_TIMEOUT_MS,
+      });
+      process.stdout.write(`Cancelled Job ${cancelled.id}\n`);
+      writeJob(cancelled);
+      return 0;
+    } catch (err) {
+      const conflict = err instanceof ApiRequestError && err.body?.error === 'version_conflict';
+      if (!conflict || attempt >= CANCEL_TRIES) throw err;
+    }
+  }
 }
 
 async function getJob(api: RuntimeClient, id: string): Promise<Job | undefined> {

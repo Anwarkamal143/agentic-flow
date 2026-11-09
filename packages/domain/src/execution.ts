@@ -29,10 +29,20 @@ export type TaskState = z.infer<typeof TaskStateSchema>;
 export const TASK_TRANSITIONS: Readonly<Record<TaskState, readonly TaskState[]>> = {
   pending: ['ready', 'cancelled'],
   ready: ['claimed', 'cancelled'],
-  claimed: ['running', 'failed', 'cancelled'],
-  running: ['verifying', 'failed', 'blocked', 'cancelled'],
-  verifying: ['in_review', 'approved', 'changes_requested', 'failed', 'blocked', 'cancelled'],
-  in_review: ['approved', 'changes_requested', 'failed', 'blocked', 'cancelled'],
+  // `claimed → ready`: recovery gives back a claim whose Attempt never started.
+  claimed: ['running', 'ready', 'failed', 'blocked', 'cancelled'],
+  // `→ ready` from an Attempt in progress: recovery requeues it as a Retry.
+  running: ['verifying', 'ready', 'failed', 'blocked', 'cancelled'],
+  verifying: [
+    'in_review',
+    'approved',
+    'changes_requested',
+    'ready',
+    'failed',
+    'blocked',
+    'cancelled',
+  ],
+  in_review: ['approved', 'changes_requested', 'ready', 'failed', 'blocked', 'cancelled'],
   changes_requested: ['ready', 'blocked', 'failed', 'cancelled'],
   approved: ['integrated'],
   blocked: ['ready', 'cancelled'],
@@ -79,6 +89,9 @@ export type AttemptState = z.infer<typeof AttemptStateSchema>;
  * Task Result, or no valid review, after its one re-prompt.
  * `not_done`: the Task Result's status is not `done`. `harness_failed`: the
  * Harness Run did not exit 0. `factory_error`: the factory itself broke.
+ * `cancelled`: a human cancelled the Job (state `cancelled`). `interrupted`:
+ * the runtime stopped while the Attempt was in progress and its Harness
+ * process did not survive (state `interrupted`, set by recovery).
  */
 export const AttemptExitReasonSchema = z.enum([
   'completed',
@@ -89,11 +102,26 @@ export const AttemptExitReasonSchema = z.enum([
   'not_done',
   'harness_failed',
   'factory_error',
+  'cancelled',
+  'interrupted',
 ]);
 export type AttemptExitReason = z.infer<typeof AttemptExitReasonSchema>;
 
-export const AttemptCauseSchema = z.enum(['initial', 'rework']);
+/**
+ * Why an Attempt exists. `initial`: the Task's first. `rework`: the one before
+ * failed a Gate or its review. `retry`: the one before was interrupted (an
+ * infrastructure failure, not a verdict on the work).
+ */
+export const AttemptCauseSchema = z.enum(['initial', 'rework', 'retry']);
 export type AttemptCause = z.infer<typeof AttemptCauseSchema>;
+
+/**
+ * How many of a Task's Attempts count toward its `max_attempts` (the Rework
+ * cap): every Attempt but a Retry, which redoes an interrupted one. Pure.
+ */
+export function attemptsCountedForRework(attempts: readonly { cause: AttemptCause }[]): number {
+  return attempts.filter((a) => a.cause !== 'retry').length;
+}
 
 /** Usage as recorded per Attempt, tagged with how much it can be trusted (ARCHITECTURE §13). */
 export const UsageSchema = z.object({
@@ -292,7 +320,7 @@ export const AttemptSchema = z.object({
   id: z.string(),
   taskId: z.string(),
   n: z.number().int().positive(),
-  /** `initial`: the Task's first Attempt. `rework`: started because the one before failed a Gate or its review. */
+  /** `initial`, `rework` (the one before failed a Gate or its review) or `retry` (it was interrupted). */
   cause: AttemptCauseSchema,
   state: AttemptStateSchema,
   exitReason: AttemptExitReasonSchema.nullable(),

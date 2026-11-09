@@ -171,7 +171,7 @@ export function createApp(deps: AppDeps): Hono {
   });
   app.post('/v1/jobs/:id/cancel', async (c) => {
     const input = await parseBody(c, CancelJobInputSchema);
-    return c.json(deps.jobs.cancel(c.req.param('id'), input));
+    return c.json(await deps.jobs.cancel(c.req.param('id'), input));
   });
 
   app.post('/v1/shutdown', (c) => {

@@ -36,7 +36,8 @@ import { jobLogs } from './logs.js';
 import { Outbox } from './outbox.js';
 import { RepositoryService } from './repositories.js';
 import { StageScheduler } from './scheduler.js';
-import { TaskScheduler } from './execution.js';
+import { CRASH_POINTS, TaskScheduler } from './execution.js';
+import { recoverTasks } from './recovery.js';
 
 const ACTOR = 'system:runtime';
 
@@ -109,7 +110,11 @@ function configuredHarness(): AgentHarness | undefined {
   try {
     // A second Harness id makes this a type error, so it can't silently be built as the Fake.
     const fake: Extract<typeof harness, { id: 'fake' }> = harness;
-    return redactingHarness(new FakeHarness(loadFakeScript(fake.script)), redact);
+    // The Run counts survive a restart, so a restarted runtime goes on with the next response.
+    return redactingHarness(
+      new FakeHarness(loadFakeScript(fake.script), `${fake.script}.runs.json`),
+      redact,
+    );
   } catch (err) {
     if (err instanceof FakeScriptError) fail(`harness 'fake': ${err.message}`);
     throw err;
@@ -125,10 +130,37 @@ let port = 0;
 
 const outbox = new Outbox(database.db);
 const artifacts = new ArtifactStore(database.db, home.root, redact);
+const log = (message: string) => process.stderr.write(`factory runtime: ${message}\n`);
+const holder = `runtime:${String(process.pid)}`;
+
+/**
+ * Crash recovery (ADR-0012), before anything is scheduled and before the API
+ * listens: every Task a previous runtime left in progress is re-attached,
+ * resumed, retried or blocked. Only with a Harness: without one nothing runs.
+ */
+const recovered =
+  harness === undefined
+    ? []
+    : await recoverTasks({
+        db: database.db,
+        holder,
+        spoolRoot: home.spoolDir,
+        onCommit: () => undefined,
+        log,
+      });
+
+/** Test-only fault injection (ADR-0012); an unknown point is refused, never ignored. */
+const crashEnv = process.env['FACTORY_TEST_CRASH_AT'];
+const crashAt = CRASH_POINTS.find((p) => p === crashEnv);
+if (crashEnv !== undefined && crashAt === undefined) {
+  fail(`unknown FACTORY_TEST_CRASH_AT: ${crashEnv}`);
+}
+
 const scheduler = new StageScheduler({
   db: database.db,
   harness,
   artifacts,
+  spoolRoot: home.spoolDir,
   onCommit: () => {
     notify();
   },
@@ -141,11 +173,15 @@ const tasks = new TaskScheduler({
   artifacts,
   workspaceRoot: config.workspaceRoot,
   runtimeEnv: process.env,
+  spoolRoot: home.spoolDir,
+  recovered,
+  ...(crashAt === undefined ? {} : { crashAt }),
   onCommit: () => {
     notify();
   },
-  log: (message) => process.stderr.write(`factory runtime: ${message}\n`),
+  log,
 });
+if (tasks.leaseHolder !== holder) throw new Error('lease holders disagree');
 const notify = () => {
   outbox.notify();
   scheduler.wake();
@@ -172,7 +208,9 @@ const app = createApp({
   }),
   doctor: () => runDoctor(process.env),
   repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
-  jobs: new JobService(database.db, notify),
+  jobs: new JobService(database.db, notify, async (jobId) => {
+    await Promise.all([scheduler.cancelJob(jobId), tasks.cancelJob(jobId)]);
+  }),
   artifacts,
   logs: (jobId) => jobLogs(database.db, artifacts, jobId),
   outbox,
@@ -224,7 +262,7 @@ function shutdown(reason: string): void {
   // Ends every SSE stream; events written from here on are released at the next start.
   outbox.close();
   // A Harness Run in flight is cancelled; its Stage Run is resumed at the next start.
-  // So is a developer Harness Run or verification command; its Attempt is left for recovery (#13).
+  // So is a developer Harness Run or verification command; its Attempt is recovered at the next start.
   const stopped = Promise.all([scheduler.close(), tasks.close()]);
   server.close(() => {
     void stopped.then(() => {

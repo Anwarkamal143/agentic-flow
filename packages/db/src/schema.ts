@@ -198,6 +198,8 @@ export const tasks = sqliteTable(
     state: text('state').notNull(),
     priority: integer('priority').notNull(),
     maxAttempts: integer('max_attempts').notNull(),
+    /** Retries after interrupted Attempts; they don't count toward `max_attempts`. */
+    maxRetries: integer('max_retries').notNull().default(2),
     /** Why a `blocked` Task can't go on (`Blocker`), while it is blocked. */
     blockerJson: text('blocker_json'),
     version: integer('version').notNull(),
@@ -231,7 +233,7 @@ export const attempts = sqliteTable(
       .notNull()
       .references(() => tasks.id),
     n: integer('n').notNull(),
-    /** `initial` or `rework` (`AttemptCause`). */
+    /** `initial`, `rework` or `retry` (`AttemptCause`). */
     cause: text('cause').notNull().default('initial'),
     state: text('state').notNull(),
     harnessId: text('harness_id').notNull(),
@@ -257,6 +259,15 @@ export const attempts = sqliteTable(
     exitReason: text('exit_reason'),
     exitDetail: text('exit_detail'),
     usageJson: text('usage_json'),
+    /**
+     * The process the Attempt is waiting on (`AttemptProcess`): a Harness Run
+     * or a verification command, with the spool directory that outlives the
+     * runtime. Set before the process starts, cleared once its end is recorded.
+     * Recovery reads it (ADR-0012).
+     */
+    processJson: text('process_json'),
+    /** How the last developer Harness Run ended (`HarnessExit`), set on `verifying`, for a resumed verification. */
+    developerExitJson: text('developer_exit_json'),
     version: integer('version').notNull(),
   },
   (t) => [uniqueIndex('attempts_task_n').on(t.taskId, t.n)],

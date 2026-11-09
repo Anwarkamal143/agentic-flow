@@ -112,6 +112,10 @@ export interface RunningRuntime {
   output(): string;
   /** Stops the runtime with SIGTERM and resolves with its exit code. */
   stop(): Promise<number | null>;
+  /** Kills the runtime with SIGKILL (a crash: no shutdown runs) and waits for it to be gone. */
+  kill(): Promise<void>;
+  /** Settles when the runtime process has exited, by itself or otherwise. */
+  readonly exited: Promise<number | null>;
 }
 
 /**
@@ -166,6 +170,11 @@ export async function startRuntime(
     },
     output: () => output,
     stop: () => terminate(child, exited),
+    kill: async () => {
+      child.kill('SIGKILL');
+      await exited;
+    },
+    exited,
   };
 }
 

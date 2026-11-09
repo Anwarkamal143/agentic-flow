@@ -98,16 +98,27 @@ describe('factory job create / job show', () => {
       recipeVersion: 1,
       stages: PHASE_A_FEATURE_STAGES.map((id) => ({ id })),
     });
-    expect(first.effectiveConfig).toEqual({ maxAttempts: { value: 3, source: 'recipe' } });
+    expect(first.effectiveConfig).toEqual({
+      maxAttempts: { value: 3, source: 'recipe' },
+      maxRetries: { value: 2, source: 'recipe' },
+    });
 
     const edit = await post(rt, `/v1/projects/${repo.projectId}/config`, { maxAttempts: 5 });
     expect(edit.status).toBe(200);
     expect(await edit.json()).toMatchObject({ id: repo.projectId, config: { maxAttempts: 5 } });
     const second = await createJob(rt, repo.id, 'after the first edit');
-    expect(second.effectiveConfig).toEqual({ maxAttempts: { value: 5, source: 'project' } });
+    expect(second.effectiveConfig).toEqual({
+      maxAttempts: { value: 5, source: 'project' },
+      maxRetries: { value: 2, source: 'recipe' },
+    });
 
     expect(
-      (await post(rt, `/v1/projects/${repo.projectId}/config`, { maxAttempts: 1 })).status,
+      (
+        await post(rt, `/v1/projects/${repo.projectId}/config`, {
+          maxAttempts: 1,
+          maxRetries: 0,
+        })
+      ).status,
     ).toBe(200);
 
     const [firstNow, secondNow] = await Promise.all(
@@ -119,7 +130,10 @@ describe('factory job create / job show', () => {
     );
     expect(firstNow?.workflowSnapshot).toEqual(first.workflowSnapshot);
     const third = await createJob(rt, repo.id, 'after the second edit');
-    expect(third.effectiveConfig).toEqual({ maxAttempts: { value: 1, source: 'project' } });
+    expect(third.effectiveConfig).toEqual({
+      maxAttempts: { value: 1, source: 'project' },
+      maxRetries: { value: 0, source: 'project' },
+    });
   });
 
   it('rejects a Project config the factory does not know or allow', async () => {
