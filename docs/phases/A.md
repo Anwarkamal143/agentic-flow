@@ -1,6 +1,6 @@
 # Phase A — Walking skeleton: phase report
 
-Status: **exit tests pass. Waiting for human review** (ROADMAP phase protocol step 5). Phase B has not been started.
+Status: **accepted by the human on 2026-11-09**, after a manual check of the dashboard. Phase B has not been started.
 
 ## What was built
 

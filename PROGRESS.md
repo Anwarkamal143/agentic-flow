@@ -4,7 +4,7 @@
 
 ## Current phase
 
-**Phase A — Walking skeleton** (#2–#15 done; exit tests A1–A7 pass. **Phase gate: waiting for human review.**)
+**Phase A — Walking skeleton: accepted 2026-11-09.** Next, before Phase B: API-key billing for Claude Code (its own PR; see Human decisions). Phase B has not started.
 
 ## Human answers (from CLAUDE.md §7)
 
@@ -22,7 +22,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 | Phase | Status | Exit tests | Report |
 |---|---|---|---|
-| A — Walking skeleton | Done, awaiting human review | 7 / 7 (A1–A7; A7 `[real]` on demand) | `docs/phases/A.md` |
+| A — Walking skeleton | **Accepted** 2026-11-09 | 7 / 7 (A1–A7; A7 `[real]` on demand) | `docs/phases/A.md` |
 | B — Human-in-the-loop + DAG | Not started | — | — |
 | C — GitHub delivery | Not started | — | — |
 | D — Multi-project, multi-repo, onboarding | Not started | — | — |
@@ -32,6 +32,8 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 ## Work log
 
 <!-- newest first: date — what changed — tests run (pass/fail counts) -->
+
+- 2026-11-09 — **Phase A gate approved by the human.** The human checked the dashboard by hand (`pnpm dev` against a demo home with the Fake Harness: live list and detail, reload, runtime restart, labels, read-only) and reported it good. Spec issues 15, 13, 7 and 8 were decided first (PR #30).
 
 - 2026-11-09 — #15 The read-only dashboard (`apps/dashboard`, ADR-0014). Next.js 16.4 App Router with Turbopack, React 19.3, Tailwind 4.3, and shadcn/ui primitives copied in (`Badge`, `Card`, `Table`), in light and dark. Two pages. The **job list** (`/`) and the **job detail** (`/jobs/:id`): the overview, the Stage Runs with failures and Blockers, the Acceptance Criteria, then each Task with its Attempts (cause, state, exit reason, Harness, tier, base→head, commits, usage, Session), the factory's verification runs, Evidence with `(head, base)`, Gate Findings, and the Attempt's independent review with its Findings (marked stale when its SHAs differ from the Attempt's), and a live **timeline**. All reads go through the runtime API from the server (`src/lib/runtime.ts`), parsed against the `@factory/domain` schemas. The token is read from the factory home and never reaches the browser. **Live without polling:** `/api/events/stream` passes the runtime's SSE through (`job`, `after`, `Last-Event-ID`), with a leading comment because Next sends headers only with the first chunk. Each event triggers `router.refresh()` (coalesced), so what is shown is always persisted state. The timeline streams after the last rendered `seq` and merges by `seq` with the pure `mergeEventLog` (`@factory/domain/event-log`), so a reload or reconnect shows no gap and no duplicate. **Honest labels:** Attempts now record their tier (`attempts.tier`, `SecurityTier = 'local'`, migration 0008, also in `attempt.started` and `job show`). The UI shows "Tier 0 · local guardrail … without isolation" and never says sandbox. Usage shows "unknown (subscription)", "unknown (not reported by the Harness)" or "unknown (not recorded)". **Read-only:** no forms, buttons or inputs, and the stream route is GET only. The dashboard listens on 127.0.0.1 and `src/proxy.ts` refuses non-loopback `Host` headers (DNS rebinding). `pnpm dev` (`scripts/dev.mjs`) starts the runtime (and stops it on exit only if it started it) and `next dev` on `127.0.0.1:7421`. `pnpm build` now ends with `next build` (~15 s), and `pnpm typecheck` covers the dashboard. Unit tests `tests/unit/event-log.test.ts`; scenarios `tests/scenarios/dashboard.test.ts` against the built dashboard (`next start`, helper `tests/support/dashboard.ts`): the detail page renders a Job completed through the API by the Claude Code stand-in (Task, Attempt, every Evidence row with its verdict, the review and its Findings, every event once and in order), with the subscription cost unknown and the tier a guardrail; the list links to it; no write controls and no token in the HTML, POST → 405; runtime down → the notice; unknown Job → 404; foreign `Host` → 403; the SSE pass-through delivers exactly the events after `after`, resumes by `Last-Event-ID` without the first, and streams every Job's events. Manually checked: `pnpm dev` serves the list against a fresh home and Ctrl-C stops both. Not run in a browser: no browser is available here, so the client-side `EventSource` and refresh code is checked only through types and the HTTP behaviour it relies on. Review fixes: when EventSource gives up (the dashboard answered an error, e.g. the runtime was down), the page opens a new stream after a backoff (1 s doubling to 30 s) from the last `seq` it saw, and shows `disconnected` meanwhile instead of a false `reconnecting`. Tier labels are defined once (`SECURITY_TIER_LABELS` in `@factory/domain`, used by the CLI and the dashboard; "the Harness runs as your user"). Event pages are read until an empty page, without copying the runtime's page size. Checked by hand: closing a browser's stream closes the dashboard's upstream connection to the runtime (`request.signal`; 3 clients gave 6 established sockets, then 0). Phase report `docs/phases/A.md`. Branch `phase-a/14-claude-code` (continued). typecheck ✓, lint ✓, test 187/187 ✓.
 
