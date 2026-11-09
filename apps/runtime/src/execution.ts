@@ -14,7 +14,13 @@ import { dirname, join } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   AttemptStateSchema,
+  BlockerSchema,
+  checkPathScope,
   criterionVerdict,
+  routeFailedAttempt,
+  type AttemptCause,
+  type AttemptFinding,
+  type Blocker,
   decideApproval,
   evidenceSource,
   type GateRef,
@@ -42,6 +48,7 @@ import {
 } from '@factory/domain';
 import {
   addWorktree,
+  changedPathKinds,
   changedPaths,
   commitAll,
   commitsBetween,
@@ -49,6 +56,7 @@ import {
   removeWorktree,
   resolveCommit,
   uncommittedPaths,
+  updateRef,
 } from '@factory/git';
 import {
   describeHarnessExit,
@@ -59,10 +67,11 @@ import {
   type HarnessRawResult,
   type HarnessRun,
 } from '@factory/harness';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { ArtifactStore, StoredContent } from './artifacts.js';
 import { criteriaCoveredBy } from './criteria.js';
 import { buildDeliveryReport } from './delivery.js';
+import { attemptFindings, gateFinding, scopeFinding } from './findings.js';
 import {
   changeJob,
   stepAttempt,
@@ -176,6 +185,13 @@ interface Outcome {
   state: Extract<AttemptState, 'passed' | 'failed'>;
   exitReason: AttemptExitReason;
   detail: string;
+  /** What the factory's Gates found (the review's Findings are recorded with the review). */
+  findings?: AttemptFinding[];
+}
+
+/** Where a pinned ref keeps each Attempt's head, so later Attempts can't lose its commits. */
+export function attemptRef(attemptId: string): string {
+  return `refs/factory/attempts/${attemptId}`;
 }
 
 export class TaskScheduler {
@@ -341,30 +357,71 @@ export class TaskScheduler {
     if (job === undefined || repo === undefined)
       throw new Error(`Task ${taskId} has no Job or Repository`);
 
-    // The Worktree, from a freshly fetched base, in the Factory Clone only.
+    // The Task's earlier Attempt, if any: this one is then Rework, in the same Worktree.
+    const previous = db
+      .select()
+      .from(schema.attempts)
+      .where(eq(schema.attempts.taskId, taskId))
+      .orderBy(desc(schema.attempts.n))
+      .get();
     const clone = repo.clonePath;
-    await fetchRemote(clone);
-    const baseSha =
-      (await resolveCommit(clone, `refs/remotes/origin/${repo.defaultBranch}`)) ??
-      (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
-    if (baseSha === undefined)
-      throw new Error(`the Factory Clone has no ${repo.defaultBranch} to start from`);
-    const { path, branch } = taskWorktree({
-      workspaceRoot: this.opts.workspaceRoot,
-      repositoryId: repo.id,
-      jobId: job.id,
-      taskId: task.id,
-      taskKey: task.key,
-    });
-    const worktreeId = newId('wt');
     const attemptId = newId('att');
-    const n = 1;
+    const n = (previous?.n ?? 0) + 1;
+    const cause: AttemptCause = previous === undefined ? 'initial' : 'rework';
+    const priorFindings = previous === undefined ? [] : attemptFindings(db, previous);
     const { wallClockMs } = this;
-    // Built before the Worktree exists, so nothing between its creation and its row can fail.
-    const packet = this.packet({ job, task, definition, repo, path, branch, baseSha, wallClockMs });
+    let worktree: { id: string; path: string; branch: string; baseSha: string; reused: boolean };
+    if (previous === undefined) {
+      // A new Worktree, from a freshly fetched base, in the Factory Clone only.
+      await fetchRemote(clone);
+      const baseSha =
+        (await resolveCommit(clone, `refs/remotes/origin/${repo.defaultBranch}`)) ??
+        (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
+      if (baseSha === undefined)
+        throw new Error(`the Factory Clone has no ${repo.defaultBranch} to start from`);
+      const at = taskWorktree({
+        workspaceRoot: this.opts.workspaceRoot,
+        repositoryId: repo.id,
+        jobId: job.id,
+        taskId: task.id,
+        taskKey: task.key,
+      });
+      worktree = { id: newId('wt'), ...at, baseSha, reused: false };
+    } else {
+      // Rework continues on the Task Branch, from the same base: the earlier work is kept.
+      const row = requireWorktree(db, previous.worktreeId);
+      if (row.state !== 'preserved')
+        throw new Error(`the Worktree of Task ${task.key} is ${row.state}, not preserved`);
+      worktree = {
+        id: row.id,
+        path: row.path,
+        branch: row.branch,
+        baseSha: row.baseSha,
+        reused: true,
+      };
+    }
+    const { path, branch, baseSha } = worktree;
+    const worktreeId = worktree.id;
+    // Built before the Worktree is touched, so nothing between that and its row can fail.
+    const packet = this.packet({
+      job,
+      task,
+      definition,
+      repo,
+      path,
+      branch,
+      baseSha,
+      wallClockMs,
+      priorFindings,
+    });
     await excludeResultFile(clone);
-    mkdirSync(dirname(path), { recursive: true });
-    await addWorktree({ repo: clone, path, branch, startSha: baseSha });
+    if (worktree.reused) {
+      // A Task Result left by the Attempt before must never be read as this one's.
+      rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
+    } else {
+      mkdirSync(dirname(path), { recursive: true });
+      await addWorktree({ repo: clone, path, branch, startSha: baseSha });
+    }
 
     const portBase = changeJob(
       db,
@@ -375,33 +432,49 @@ export class TaskScheduler {
           expiresAt: this.leaseExpiry(),
         });
         const now = new Date().toISOString();
-        tx.insert(schema.worktrees)
-          .values({
-            id: worktreeId,
+        if (worktree.reused) {
+          tx.update(schema.worktrees)
+            .set({ portBase: base })
+            .where(eq(schema.worktrees.id, worktreeId))
+            .run();
+          stepWorktree(
+            tx,
+            { jobId: job.id, actor: ACTOR },
+            requireWorktree(tx, worktreeId),
+            'preserved',
+            'active',
+            { attemptId, portBase: base },
+          );
+        } else {
+          tx.insert(schema.worktrees)
+            .values({
+              id: worktreeId,
+              jobId: job.id,
+              taskId,
+              repositoryId: repo.id,
+              path,
+              branch,
+              baseSha,
+              state: 'active',
+              portBase: base,
+              createdAt: now,
+            })
+            .run();
+          appendEvent(tx, {
+            entityKind: 'worktree',
+            entityId: worktreeId,
             jobId: job.id,
-            taskId,
-            repositoryId: repo.id,
-            path,
-            branch,
-            baseSha,
-            state: 'active',
-            portBase: base,
-            createdAt: now,
-          })
-          .run();
-        appendEvent(tx, {
-          entityKind: 'worktree',
-          entityId: worktreeId,
-          jobId: job.id,
-          type: 'worktree.created',
-          actor: ACTOR,
-          payload: { taskId, to: 'active', path, branch, baseSha, portBase: base },
-        });
+            type: 'worktree.created',
+            actor: ACTOR,
+            payload: { taskId, to: 'active', path, branch, baseSha, portBase: base },
+          });
+        }
         tx.insert(schema.attempts)
           .values({
             id: attemptId,
             taskId,
             n,
+            cause,
             state: 'running',
             harnessId: harness.id,
             harnessVersion: this.opts.harnessVersion,
@@ -425,11 +498,13 @@ export class TaskScheduler {
           payload: {
             taskId,
             n,
+            cause,
             harnessId: harness.id,
             harnessVersion: this.opts.harnessVersion,
             template: { id: TASK_TEMPLATE_ID, hash: TASK_TEMPLATE_HASH },
             worktreeId,
             baseSha,
+            priorFindings: priorFindings.length,
           },
         });
         stepTask(
@@ -474,6 +549,13 @@ export class TaskScheduler {
 
     // Trust nothing the Harness said: read the Worktree and git.
     const inspection = await inspect(path, baseSha);
+    // Every Attempt's head stays reachable, whatever a later Attempt does to the branch.
+    await updateRef(clone, attemptRef(attemptId), inspection.headSha);
+    const scopeViolations = checkPathScope(
+      await changedPathKinds(path, baseSha, inspection.headSha),
+      definition.scope,
+    );
+    const self = { id: attemptId, n };
     const resultContent =
       inspection.result.kind === 'missing'
         ? undefined
@@ -509,21 +591,31 @@ export class TaskScheduler {
         exitReason: 'not_done',
         detail: `the Task Result's status is ${inspection.result.value.status}; only done is handled before Phase B`,
       };
+    } else if (scopeViolations.length > 0) {
+      // The path-scope Gate (ARCHITECTURE §7 step 3): nothing runs on out-of-scope work.
+      outcome = {
+        state: 'failed',
+        exitReason: 'gates_failed',
+        detail: scopeViolations.map((v) => `[${v.rule}] ${v.message}`).join('; '),
+        findings: scopeViolations.map((v) => scopeFinding(self, v)),
+      };
     } else {
       const verified = await this.verify(definition, path, env);
       if (verified === undefined) return; // shutdown during verification
       verificationRuns = verified;
       const at = { headSha: inspection.headSha, baseSha };
-      const problems = [
+      const problems: [rule: string, problem: string][] = [
         ...verificationProblems(
           at,
           verificationRuns.map((r) => ({ ...r, ...at })),
+        ).map((p) => ['verification', p] as [string, string]),
+        ...(await worktreeProblems(path, inspection.headSha, 'verification')).map(
+          (p) => ['worktree.clean', p] as [string, string],
         ),
-        ...(await worktreeProblems(path, inspection.headSha, 'verification')),
         ...commandCriteriaFailures(
           verificationRuns,
           criteriaCoveredBy(this.opts.db, job.id, definition.acceptance),
-        ),
+        ).map((p) => ['criteria', p] as [string, string]),
       ];
       if (problems.length === 0) {
         // Every factory Gate passed: the independent review decides the rest.
@@ -567,7 +659,8 @@ export class TaskScheduler {
       outcome = {
         state: 'failed',
         exitReason: 'gates_failed',
-        detail: problems.join('; '),
+        detail: problems.map(([, p]) => p).join('; '),
+        findings: problems.map(([rule, p]) => gateFinding(self, rule, p)),
       };
     }
 
@@ -594,6 +687,7 @@ export class TaskScheduler {
     branch: string;
     baseSha: string;
     wallClockMs: number;
+    priorFindings: AttemptFinding[];
   }): TaskPacket {
     const { job, task, definition, repo } = input;
     const artifacts = this.opts.artifacts.listForJob(job.id).filter((a) => a.stageRunId !== null);
@@ -643,6 +737,7 @@ export class TaskScheduler {
       context: {
         artifacts: artifacts.map((a) => ({ id: a.id, kind: a.kind, contentHash: a.contentHash })),
         files,
+        priorFindings: input.priorFindings,
       },
       limits: { maxTurns: MAX_TURNS, wallClockS: input.wallClockMs / 1000 },
       protocol: { resultFile: RESULT_FILE, mayAskQuestions: false },
@@ -1065,6 +1160,9 @@ export class TaskScheduler {
             }),
           );
           const problems = [...decision.problems, ...input.reviewerChanges];
+          const changesRequested =
+            review?.outcome === 'changes_requested' && isCurrent(review, input.current);
+          const self = { id: attemptId, n: requireAttempt(tx, attemptId).n };
           outcome =
             problems.length === 0
               ? {
@@ -1074,11 +1172,15 @@ export class TaskScheduler {
                 }
               : {
                   state: 'failed',
-                  exitReason:
-                    review?.outcome === 'changes_requested' && isCurrent(review, input.current)
-                      ? 'changes_requested'
-                      : 'gates_failed',
+                  exitReason: changesRequested ? 'changes_requested' : 'gates_failed',
                   detail: problems.join('; '),
+                  // A review that requested changes brings its own Findings; the rest are the Gates'.
+                  findings: [
+                    ...(changesRequested
+                      ? []
+                      : decision.problems.map((p) => gateFinding(self, 'approval', p))),
+                    ...input.reviewerChanges.map((p) => gateFinding(self, 'worktree.clean', p)),
+                  ],
                 };
         }
         endAttempt(tx, state, step, {
@@ -1197,7 +1299,7 @@ export class TaskScheduler {
           .where(
             and(
               eq(schema.attempts.taskId, taskId),
-              inArray(schema.attempts.state, ['running', 'verifying']),
+              inArray(schema.attempts.state, ['running', 'verifying', 'in_review']),
             ),
           )
           .get();
@@ -1222,7 +1324,7 @@ export class TaskScheduler {
           if (worktree.state === 'active')
             stepWorktree(tx, { jobId, actor: ACTOR }, worktree, 'active', 'preserved');
         }
-        if (['claimed', 'running', 'verifying'].includes(task.state)) {
+        if (['claimed', 'running', 'verifying', 'in_review'].includes(task.state)) {
           stepTask(tx, { jobId, actor: ACTOR }, task, 'failed', {
             reason: 'factory_error',
             payload: { detail },
@@ -1549,8 +1651,12 @@ function approvalInput(
 }
 
 /**
- * Ends the Attempt with `outcome`, moves the Task to `approved` or `failed`,
- * releases the Attempt's leases, preserves the Worktree and settles `execution`.
+ * Ends the Attempt with `outcome`, releases its leases, preserves the Worktree,
+ * and moves the Task: `approved`; or, after a failure, where Rework routing
+ * sends it (ARCHITECTURE §4.6): back to `ready` for a Rework Attempt (through
+ * `changes_requested`), `blocked` with a Blocker (the cap is reached, or a
+ * blocking Finding blames the Plan, the Specification or the infrastructure),
+ * or `failed`. Then settles `execution`.
  */
 function endAttempt(
   tx: Tx,
@@ -1580,6 +1686,7 @@ function endAttempt(
       exitReason: outcome.exitReason,
       exitDetail: outcome.detail,
       ...inspectionColumns(inspection, input.usage),
+      gateFindingsJson: JSON.stringify(outcome.findings ?? []),
       finishedAt: new Date().toISOString(),
     },
     {
@@ -1587,15 +1694,45 @@ function endAttempt(
       headSha: inspection.headSha,
       baseSha: input.baseSha,
       wipCommit: inspection.wipCommit,
+      findings: outcome.findings?.length ?? 0,
     },
   );
-  stepTask(
-    tx,
-    op,
-    requireTask(tx, taskId, input.from),
-    outcome.state === 'passed' ? 'approved' : 'failed',
-    { reason: outcome.exitReason, payload: { attemptId, headSha: inspection.headSha } },
-  );
+  const task = requireTask(tx, taskId, input.from);
+  const payload = { attemptId, headSha: inspection.headSha };
+  const reason = outcome.exitReason;
+  if (outcome.state === 'passed') {
+    stepTask(tx, op, task, 'approved', { reason, payload });
+  } else {
+    const attempt = requireAttempt(tx, attemptId);
+    const route = routeFailedAttempt({
+      exitReason: outcome.exitReason,
+      findings: attemptFindings(tx, attempt),
+      n: attempt.n,
+      maxAttempts: task.maxAttempts,
+    });
+    if (route.kind === 'fail') {
+      stepTask(tx, op, task, 'failed', { reason, payload });
+    } else if (route.kind === 'rework') {
+      const back = stepTask(tx, op, task, 'changes_requested', { reason, payload });
+      stepTask(tx, op, back, 'ready', {
+        reason: 'rework',
+        payload: { ...payload, nextAttempt: attempt.n + 1, maxAttempts: task.maxAttempts },
+      });
+    } else {
+      const blocker: Blocker = {
+        ...route.blocker,
+        taskId,
+        attemptId,
+        createdAt: new Date().toISOString(),
+      };
+      // The cap is a Gate's or review's verdict that routes back here, with nowhere to go.
+      const from =
+        blocker.reason === 'rework_cap_reached'
+          ? stepTask(tx, op, task, 'changes_requested', { reason, payload })
+          : task;
+      stepTask(tx, op, from, 'blocked', { reason: blocker.reason, payload, blocker });
+    }
+  }
   const worktree = requireWorktree(tx, input.worktreeId);
   releaseAttemptTokens(tx, taskId, worktree.portBase);
   stepWorktree(tx, op, worktree, 'active', 'preserved');
@@ -1622,6 +1759,12 @@ function requireTask(db: FactoryDb | Tx, id: string, expected: string): TaskRow 
   return task;
 }
 
+function requireAttempt(db: FactoryDb | Tx, id: string) {
+  const attempt = db.select().from(schema.attempts).where(eq(schema.attempts.id, id)).get();
+  if (attempt === undefined) throw new Error(`no Attempt ${id}`);
+  return attempt;
+}
+
 function requireStageRun(state: JobState, id: string, expected: string) {
   const run = state.stageRuns.find((r) => r.id === id);
   if (run?.state !== expected)
@@ -1629,23 +1772,42 @@ function requireStageRun(state: JobState, id: string, expected: string) {
   return run;
 }
 
+/** Task states in which the Task is still being worked on, or is about to be. */
+const IN_PROGRESS = ['ready', 'claimed', 'running', 'verifying', 'in_review', 'changes_requested'];
+
 /**
- * Ends `execution` once its Tasks have: `failed` if any Task failed (no Rework
- * route exists before #9), `succeeded` (and `closure` queued) when all are approved.
+ * Ends `execution` once no Task is in progress: `failed` if a Task failed
+ * (with no Rework route); `waiting_human` or `blocked` if a Task is blocked
+ * (the Stage Run carries the first Blocker, human ones first, so the Job
+ * shows why); `succeeded` (and `closure` queued) when every Task is approved.
  */
 function settleExecution(tx: Tx, state: JobState, step: StageRunStepper): void {
   const execution = state.stageRuns.find((r) => r.stageId === 'execution');
   if (execution?.state !== 'running') return;
-  const tasks = tx.select().from(schema.tasks).where(eq(schema.tasks.jobId, state.job.id)).all();
+  const tasks = tx
+    .select()
+    .from(schema.tasks)
+    .where(eq(schema.tasks.jobId, state.job.id))
+    .orderBy(asc(sql`rowid`))
+    .all();
   const failed = tasks.find((t) => t.state === 'failed');
   if (failed !== undefined) {
     step(execution, 'failed', {
       failure: {
         reason: 'task_failed',
-        message: `Task ${failed.key} failed, and Rework is not built yet`,
+        message: `Task ${failed.key} failed, with no Rework route`,
         issues: [],
       },
     });
+    return;
+  }
+  if (tasks.some((t) => IN_PROGRESS.includes(t.state))) return;
+  const blockers = tasks
+    .filter((t) => t.state === 'blocked' && t.blockerJson !== null)
+    .map((t) => BlockerSchema.parse(JSON.parse(t.blockerJson ?? 'null')));
+  const blocker = blockers.find((b) => b.kind === 'human') ?? blockers[0];
+  if (blocker !== undefined) {
+    step(execution, blocker.kind === 'human' ? 'waiting_human' : 'blocked', { blocker });
     return;
   }
   if (tasks.length > 0 && tasks.every((t) => t.state === 'approved')) {

@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { TaskResultSchema, type TaskPacket } from '@factory/domain';
 import { z } from 'zod';
 
-export const TASK_TEMPLATE_ID = 'task-packet@1';
+export const TASK_TEMPLATE_ID = 'task-packet@2';
 
 const TEMPLATE = `You are the developer for one Task in an automated software factory.
 Work only in the current directory: a git Worktree checked out on branch {{branch}}.
@@ -16,6 +16,9 @@ The Task Packet (JSON) says what to do, what you may change, and how the work is
 
 Rules:
 - Change only paths that match scope.writable, and never a path that matches scope.forbidden.
+  The factory checks every path in the diff from repository.baseSha to your last commit.
+- If context.priorFindings is not empty, this is Rework: an earlier Attempt on this same branch
+  failed a Gate or its review. Its commits are already on the branch. Fix those Findings first.
 - Commit your work on the current branch. Do not push, switch branches or rewrite history.
 - The factory runs every verification command itself. Your claims are not evidence.
 - You cannot ask questions in this Run.

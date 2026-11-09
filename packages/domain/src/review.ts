@@ -6,19 +6,13 @@
  */
 import { z } from 'zod';
 import { EvidenceVerdictSchema, type EvidenceVerdict } from './execution.js';
+import { FaultOriginSchema, FindingSeveritySchema, type FindingSeverity } from './findings.js';
 import { SpecificationProposalSchema, type RuleIssue } from './proposals.js';
 
 // ---- Findings (ARCHITECTURE §4.6) ---------------------------------------------
 
-export const FindingSeveritySchema = z.enum(['critical', 'high', 'medium', 'low', 'info']);
-export type FindingSeverity = z.infer<typeof FindingSeveritySchema>;
-
 /** Severities that block by default (PRODUCT_SPEC §8). */
 export const BLOCKING_SEVERITIES: readonly FindingSeverity[] = ['critical', 'high'];
-
-/** Where a Finding's fix belongs, which decides where Rework is routed (#9, Phase B). */
-export const FaultOriginSchema = z.enum(['implementation', 'plan', 'spec', 'infrastructure']);
-export type FaultOrigin = z.infer<typeof FaultOriginSchema>;
 
 export const ReviewOutcomeSchema = z.enum(['approved', 'changes_requested']);
 export type ReviewOutcome = z.infer<typeof ReviewOutcomeSchema>;

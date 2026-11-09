@@ -5,6 +5,7 @@
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { TaskStateSchema } from './execution.js';
+import { BlockerSchema } from './rework.js';
 import {
   RiskSchema,
   RuleIssueSchema,
@@ -15,7 +16,9 @@ import {
 
 export * from './proposals.js';
 export * from './execution.js';
+export * from './findings.js';
 export * from './review.js';
+export * from './rework.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -271,7 +274,7 @@ export const StageFailureSchema = z.object({
    * `invalid_output`: the proposal failed validation, also after the one re-prompt.
    * `harness_failed`: the Harness Run did not end with exit code 0.
    * `factory_error`: the factory itself could not run the Stage (a bug or a broken setup).
-   * `task_failed`: a Task of the Stage failed, and no Rework route exists yet (#9).
+   * `task_failed`: a Task of the Stage failed for a reason with no Rework route.
    */
   reason: z.enum(['invalid_output', 'harness_failed', 'factory_error', 'task_failed']),
   message: z.string(),
@@ -286,6 +289,8 @@ export const StageRunSchema = z.object({
   startedAt: z.string().nullable(),
   finishedAt: z.string().nullable(),
   failure: StageFailureSchema.nullable(),
+  /** Why a `blocked` or `waiting_human` Stage Run can't go on, and what would clear it. */
+  blocker: BlockerSchema.nullable(),
   version: z.number().int(),
 });
 export type StageRun = z.infer<typeof StageRunSchema>;
@@ -396,6 +401,8 @@ export const TaskSchema = TaskDefinitionSchema.extend({
   repositoryId: z.string(),
   state: TaskStateSchema,
   maxAttempts: z.number().int().positive(),
+  /** Why a `blocked` Task can't go on, and what would clear it. */
+  blocker: BlockerSchema.nullable(),
   /** The Plan Artifact it was taken from. */
   planArtifactId: z.string(),
   version: z.number().int(),

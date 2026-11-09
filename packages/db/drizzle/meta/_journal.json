@@ -43,6 +43,13 @@
       "when": 1794155232220,
       "tag": "0005_nasty_tomas",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794205880755,
+      "tag": "0006_stale_robin_chapel",
+      "breakpoints": true
     }
   ]
 }
