@@ -13,11 +13,13 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:e2e": "vitest run tests/scenarios",
+    "test:real": "vitest run --config vitest.real.config.ts",
     "factory": "node apps/cli/dist/main.js",
     "fixtures": "node fixtures/create-tiny-ts.mjs"
   },
   "devDependencies": {
     "@factory/domain": "workspace:*",
+    "@factory/harness": "workspace:*",
     "@eslint/js": "10.0.1",
     "@types/node": "22.20.5",
     "eslint": "10.14.0",

@@ -12,7 +12,11 @@ export default tseslint.config(
       globals: globals.node,
       parserOptions: {
         projectService: {
-          allowDefaultProject: ['vitest.config.ts', 'packages/db/drizzle.config.ts'],
+          allowDefaultProject: [
+            'vitest.config.ts',
+            'vitest.real.config.ts',
+            'packages/db/drizzle.config.ts',
+          ],
         },
         tsconfigRootDir: import.meta.dirname,
       },

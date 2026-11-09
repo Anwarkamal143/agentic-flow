@@ -7,7 +7,8 @@
  * - the environment is built from an explicit allowlist plus the factory's own
  *   variables, never inherited (`env -i` semantics), so secrets in the
  *   runtime's environment don't reach it;
- * - stdin is closed (`/dev/null`), so nothing can wait on a prompt;
+ * - stdin is closed (`/dev/null`), or a file the factory wrote (the prompt),
+ *   so nothing can wait on a prompt;
  * - the working directory is the given Worktree;
  * - a wall-clock limit, after which the whole process group gets SIGTERM, then
  *   SIGKILL after a grace period.
@@ -30,6 +31,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 
@@ -77,6 +79,12 @@ export interface GuardedOptions {
   maxOutputBytes?: number;
   /** Time between SIGTERM and SIGKILL. Default 5 s. */
   graceMs?: number;
+  /**
+   * The process's stdin, written to a file in the spool first. Without it,
+   * stdin is `/dev/null`. Either way it is a file that ends, so nothing can
+   * wait on a prompt.
+   */
+  input?: string;
 }
 
 export interface GuardedExit {
@@ -110,7 +118,8 @@ const WRAPPER = [
   'spool=$1; shift',
   'LC_ALL=C TZ=UTC ps -o lstart= -p $$ > "$spool/start.tmp" && mv "$spool/start.tmp" "$spool/start"',
   'echo $$ > "$spool/pid.tmp" && mv "$spool/pid.tmp" "$spool/pid"',
-  '"$@" > "$spool/output" 2>&1 < /dev/null',
+  'in=/dev/null; if [ -f "$spool/input" ]; then in="$spool/input"; fi',
+  '"$@" > "$spool/output" 2>&1 < "$in"',
   'code=$?',
   'echo $code > "$spool/exit.tmp" && mv "$spool/exit.tmp" "$spool/exit"',
   'exit $code',
@@ -120,6 +129,9 @@ const POLL_MS = 100;
 
 export function spawnGuarded(opts: GuardedOptions): GuardedProcess {
   mkdirSync(opts.spool, { recursive: true, mode: 0o700 });
+  if (opts.input !== undefined) {
+    writeFileSync(join(opts.spool, 'input'), opts.input, { mode: 0o600 });
+  }
   const child = spawn(
     'sh',
     ['-c', WRAPPER, 'factory-guard', opts.spool, opts.command, ...opts.args],

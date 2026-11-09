@@ -7,7 +7,16 @@ import { z } from 'zod';
 
 /** How a Harness Run ended. Exit code 0 is not evidence that the output is valid. */
 export const HarnessExitSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('exited'), code: z.number().int() }),
+  z.object({
+    kind: z.literal('exited'),
+    code: z.number().int(),
+    /**
+     * Why the Run failed, in the Harness's own words (e.g. Claude Code's
+     * `error_max_turns: Reached maximum number of turns (50)`). Untrusted text,
+     * kept only to explain the failure; it never decides anything.
+     */
+    reason: z.string().optional(),
+  }),
   z.object({ kind: z.literal('cancelled') }),
   z.object({ kind: z.literal('timed_out'), afterMs: z.number() }),
 ]);
@@ -15,7 +24,10 @@ export type HarnessExit = z.infer<typeof HarnessExitSchema>;
 
 /** How a Harness Run ended, in words: `exited with code 2`, `timed out after 600000 ms`, `was cancelled`. */
 export function describeHarnessExit(exit: HarnessExit): string {
-  if (exit.kind === 'exited') return `exited with code ${String(exit.code)}`;
+  if (exit.kind === 'exited') {
+    const why = exit.reason === undefined ? '' : `: ${exit.reason}`;
+    return `exited with code ${String(exit.code)}${why}`;
+  }
   if (exit.kind === 'timed_out') return `timed out after ${String(exit.afterMs)} ms`;
   return 'was cancelled';
 }

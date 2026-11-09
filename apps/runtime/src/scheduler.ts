@@ -26,6 +26,8 @@ import {
   type StageFailure,
   type StageRunState,
   type TaskDefinition,
+  toolPolicyOf,
+  type ToolPolicy,
 } from '@factory/domain';
 import {
   describeHarnessExit,
@@ -52,6 +54,8 @@ const ACTOR = 'system:scheduler';
 const POLL_MS = 1_000;
 /** Harness Runs per proposal: the first, plus one re-prompt. */
 const MAX_RUNS = 2;
+/** Turns a proposal Harness Run may take (reading the Repository, then answering). */
+const PROPOSAL_MAX_TURNS = 30;
 
 export interface SchedulerOptions {
   db: FactoryDb;
@@ -224,6 +228,7 @@ export class StageScheduler {
         n,
         prompt,
         cwd,
+        policy: toolPolicyOf(job.configSnapshotJson, stage.role),
         repositories,
         rejected,
       });
@@ -255,6 +260,7 @@ export class StageScheduler {
       n: number;
       prompt: string;
       cwd: string;
+      policy: ToolPolicy;
       repositories: PlanContext['repositories'];
       rejected: RuleIssue[] | undefined;
     },
@@ -270,7 +276,8 @@ export class StageScheduler {
         cwd: input.cwd,
         env: guardrailEnv(process.env, { FACTORY_JOB_ID: run.jobId }),
         subject: { jobId: run.jobId, stageId: run.stageId },
-        limits: { wallClockMs: this.opts.wallClockMs ?? 600_000 },
+        limits: { wallClockMs: this.opts.wallClockMs ?? 600_000, maxTurns: PROPOSAL_MAX_TURNS },
+        policy: input.policy,
         spool,
       });
     } catch (err) {

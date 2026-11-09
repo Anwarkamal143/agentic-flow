@@ -10,8 +10,9 @@
  * never the raw text.
  */
 import { execFile } from 'node:child_process';
-import { accessSync, constants, statSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
+import { findExecutable, probeClaudeCode } from '@factory/harness';
 
 export interface ToolCheck {
   id: 'node' | 'git' | 'gh' | 'claude';
@@ -23,10 +24,18 @@ export interface ToolCheck {
   path?: string;
   /** What the operator can do about a missing or failed tool. */
   fix?: string;
+  /** Things worth knowing that don't make it fail (e.g. a flag that can't be checked). */
+  notes?: string[];
 }
 
 export interface CredentialCheck {
-  id: 'anthropic_api_key' | 'claude_oauth_token' | 'gh_token' | 'github_token' | 'gh_login';
+  id:
+    | 'anthropic_api_key'
+    | 'claude_oauth_token'
+    | 'claude_login'
+    | 'gh_token'
+    | 'github_token'
+    | 'gh_login';
   name: string;
   /** Where presence was looked for: an environment variable name, or a command. */
   source: string;
@@ -81,12 +90,44 @@ const ENV_CREDENTIALS: readonly Omit<CredentialCheck, 'present'>[] = [
   { id: 'github_token', name: 'GitHub token', source: 'GITHUB_TOKEN' },
 ];
 
-export async function runDoctor(env: NodeJS.ProcessEnv): Promise<DoctorReport> {
-  const tools = await Promise.all(TOOLS.map((spec) => checkTool(spec, env)));
+/**
+ * `claudeCommand`: the configured Claude Code Harness's `command`, so doctor
+ * checks the same executable the Harness runs (default `claude` on PATH).
+ */
+export async function runDoctor(
+  env: NodeJS.ProcessEnv,
+  claudeCommand = 'claude',
+): Promise<DoctorReport> {
+  const tools = await Promise.all(
+    TOOLS.map((spec) =>
+      checkTool(spec.id === 'claude' ? { ...spec, command: claudeCommand } : spec, env),
+    ),
+  );
   const credentials: CredentialCheck[] = ENV_CREDENTIALS.map((c) => ({
     ...c,
     present: (env[c.source] ?? '') !== '',
   }));
+  // The Claude Code Harness's own check (shared with its `detect`): the flags it passes, and its login.
+  const claude = tools.find((t) => t.id === 'claude');
+  if (claude?.status === 'ok' && claude.path !== undefined) {
+    const probe = await probeClaudeCode(claude.path, env);
+    if (probe.problems.length > 0) {
+      claude.status = 'failed';
+      claude.fix = `${probe.problems.join('; ')}. Update Claude Code (\`claude update\`) or pin a version the factory supports.`;
+    }
+    if (probe.unverifiedFlags.length > 0) {
+      claude.notes = [
+        `${probe.unverifiedFlags.join(', ')} not listed in --help, so not verified; a Run the CLI rejects it for fails with the CLI's reason`,
+      ];
+    }
+    credentials.push({
+      id: 'claude_login',
+      name: 'Claude Code login',
+      source: 'claude auth status',
+      // Exit code only; the output is discarded.
+      present: probe.loggedIn === true,
+    });
+  }
   const gh = tools.find((t) => t.id === 'gh');
   credentials.push({
     id: 'gh_login',
@@ -101,7 +142,11 @@ export async function runDoctor(env: NodeJS.ProcessEnv): Promise<DoctorReport> {
 
 async function checkTool(spec: ToolSpec, env: NodeJS.ProcessEnv): Promise<ToolCheck> {
   const base = { id: spec.id, name: spec.name, command: spec.command };
-  const path = findOnPath(spec.command, env['PATH']);
+  const path = isAbsolute(spec.command)
+    ? existsSync(spec.command)
+      ? spec.command
+      : undefined
+    : findExecutable(spec.command, env['PATH']);
   if (path === undefined) return { ...base, status: 'missing', fix: spec.install };
 
   const result = await run(path, ['--version'], toolEnv(env));
@@ -121,22 +166,6 @@ async function checkTool(spec: ToolSpec, env: NodeJS.ProcessEnv): Promise<ToolCh
 function parseVersion(stdout: string): string | undefined {
   const firstLine = stdout.split('\n', 1)[0] ?? '';
   return /\d+\.\d+(?:\.\d+)?/.exec(firstLine)?.[0];
-}
-
-/** Resolves a command against PATH the way a shell would: first executable file wins. */
-function findOnPath(command: string, pathVar: string | undefined): string | undefined {
-  for (const dir of (pathVar ?? '').split(delimiter)) {
-    if (dir === '') continue;
-    const candidate = join(dir, command);
-    try {
-      if (!statSync(candidate).isFile()) continue;
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // not here, or not executable
-    }
-  }
-  return undefined;
 }
 
 /**
