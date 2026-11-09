@@ -17,6 +17,10 @@ interface DoctorBody {
     notes?: string[];
   }[];
   credentials: { name: string; source: string; present: boolean }[];
+  billing:
+    | { mode: 'subscription' }
+    | { mode: 'api_key'; credential: string; present: boolean; exposure: string }
+    | null;
 }
 
 /**
@@ -72,6 +76,15 @@ export async function doctor(opts: { json: boolean }): Promise<number> {
   lines.push('', 'Credentials (presence only; values are never shown):');
   for (const cred of body.credentials) {
     lines.push(`  ${(cred.present ? 'present' : 'absent').padEnd(9)}${cred.name} (${cred.source})`);
+  }
+  if (body.billing !== null) {
+    const b = body.billing;
+    lines.push(
+      '',
+      b.mode === 'api_key'
+        ? `Billing: Claude Code is billed to an API key (${b.credential}, ${b.present ? 'present' : 'absent'}): the key is ${b.exposure}.`
+        : 'Billing: Claude Code is billed to your subscription login (no credential is passed to it).',
+    );
   }
   process.stdout.write(lines.join('\n') + '\n');
   return 0;

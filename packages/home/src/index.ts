@@ -14,6 +14,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
+import { BillingSchema, PriceTableSchema } from '@factory/domain';
 import { z } from 'zod';
 
 export const DEFAULT_PORT = 7420;
@@ -84,10 +85,15 @@ export const HarnessConfigSchema = z.discriminatedUnion('id', [
       /** `--model` for every Run; the CLI's default when unset. */
       model: z.string().min(1).optional(),
       /**
-       * How Runs are billed. Only the operator's subscription login for now;
-       * an API key would have to be passed to the Harness process (ADR-0013).
+       * How Harness Runs are billed. `subscription` (default): the operator's
+       * own `claude` login, and no credential is passed. `api_key`: the
+       * runtime's `ANTHROPIC_API_KEY` is passed to every Claude Code Harness
+       * Run, so the Harness and every command it runs can read it (Tier 0 is
+       * a guardrail, not isolation). A permission expansion (ADR-0015).
        */
-      billing: z.literal('subscription').default('subscription'),
+      billing: BillingSchema.default('subscription'),
+      /** USD per million tokens by model, for cost estimates under `api_key`; else the CLI's list price. */
+      prices: PriceTableSchema.optional(),
     })
     .strict(),
 ]);

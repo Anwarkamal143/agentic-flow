@@ -9,6 +9,7 @@ import {
   resolveHome,
   runtimeUrl,
 } from '@factory/home';
+import { API_KEY_BILLING_NOTE, type Billing } from '@factory/domain';
 import { findRuntime, RuntimeClient } from '../client.js';
 
 /** Exit code for `status` when the runtime is not running (LSB convention). */
@@ -23,7 +24,7 @@ interface StatusBody {
   port: number;
   workspaceRoot: string;
   database: { journalMode: string; migrations: number };
-  harness: { id: string; version: string | null } | null;
+  harness: { id: string; version: string | null; billing: Billing | null } | null;
 }
 
 export async function start(): Promise<number> {
@@ -104,7 +105,12 @@ export async function status(opts: { json: boolean }): Promise<number> {
       `  uptime:         ${formatUptime(body.uptimeMs)}\n` +
       `  workspace root: ${body.workspaceRoot}\n` +
       `  database:       journal ${body.database.journalMode}, ${String(body.database.migrations)} migration(s) applied\n` +
-      `  harness:        ${body.harness === null ? 'none configured (queued Stages wait)' : `${body.harness.id} ${body.harness.version ?? '(version unknown)'}`}\n`,
+      `  harness:        ${body.harness === null ? 'none configured (queued Stages wait)' : `${body.harness.id} ${body.harness.version ?? '(version unknown)'}`}\n` +
+      (body.harness?.billing === 'api_key'
+        ? `  billing:        ${API_KEY_BILLING_NOTE}\n`
+        : body.harness?.billing === 'subscription'
+          ? '  billing:        your subscription login (no credential passed)\n'
+          : ''),
   );
   return 0;
 }

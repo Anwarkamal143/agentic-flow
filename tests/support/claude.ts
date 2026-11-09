@@ -19,6 +19,8 @@ export interface StubScenario {
   loggedIn?: boolean;
   /** By Role; see `claude-stub.mjs`. Defaults to {@link validResponses}. */
   responses?: Record<string, unknown[]>;
+  /** What the `init` event reports as the credential; by default, from the env (see `claude-stub.mjs`). */
+  apiKeySource?: string;
 }
 
 /** One Run of the stub, as it recorded itself. */
@@ -69,6 +71,7 @@ export function claudeStub(scenario: StubScenario = {}): ClaudeStub {
       loggedIn: scenario.loggedIn ?? true,
       record,
       responses: { ...validResponses(), ...scenario.responses },
+      ...(scenario.apiKeySource === undefined ? {} : { apiKeySource: scenario.apiKeySource }),
     }),
   );
   const command = join(dir, 'claude');
@@ -91,10 +94,14 @@ export function claudeStub(scenario: StubScenario = {}): ClaudeStub {
 }
 
 /** Selects the Claude Code Harness for this home through runtime configuration. Call before `startRuntime`. */
-export function useClaudeCode(home: TestHome, command: string): void {
+export function useClaudeCode(
+  home: TestHome,
+  command: string,
+  opts: { billing?: 'subscription' | 'api_key'; prices?: Record<string, unknown> } = {},
+): void {
   const configPath = join(home.dir, 'config.json');
   const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-  config['harness'] = { id: 'claude-code', command };
+  config['harness'] = { id: 'claude-code', command, ...opts };
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
 }
 

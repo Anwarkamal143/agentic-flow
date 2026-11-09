@@ -6,6 +6,7 @@ import {
   ProjectConfigSchema,
   RegisterRepositoryInputSchema,
   type ApiError,
+  type Billing,
   type JobLogEntry,
 } from '@factory/domain';
 import { Hono, type Context } from 'hono';
@@ -37,6 +38,8 @@ export interface RuntimeStatus {
     version: string | null;
     installed: boolean;
     credentials: HarnessCredentials;
+    /** Claude Code's billing (ADR-0015); `null` for a Harness without one. */
+    billing: Billing | null;
   } | null;
 }
 

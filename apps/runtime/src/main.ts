@@ -27,8 +27,9 @@ import {
   loadFakeScript,
   redactingHarness,
   type AgentHarness,
+  type ClaudeCodeBilling,
 } from '@factory/harness';
-import { createRedactor, secretsFromEnv } from '@factory/domain';
+import { API_KEY_MISSING, createRedactor, secretsFromEnv, type Billing } from '@factory/domain';
 import { createApp, type RuntimeStatus } from './app.js';
 import { ArtifactStore } from './artifacts.js';
 import { runDoctor } from './doctor.js';
@@ -108,6 +109,17 @@ if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 655
   fail(`invalid port: ${String(portEnv)}`);
 }
 
+/**
+ * API-key billing is a permission expansion (ADR-0015): the runtime's key
+ * reaches every Claude Code Harness Run. Without a key it can't be honoured.
+ */
+function claudeCodeBilling(billing: Billing): ClaudeCodeBilling {
+  if (billing === 'subscription') return { kind: 'subscription' };
+  const apiKey = process.env['ANTHROPIC_API_KEY'] ?? '';
+  if (apiKey === '') fail(`harness 'claude-code': ${API_KEY_MISSING}`);
+  return { kind: 'api_key', apiKey };
+}
+
 /** The Harness comes from runtime configuration only; there is no other switch. */
 function configuredHarness(): AgentHarness | undefined {
   const harness = config?.harness;
@@ -118,6 +130,8 @@ function configuredHarness(): AgentHarness | undefined {
         command: harness.command,
         ...(harness.model === undefined ? {} : { model: harness.model }),
         env: process.env,
+        billing: claudeCodeBilling(harness.billing),
+        ...(harness.prices === undefined ? {} : { prices: harness.prices }),
       }),
       redact,
     );
@@ -234,12 +248,14 @@ const app = createApp({
             version: detection.version,
             installed: detection.installed,
             credentials: detection.credentials,
+            billing: config.harness?.id === 'claude-code' ? config.harness.billing : null,
           },
   }),
   doctor: () =>
     runDoctor(
       process.env,
       config.harness?.id === 'claude-code' ? config.harness.command : 'claude',
+      config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
     ),
   repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
   jobs: new JobService(database.db, notify, async (jobId) => {

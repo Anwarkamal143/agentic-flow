@@ -6,11 +6,11 @@
  * `factory logs <job>` shows the (redacted) Harness and verification output.
  */
 import { randomBytes } from 'node:crypto';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { initializedHome, startRuntime, tinyTsRepo, useFakeHarness } from '../support/factory.js';
 import { json, post, waitForJob, type EventBody, type JobBody } from '../support/api.js';
+import { filesUnder } from '../support/files.js';
 import { openStream } from '../support/sse.js';
 import {
   scriptWith,
@@ -30,14 +30,6 @@ interface LogEntryBody {
     key?: string;
     output: string;
   };
-}
-
-/** Every file under `dir`, recursively. */
-function filesUnder(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    return statSync(path).isDirectory() ? filesUnder(path) : [path];
-  });
 }
 
 describe('redaction', () => {

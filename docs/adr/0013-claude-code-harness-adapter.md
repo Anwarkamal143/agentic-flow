@@ -37,7 +37,7 @@ Choices made while adding the first real Harness (ROADMAP exit test A7). All are
 ## Credentials (permission question left open)
 
 - **No credential is passed to the Harness process.** Its env is the guardrail allowlist (ADR-0007); the CLI finds the operator's subscription login (the macOS keychain) through `HOME` and `USER`, both allowlisted. Without `USER` it reports `Not logged in`, so the runtime must be started from the operator's own session. An `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the runtime's environment never reaches it, so a Harness Run can't bill an API key by accident.
-- **API-key billing is not built yet.** The human decided (2026-11-09, PROGRESS.md "Human decisions") to build it after the Phase A gate. It will be a named grant, `billing: "api_key"`, that passes exactly `ANTHROPIC_API_KEY`. It is off by default, documented as visible to the agent and every command it runs, and its cost is estimated from a price table (`estimated`). It gets its own ADR as an approved permission expansion. Until then `billing` accepts only `subscription`. Operators whose only login is a `CLAUDE_CODE_OAUTH_TOKEN` in the environment are not supported either.
+- **API-key billing** was built afterwards as `billing: "api_key"`, a named permission expansion: see ADR-0015. Under the default `subscription` billing, everything above still holds. Operators whose only login is a `CLAUDE_CODE_OAUTH_TOKEN` in the environment are still not supported.
 
 ## Tests
 

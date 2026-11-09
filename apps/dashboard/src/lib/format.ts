@@ -3,7 +3,7 @@
  * the runtime didn't record is shown as unknown, with the reason it is
  * unknown when the record says so (PRODUCT_SPEC §11).
  */
-import type { Usage } from '@factory/domain';
+import { API_KEY_BILLING_NOTE, type Usage } from '@factory/domain';
 import type { BadgeVariant } from '@/components/ui/badge';
 
 const GOOD = new Set(['completed', 'succeeded', 'passed', 'approved', 'integrated', 'pass']);
@@ -63,5 +63,6 @@ export function usageLabels(usage: Usage | null): UsageLabels {
   if (costTag === 'unknown/subscription') cost = 'unknown (subscription)';
   else if (usage.costUsd === null) cost = 'unknown';
   else cost = `$${usage.costUsd.toFixed(4)} (${costTag})`;
+  if (usage.billing === 'api_key') cost += `, ${API_KEY_BILLING_NOTE}`;
   return { tokens, cost, duration: formatDuration(usage.durationMs) };
 }

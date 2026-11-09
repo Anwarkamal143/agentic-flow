@@ -369,6 +369,8 @@ describe('Harness selection by runtime configuration', () => {
       version: '1',
       installed: true,
       credentials: 'not_required',
+      // Only Claude Code has a billing (ADR-0015).
+      billing: null,
     });
     const status = await rt.home.cli(['status']);
     expect(status.stdout).toMatch(/harness: +fake 1/);

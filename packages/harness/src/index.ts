@@ -23,14 +23,19 @@ export {
   parseClaudeStream,
   probeClaudeCode,
 } from './claude-code.js';
-export type { ClaudeCodeOptions, ClaudeCodeProbe, ClaudeStream } from './claude-code.js';
+export type {
+  ClaudeCodeBilling,
+  ClaudeCodeOptions,
+  ClaudeCodeProbe,
+  ClaudeStream,
+} from './claude-code.js';
 export type { GuardedExit, GuardedOptions, GuardedProcess, SpoolState } from './guardrail.js';
 
 export type HarnessCapability = 'resume' | 'structured_output' | 'cancel';
 
 /** What a Role asks of a Harness Run (GLOSSARY: Role). */
 export type { HarnessRole } from '@factory/domain';
-import type { CostTag, HarnessRole, ToolPolicy, UsageTag } from '@factory/domain';
+import type { Billing, CostTag, HarnessRole, ToolPolicy, UsageTag } from '@factory/domain';
 
 /** Login presence only, never a value. `unknown`: the Harness has a login the factory can't check safely. */
 export type HarnessCredentials = 'present' | 'absent' | 'not_required' | 'unknown';
@@ -103,6 +108,8 @@ export interface HarnessUsage {
   costUsd: number | null;
   /** The trust of `costUsd`; `tag` when absent. */
   costTag?: CostTag;
+  /** What the Run was billed to, when the Harness reported it. */
+  billing?: Billing;
 }
 
 export interface HarnessRawResult {

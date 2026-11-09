@@ -22,16 +22,21 @@
  *   process runs (progress events) and once it ends (the `result` event: the
  *   final text, usage, and whether it failed). A Harness Run whose stream has no
  *   successful `result` fails, with the reason the CLI gave.
- * - **Usage.** Token counts are what the CLI reports (`actual`). Billing is a
- *   subscription (the operator's own `claude` login), so the cost is
- *   `unknown/subscription`: the CLI's `total_cost_usd` is a list-price figure,
- *   not what the Harness Run cost, and is not recorded.
+ * - **Usage.** Token counts are what the CLI reports (`actual`). The cost
+ *   follows what the Harness Run was actually billed to, as the `init` event's
+ *   `apiKeySource` reports it (`harnessRunCost`): the subscription login
+ *   gives `unknown/subscription` (the CLI's list-price `costUSD` is not what
+ *   it cost); an API key gives an `estimated` cost from the configured price
+ *   table, else the CLI's per-model list price (ADR-0015).
  * - **Version.** Detected once at startup and recorded on each Attempt; the
  *   CLI's auto-updater is off in every Harness Run (`DISABLE_AUTOUPDATER=1`), so a Harness Run
  *   doesn't update the CLI under the runtime.
- * - **Credentials.** None is passed: the guardrail env has no secret, so the
- *   CLI uses its stored login (found through `HOME`). An `ANTHROPIC_API_KEY`
- *   in the runtime's environment never reaches it.
+ * - **Credentials.** Under `subscription` billing (the default) none is
+ *   passed: the guardrail env has no secret, so the CLI uses its stored login
+ *   (found through `HOME`), and an `ANTHROPIC_API_KEY` in the runtime's
+ *   environment never reaches it. Under `api_key` billing, exactly that key is
+ *   added to each Harness Run's env, so the Harness and every command it runs
+ *   can read it (ADR-0015).
  *
  * Everything the CLI prints is untrusted: the runtime validates the output,
  * and the reason text only explains a failure.
@@ -40,7 +45,14 @@ import { execFile } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { accessSync, closeSync, constants, openSync, readSync, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
-import { toolsOf, type ToolPolicy } from '@factory/domain';
+import {
+  harnessRunCost,
+  toolsOf,
+  type Billing,
+  type ModelTokens,
+  type PriceTable,
+  type ToolPolicy,
+} from '@factory/domain';
 import { z } from 'zod';
 import {
   attachGuarded,
@@ -169,7 +181,16 @@ export interface ClaudeCodeOptions {
   model?: string;
   /** The runtime's environment, for `detect` (filtered through the guardrail). */
   env: NodeJS.ProcessEnv;
+  /**
+   * What each Harness Run is billed to. `api_key`: `apiKey` is passed as
+   * `ANTHROPIC_API_KEY` (ADR-0015). Default `subscription`: no credential.
+   */
+  billing?: ClaudeCodeBilling;
+  /** Prices for cost estimates under `api_key` billing. */
+  prices?: PriceTable;
 }
+
+export type ClaudeCodeBilling = { kind: 'subscription' } | { kind: 'api_key'; apiKey: string };
 
 /** The command line of one Harness Run (the prompt goes on stdin). Pure. */
 export function claudeCodeArgs(input: {
@@ -244,12 +265,25 @@ export class ClaudeCodeHarness implements AgentHarness {
       }),
       cwd: input.cwd,
       // The version detected at startup is the one recorded on each Attempt: no update mid-way.
-      env: { ...input.env, DISABLE_AUTOUPDATER: '1' },
+      env: { ...input.env, DISABLE_AUTOUPDATER: '1', ...this.credentialEnv() },
       timeoutMs: input.limits.wallClockMs,
       spool: input.spool,
       input: input.prompt,
     });
-    return Promise.resolve(claudeRun(proc, sessionRef, input.spool, input.limits.wallClockMs));
+    return Promise.resolve(
+      claudeRun(proc, sessionRef, input.spool, input.limits.wallClockMs, this.costing()),
+    );
+  }
+
+  /** The credential a Harness Run gets: the API key under `api_key` billing, else none. */
+  private credentialEnv(): Record<string, string> {
+    const billing = this.opts.billing;
+    return billing?.kind === 'api_key' ? { ANTHROPIC_API_KEY: billing.apiKey } : {};
+  }
+
+  /** What a Harness Run's usage is costed with: the billing set up for it, and the prices. */
+  private costing(): Costing {
+    return { billing: this.opts.billing?.kind ?? 'subscription', prices: this.opts.prices };
   }
 
   /** A Harness Run started by an earlier runtime: watched to its end, never started again. */
@@ -261,7 +295,9 @@ export class ClaudeCodeHarness implements AgentHarness {
       timeoutMs: input.limits.wallClockMs,
     });
     if (proc === undefined) return Promise.resolve(undefined);
-    return Promise.resolve(claudeRun(proc, sessionRef, input.spool, input.limits.wallClockMs));
+    return Promise.resolve(
+      claudeRun(proc, sessionRef, input.spool, input.limits.wallClockMs, this.costing()),
+    );
   }
 }
 
@@ -270,8 +306,9 @@ function claudeRun(
   sessionRef: string,
   spool: string,
   wallClockMs: number,
+  costing: Costing,
 ): HarnessRun {
-  const result = proc.exit.then((e) => rawResult(e, wallClockMs));
+  const result = proc.exit.then((e) => rawResult(e, wallClockMs, costing));
   return {
     executionId: `claude_${randomBytes(8).toString('hex')}`,
     sessionRef,
@@ -285,9 +322,9 @@ function claudeRun(
 }
 
 /** How the Harness Run ended, from its process's exit and the stream it left. */
-function rawResult(e: GuardedExit, wallClockMs: number): HarnessRawResult {
+function rawResult(e: GuardedExit, wallClockMs: number, costing: Costing): HarnessRawResult {
   const stream = parseClaudeStream(e.output);
-  const usage = usageOf(stream);
+  const usage = usageOf(stream, costing);
   if (e.cancelled)
     return { exit: { kind: 'cancelled' }, output: e.output, usage, durationMs: e.durationMs };
   if (e.timedOut) {
@@ -341,15 +378,43 @@ function cut(text: string): string {
   return text.length > MAX_REASON ? `${text.slice(0, MAX_REASON)}…` : text;
 }
 
-function usageOf(stream: ClaudeStream): HarnessUsage {
+/** What a Harness Run's usage is costed with. */
+interface Costing {
+  /** The billing set up for the Harness Run (whether the key was in its env); unset for a progress event. */
+  billing: Billing | undefined;
+  prices: PriceTable | undefined;
+}
+
+/**
+ * A Harness Run's usage. `billing` is what the factory set up (so a Harness
+ * Run given the key says so even if it died before reporting anything); the
+ * cost follows what the Harness reported paying with.
+ */
+function usageOf(stream: ClaudeStream, costing: Costing): HarnessUsage {
   const u = stream.result?.usage;
+  const cost = harnessRunCost({
+    billedTo: stream.billedTo,
+    models: stream.result?.models ?? [],
+    prices: costing.prices,
+  });
   return {
     tag: u === undefined ? 'unknown' : 'actual',
     inputTokens: u === undefined ? null : u.inputTokens,
     outputTokens: u === undefined ? null : u.outputTokens,
-    costUsd: null,
-    costTag: 'unknown/subscription',
+    ...cost,
+    ...(costing.billing === undefined ? {} : { billing: costing.billing }),
   };
+}
+
+/**
+ * What the `init` event's `apiKeySource` says a Harness Run is billed to: `none` is
+ * the CLI's own login; `ANTHROPIC_API_KEY` the key the factory passed. Any
+ * other source is not one the factory set up, so it is left unknown.
+ */
+function billedToOf(apiKeySource: string | undefined): Billing | undefined {
+  if (apiKeySource === 'none') return 'subscription';
+  if (apiKeySource === 'ANTHROPIC_API_KEY') return 'api_key';
+  return undefined;
 }
 
 // ---- the stream ---------------------------------------------------------------
@@ -370,6 +435,25 @@ const ResultEventSchema = z.looseObject({
       cache_read_input_tokens: z.number().optional(),
     })
     .optional(),
+  /** Per model (Claude Code 2.1.x); `costUSD` is a list price (`costBasis: "list"`). */
+  modelUsage: z
+    .record(
+      z.string(),
+      z.looseObject({
+        inputTokens: z.number().optional(),
+        outputTokens: z.number().optional(),
+        cacheReadInputTokens: z.number().optional(),
+        cacheCreationInputTokens: z.number().optional(),
+        costUSD: z.number().optional(),
+      }),
+    )
+    .optional(),
+});
+
+const InitEventSchema = z.looseObject({
+  type: z.literal('system'),
+  subtype: z.literal('init'),
+  apiKeySource: z.string().optional(),
 });
 
 const AssistantEventSchema = z.looseObject({
@@ -399,8 +483,12 @@ export interface ClaudeStream {
         terminalReason: string | undefined;
         apiErrorStatus: number | undefined;
         usage: { inputTokens: number; outputTokens: number } | undefined;
+        /** `modelUsage`, per model. */
+        models: ModelTokens[];
       }
     | undefined;
+  /** What the Harness Run was billed to, from the `init` event; `undefined` when it didn't say. */
+  billedTo: Billing | undefined;
   /** The last line that isn't a stream event (the CLI's own error message, usually). */
   lastText: string | undefined;
 }
@@ -408,6 +496,7 @@ export interface ClaudeStream {
 /** Reads a Harness Run's stream-json output (stdout and stderr interleaved). Lines that aren't events are skipped. Pure. */
 export function parseClaudeStream(output: string): ClaudeStream {
   let result: ClaudeStream['result'];
+  let billedTo: Billing | undefined;
   let lastText: string | undefined;
   for (const line of output.split('\n')) {
     const trimmed = line.trim();
@@ -415,6 +504,11 @@ export function parseClaudeStream(output: string): ClaudeStream {
     const value = parseLine(trimmed);
     if (value === undefined) {
       lastText = cut(trimmed);
+      continue;
+    }
+    const init = InitEventSchema.safeParse(value);
+    if (init.success) {
+      billedTo = billedToOf(init.data.apiKeySource);
       continue;
     }
     const r = ResultEventSchema.safeParse(value);
@@ -438,9 +532,17 @@ export function parseClaudeStream(output: string): ClaudeStream {
                 (u.cache_read_input_tokens ?? 0),
               outputTokens: u.output_tokens ?? 0,
             },
+      models: Object.entries(r.data.modelUsage ?? {}).map(([model, m]) => ({
+        model,
+        inputTokens: m.inputTokens ?? 0,
+        outputTokens: m.outputTokens ?? 0,
+        cacheReadTokens: m.cacheReadInputTokens ?? 0,
+        cacheWriteTokens: m.cacheCreationInputTokens ?? 0,
+        listCostUsd: m.costUSD ?? null,
+      })),
     };
   }
-  return { result, lastText };
+  return { result, billedTo, lastText };
 }
 
 function parseLine(line: string): unknown {
@@ -472,8 +574,9 @@ function eventsOf(line: string): HarnessEvent[] {
   }
   const result = ResultEventSchema.safeParse(value);
   if (result.success) {
+    // A progress event (counted, not stored): the Run's recorded usage comes from its whole stream.
     const stream = parseClaudeStream(line);
-    return [{ kind: 'usage', usage: usageOf(stream) }];
+    return [{ kind: 'usage', usage: usageOf(stream, { billing: undefined, prices: undefined }) }];
   }
   return [];
 }

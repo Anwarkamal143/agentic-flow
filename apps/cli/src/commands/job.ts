@@ -12,7 +12,7 @@ import type {
   Review,
   Task,
 } from '@factory/domain';
-import { costTagOf, SECURITY_TIER_LABELS } from '@factory/domain';
+import { API_KEY_BILLING_NOTE, costTagOf, SECURITY_TIER_LABELS } from '@factory/domain';
 import { resolveHome } from '@factory/home';
 import { ApiRequestError, findRuntime, type RuntimeClient } from '../client.js';
 import { EXIT_NOT_RUNNING } from './lifecycle.js';
@@ -226,7 +226,8 @@ function describeUsage(usage: Attempt['usage']): string {
   const costTag = costTagOf(usage);
   const cost =
     usage.costUsd === null ? `cost ${costTag}` : `cost $${usage.costUsd.toFixed(4)} (${costTag})`;
-  return `usage ${tokens}, ${cost}`;
+  const billing = usage.billing === 'api_key' ? `, ${API_KEY_BILLING_NOTE}` : '';
+  return `usage ${tokens}, ${cost}${billing}`;
 }
 
 function writeAttempts(
