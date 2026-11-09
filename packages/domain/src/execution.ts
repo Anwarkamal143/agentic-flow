@@ -76,7 +76,7 @@ export type AttemptState = z.infer<typeof AttemptStateSchema>;
  * (recorded for another `(head, base)`). `changes_requested`: the review requested changes.
  * `review_failed`: the reviewer Harness Run did not exit 0 (it crashed, timed
  * out or did not start), so there is no review. `invalid_output`: no valid
- * Task Result, or the review was still invalid after its one re-prompt.
+ * Task Result, or no valid review, after its one re-prompt.
  * `not_done`: the Task Result's status is not `done`. `harness_failed`: the
  * Harness Run did not exit 0. `factory_error`: the factory itself broke.
  */
@@ -104,6 +104,19 @@ export const UsageSchema = z.object({
   durationMs: z.number().int().nonnegative(),
 });
 export type Usage = z.infer<typeof UsageSchema>;
+
+/** The usage of two Harness Runs together, as trustworthy as the less trusted one. Pure. */
+export function addUsage(a: Usage, b: Usage): Usage {
+  const trust = ['actual', 'estimated', 'unknown'] as const;
+  const sum = (x: number | null, y: number | null) => (x === null || y === null ? null : x + y);
+  return {
+    tag: trust[Math.max(trust.indexOf(a.tag), trust.indexOf(b.tag))] ?? 'unknown',
+    inputTokens: sum(a.inputTokens, b.inputTokens),
+    outputTokens: sum(a.outputTokens, b.outputTokens),
+    costUsd: sum(a.costUsd, b.costUsd),
+    durationMs: a.durationMs + b.durationMs,
+  };
+}
 
 // ---- Task Packet and Task Result (ARCHITECTURE §7) ---------------------------
 
