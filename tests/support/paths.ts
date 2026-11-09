@@ -8,3 +8,4 @@ export const runtimeEntry = fileURLToPath(
 export const tinyTsScript = fileURLToPath(
   new URL('../../fixtures/create-tiny-ts.mjs', import.meta.url),
 );
+export const dashboardDir = fileURLToPath(new URL('../../apps/dashboard', import.meta.url));

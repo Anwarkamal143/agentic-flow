@@ -37,7 +37,10 @@ export interface FactoryHome {
 }
 
 export function resolveHome(env: NodeJS.ProcessEnv = process.env): FactoryHome {
-  const root = resolve(env['FACTORY_HOME'] ?? join(homedir(), '.factory'));
+  // The comment tells the dashboard's bundler (Turbopack) this is a runtime path, not a file to trace.
+  const root = resolve(
+    /*turbopackIgnore: true*/ env['FACTORY_HOME'] ?? join(homedir(), '.factory'),
+  );
   const logDir = join(root, 'logs');
   return {
     root,

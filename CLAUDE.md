@@ -59,8 +59,8 @@ Keep this section accurate.
 
 ```bash
 pnpm install
-pnpm build         # tsc -b: compiles every package to dist/
-pnpm typecheck     # tsc -b, plus the tests/ project
+pnpm build         # tsc -b (every package to dist/), then next build (apps/dashboard)
+pnpm typecheck     # tsc -b, the tests/ project, and the dashboard (next typegen + tsc)
 pnpm lint          # ESLint (strict, type-checked) + Prettier --check + migration drift check
 pnpm test          # builds, then runs every Vitest test in tests/ (unit/ and scenarios/)
 pnpm test:e2e      # only the scenario tests (tests/scenarios)
@@ -69,11 +69,12 @@ pnpm format        # Prettier --write
 pnpm --filter @factory/db db:generate   # write a migration after editing packages/db/src/schema.ts
 pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | repo add | job create|list|show|cancel | logs
 pnpm fixtures      # generate fixtures/repos/tiny-ts (gitignored; tests make their own)
-pnpm dev           # TODO(Phase A) — runtime + dashboard (dashboard not built yet)
+pnpm dev           # factory start + the dashboard (next dev) on http://127.0.0.1:7421 (FACTORY_DASHBOARD_PORT); needs `factory init`
 ```
 
 Scenario tests spawn the built runtime and CLI as child processes against a temporary `FACTORY_HOME`
-(helper: `tests/support/factory.ts`). They never import runtime internals or open the database.
+(helper: `tests/support/factory.ts`). They never import runtime internals or open the database. The dashboard scenario
+also runs the built dashboard (`next start`, helper `tests/support/dashboard.ts`) and reads its pages over HTTP.
 Unit tests (`tests/unit/`) cover pure `@factory/domain` rules only, such as the approval rule and the review validation rules.
 
 ## 7. Questions for the human, before Phase A

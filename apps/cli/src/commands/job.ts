@@ -12,7 +12,7 @@ import type {
   Review,
   Task,
 } from '@factory/domain';
-import { costTagOf } from '@factory/domain';
+import { costTagOf, SECURITY_TIER_LABELS } from '@factory/domain';
 import { resolveHome } from '@factory/home';
 import { ApiRequestError, findRuntime, type RuntimeClient } from '../client.js';
 import { EXIT_NOT_RUNNING } from './lifecycle.js';
@@ -248,6 +248,7 @@ function writeAttempts(
           : ` (${a.exitReason}${a.exitDetail === null ? '' : `: ${a.exitDetail}`})`),
       `    harness:   ${a.harness.id} ${a.harness.version ?? '?'}, template ${a.promptTemplate.id}, ${describeUsage(a.usage)}`,
       ...(a.sessionRef === null ? [] : [`    session:   ${a.sessionRef}`]),
+      `    tier:      ${SECURITY_TIER_LABELS[a.tier].label} (${SECURITY_TIER_LABELS[a.tier].detail})`,
       `    worktree:  ${wt === undefined ? a.worktreeId : `${wt.path} (${wt.state}) on ${wt.branch}`}`,
       `    commits:   ${a.baseSha.slice(0, 12)}..${a.headSha?.slice(0, 12) ?? '?'} (${String(a.commits.length)})` +
         (a.wipCommit === null ? '' : `, WIP commit ${a.wipCommit.slice(0, 12)} by the factory`),

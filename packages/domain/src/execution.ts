@@ -341,6 +341,27 @@ export function criterionVerdict(runs: readonly { exitCode: number | null }[]): 
       };
 }
 
+/**
+ * The security tier a Harness Run ran under (ARCHITECTURE §11). `local` is
+ * Tier 0, the local guardrail: the agent runs as the operator's user. It is a
+ * guardrail, never isolation, and is never to be called a sandbox.
+ */
+export const SecurityTierSchema = z.enum(['local']);
+export type SecurityTier = z.infer<typeof SecurityTierSchema>;
+
+/**
+ * How every UI names a security tier: a short label and what it does and
+ * doesn't do. Tier 0 is a guardrail; nothing here may call it a sandbox.
+ */
+export const SECURITY_TIER_LABELS: Readonly<
+  Record<SecurityTier, { readonly label: string; readonly detail: string }>
+> = {
+  local: {
+    label: 'Tier 0 · local guardrail',
+    detail: 'Guardrails only: the Harness runs as your user, without isolation.',
+  },
+};
+
 export const AttemptSchema = z.object({
   id: z.string(),
   taskId: z.string(),
@@ -352,6 +373,8 @@ export const AttemptSchema = z.object({
   /** A human-readable account of the exit reason. */
   exitDetail: z.string().nullable(),
   harness: z.object({ id: z.string(), version: z.string().nullable() }),
+  /** The security tier it ran under, as recorded when it started. */
+  tier: SecurityTierSchema,
   sessionRef: z.string().nullable(),
   promptTemplate: z.object({ id: z.string(), hash: z.string() }),
   /** The Task Packet sent. */

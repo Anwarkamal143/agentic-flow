@@ -7,13 +7,14 @@
     "node": ">=22.12"
   },
   "scripts": {
-    "build": "tsc -b",
-    "typecheck": "tsc -b && tsc -p tests",
+    "build": "tsc -b && pnpm --filter @factory/dashboard build",
+    "typecheck": "tsc -b && tsc -p tests && pnpm --filter @factory/dashboard typecheck",
     "lint": "eslint . && prettier --check . && pnpm --filter @factory/db db:check",
     "format": "prettier --write .",
     "test": "vitest run",
     "test:e2e": "vitest run tests/scenarios",
     "test:real": "vitest run --config vitest.real.config.ts",
+    "dev": "tsc -b && node scripts/dev.mjs",
     "factory": "node apps/cli/dist/main.js",
     "fixtures": "node fixtures/create-tiny-ts.mjs"
   },

@@ -1,0 +1,29 @@
+{
+  "name": "@factory/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev --hostname 127.0.0.1 --port ${FACTORY_DASHBOARD_PORT:-7421}",
+    "start": "next start --hostname 127.0.0.1 --port ${FACTORY_DASHBOARD_PORT:-7421}",
+    "typecheck": "next typegen && tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@factory/domain": "workspace:*",
+    "@factory/home": "workspace:*",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "next": "16.4.5",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tailwind-merge": "3.7.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tailwindcss": "4.3.5"
+  }
+}
