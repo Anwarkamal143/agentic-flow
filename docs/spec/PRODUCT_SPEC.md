@@ -73,7 +73,8 @@ Documentation updates happen **inside execution** and ship in the PR, not after 
 
 Routing rules:
 - `triage` can end in `rejected` (the job record is kept).
-- `plan_approval` can lead to approve, edit (back to `plan_approval`), replan (back to `planning`, capped by `max_replans`), or reject (`rejected`).
+- `plan_approval` can lead to approve, edit (back to `plan_approval`), replan (back to `planning`, capped by `max_replans`), or reject (`rejected`). "Request changes" is a replan with the human's feedback; at the cap it is refused, leaving edit, approve, reject and cancel. An edit is a full replacement Plan and is not a replan. The stage is on by default (`planApproval: required`); `skip` is an explicit setting that records the Stage Run as `skipped` with the reason. Risk-based skipping is Phase E.
+- A human can request a replan during execution (`requestReplan`): dispatching stops, running Attempts finish (or are cancelled), then the new Plan goes through `plan_approval` (ARCHITECTURE §4.7).
 - Rework routes by `fault_origin` (ARCHITECTURE §4.6).
 - A blocker resumes at `resume_stage_id`, never at the start of the job.
 - Cancelling is possible from any non-terminal stage. It runs the cleanup list in §12.
@@ -122,6 +123,13 @@ Each task specifies: objective, repository, writable/forbidden globs, dependenci
 
 The **plan approval view** shows: the spec, the DAG, the affected repos, which tasks will run in parallel, the risks, any human decision points, and an estimate (task count and expected attempts; cost only if it can be computed). Allowed edits: remove, add or edit a task, change dependencies, change a task's repo, and change priority. Every edit is re-validated.
 
+Phase B details:
+- An edit is submitted as a whole replacement Plan (API and CLI), stored as a new plan Artifact authored by the human. The dashboard offers approve, reject and replan-with-feedback over a read-only plan view.
+- A Task's max attempts may only **narrow** the configured cap, in a planner's Plan and in an edit alike. A human raises a cap only through an Inbox grant or the configuration, both audited.
+- Parallel Tasks (no dependency path between them) must not have overlapping writable paths.
+- **Human decision points** are derived by code from the recipe and policy, never written by the planner.
+- **The estimate** is the Task count and an Attempt range from the Task count to the sum of every Attempt-creating cap (max attempts + max retries + max questions per Task), labelled "bounds, not a forecast", per Plan. Cost is "unknown", with the reason shown.
+
 ## 8. Execution, QA and review [MVP]
 
 Per task: **implement → factory verification (commands + path gate) → independent review**. If anything fails, the work routes back by fault origin.
@@ -150,7 +158,9 @@ Deploy is a separate lifecycle and never implied by a merge [Later]. The factory
 
 ## 10. Human approval inbox [MVP]
 
-One inbox. Each item shows: job, project, repo, stage, requesting actor, the question or action, why it's needed, the options, the recommended option, the risks, the evidence links, and its expiry behavior. Actions: approve, reject, request changes, answer, defer, and cancel the job. Escalation is v1.
+One inbox. Each item shows: job, project, repo, stage, requesting actor, the question or action, why it's needed, the options, the recommended option, the risks, the evidence links, and its expiry behavior. Actions: approve, reject, request changes, answer, defer (and undo it), and cancel the job. Escalation is v1.
+
+Items in Phase B: execution Questions (one per Attempt, batching its questions; agent-proposed options are labelled as such), plan approvals, spec-change approvals, Blocker approvals with fixed options (ARCHITECTURE §8.1), and the cleanup approval after a cancel. Items stay pending; the 24 h reminder is v1. Every decision names the item's version and subject, so a decision on stale data or a replaced Plan is refused.
 
 Approvals pause the work durably (no agent process stays alive). They never auto-approve.
 
@@ -176,6 +186,8 @@ Agent analytics never rank agents on raw counts. They show sample size and mark 
 ## 12. Cancellation and cleanup [MVP]
 
 Cancelling a job: stop the running attempts (graceful, then forced), release the leases, set the worktrees to `preserved`, and mark open approvals `cancelled`. **Then ask the human** about each external side effect: close the PRs? delete the remote branches? Never delete local unreviewed work automatically.
+
+In Phase B (no PRs yet) this is one cleanup approval per Job, created after the steps above: "discard the N preserved worktrees?", default keep. Discard happens only on that explicit decision, and task branches are always kept. Phase C adds the PR and remote-branch questions to the same item.
 
 ## 13. Onboarding [v1; MVP = `factory init` + `factory doctor`]
 
