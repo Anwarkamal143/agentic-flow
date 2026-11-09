@@ -21,7 +21,7 @@ Scope:
 - Monorepo foundation (pnpm workspaces, TS strict, Vitest, ESLint, Prettier). Fill in the commands section of `CLAUDE.md`.
 - `packages/domain`: the job, stage run, task and attempt state machines, and the Task Packet and Task Result Zod schemas.
 - `packages/db`: Drizzle with SQLite WAL, migrations, and the MVP tables needed for this phase (`projects, repositories, jobs, stage_runs, artifacts, acceptance_criteria, tasks, task_dependencies, attempts, leases, worktrees, verification_runs, evidence, reviews, review_findings, events, audit_log`).
-- `apps/runtime`: HTTP API (create/list/show job, list events, SSE stream), the scheduler loop with a **single** concurrency slot, the outbox publisher, and recovery on startup.
+- `apps/runtime`: HTTP API (create/list/show job, list events, SSE stream), the scheduler loop with a **single** Task-execution slot (the proposal Stages have their own one-slot scheduler, ADR-0007), the outbox publisher, and recovery on startup.
 - A hard-coded `feature` recipe, minus `plan_approval`, `integration` and every delivery stage. Instead, `closure` writes a delivery report artifact and leaves the branch local.
 - **FakeHarness** with YAML scripts. **Claude Code adapter**: start, stream, cancel, result file, usage capture, version detection.
 - The factory clone at registration (ARCHITECTURE §10, ADR-0001). Worktree lifecycle, the env allowlist, the path gate, the verification runner with redaction.

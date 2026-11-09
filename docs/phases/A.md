@@ -61,9 +61,4 @@ ADR-0001 through ADR-0014 (`docs/adr/`), plus the human decisions recorded in `P
 
 ## Spec issues for the human
 
-Open items in `PROGRESS.md` "Spec issues". Most are proposed additions to ARCHITECTURE §5 for columns that Phase A added (issues 12–14, 17, 21, 22). These need a decision:
-
-- **Issue 15:** two one-slot schedulers versus ROADMAP's "single concurrency slot".
-- **Issue 13:** how a triage rejection is represented.
-- **Issue 7:** `never_auto` versus `human_approval` (Phase C).
-- **Issue 8:** human-initiated replan (Phase B).
+Open items in `PROGRESS.md` "Spec issues". Most are proposed additions to ARCHITECTURE §5 for columns that Phase A added (issues 12–14, 17, 21, 22). Issues 15, 13, 7 and 8 were decided on 2026-11-09 (PROGRESS.md "Human decisions"); the spec was amended to match.

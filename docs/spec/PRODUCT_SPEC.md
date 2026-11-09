@@ -139,6 +139,11 @@ The developer contract (it goes into the prompt template and is enforced where p
 
 Merge policies per repo: `never_auto` (default), `human_approval`, `auto_if_low_risk_and_green`. Job overrides can only make a policy stricter.
 
+- `never_auto`: the factory never merges. A human merges on GitHub, and polling detects it.
+- `human_approval`: the factory merges after an Inbox Approval.
+
+While it waits on either, the Job is `waiting_human` with a human-kind Blocker. A PR closed without merging opens an Inbox Question and never auto-cancels the Job.
+
 The merge gate requires all of these: the correct repo, base and head; the reviewed SHA equals the PR head; required CI checks are green; there are no blocking review findings or unresolved "changes requested" reviews; there are no conflicts; branch protection is satisfied; and an approval, if policy requires one.
 
 Deploy is a separate lifecycle and never implied by a merge [Later]. The factory never invents a rollback. If no supported rollback exists, it reports the failure and asks a human.
