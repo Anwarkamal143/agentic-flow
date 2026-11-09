@@ -20,11 +20,19 @@ import {
   resolveHome,
   writeRuntimeRecord,
 } from '@factory/home';
-import { FakeHarness, FakeScriptError, loadFakeScript, type AgentHarness } from '@factory/harness';
+import {
+  FakeHarness,
+  FakeScriptError,
+  loadFakeScript,
+  redactingHarness,
+  type AgentHarness,
+} from '@factory/harness';
+import { createRedactor, secretsFromEnv } from '@factory/domain';
 import { createApp, type RuntimeStatus } from './app.js';
 import { ArtifactStore } from './artifacts.js';
 import { runDoctor } from './doctor.js';
 import { JobService } from './jobs.js';
+import { jobLogs } from './logs.js';
 import { Outbox } from './outbox.js';
 import { RepositoryService } from './repositories.js';
 import { StageScheduler } from './scheduler.js';
@@ -44,6 +52,29 @@ if (config === undefined || token === undefined) {
   fail(`factory home ${home.root} is not initialized. Run: factory init`);
 }
 ensureHomeDirs(home);
+
+/**
+ * Secret values never reach history (ADR-0011): the values of the runtime's
+ * secret-named variables and the factory's own token, plus known secret
+ * patterns, are redacted from every database write, Artifact, Harness prompt
+ * and output, and from this process's own output (the runtime log).
+ */
+const redact = createRedactor([
+  ...secretsFromEnv(process.env),
+  { name: 'FACTORY_TOKEN', value: token },
+]);
+for (const stream of [process.stdout, process.stderr]) {
+  const write = stream.write.bind(stream) as (chunk: unknown, ...rest: unknown[]) => boolean;
+  stream.write = (chunk: unknown, ...rest: unknown[]) =>
+    write(
+      typeof chunk === 'string'
+        ? redact(chunk)
+        : chunk instanceof Uint8Array
+          ? redact(Buffer.from(chunk).toString('utf8'))
+          : chunk,
+      ...rest,
+    );
+}
 
 const existing = readRuntimeRecord(home);
 if (existing !== undefined && existing.pid !== process.pid && isProcessAlive(existing.pid)) {
@@ -68,7 +99,7 @@ function configuredHarness(): AgentHarness | undefined {
   try {
     // A second Harness id makes this a type error, so it can't silently be built as the Fake.
     const fake: Extract<typeof harness, { id: 'fake' }> = harness;
-    return new FakeHarness(loadFakeScript(fake.script));
+    return redactingHarness(new FakeHarness(loadFakeScript(fake.script)), redact);
   } catch (err) {
     if (err instanceof FakeScriptError) fail(`harness 'fake': ${err.message}`);
     throw err;
@@ -77,13 +108,13 @@ function configuredHarness(): AgentHarness | undefined {
 const harness = configuredHarness();
 const detection = await harness?.detect();
 
-const database = openDatabase(home.dbPath);
+const database = openDatabase(home.dbPath, { redact });
 const startedAt = new Date();
 let state: RuntimeStatus['state'] = 'running';
 let port = 0;
 
 const outbox = new Outbox(database.db);
-const artifacts = new ArtifactStore(database.db, home.root);
+const artifacts = new ArtifactStore(database.db, home.root, redact);
 const scheduler = new StageScheduler({
   db: database.db,
   harness,
@@ -133,6 +164,7 @@ const app = createApp({
   repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
   jobs: new JobService(database.db, notify),
   artifacts,
+  logs: (jobId) => jobLogs(database.db, artifacts, jobId),
   outbox,
   requestShutdown: () => {
     shutdown('api');

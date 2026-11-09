@@ -25,6 +25,7 @@ import {
   decideApproval,
   evidenceSource,
   type GateRef,
+  type HarnessLogContent,
   EvidenceVerdictSchema,
   isBlocking,
   isCurrent,
@@ -834,7 +835,7 @@ export class TaskScheduler {
       });
     });
     this.opts.onCommit();
-    // Progress isn't stored yet (redaction first, #11), only counted.
+    // Progress events are counted; the Run's output is stored as its log (below).
     const drained = (async () => {
       let count = 0;
       for await (const event of started.events) if (event.kind !== 'usage') count++;
@@ -844,18 +845,51 @@ export class TaskScheduler {
     const events = await drained;
     this.currentRun = undefined;
     const judged = evaluate?.(result);
-    this.event(input.jobId, 'harness_run', started.executionId, 'harness_run.finished', {
-      attemptId: input.attemptId,
-      taskId: input.taskId,
+    // The Run's output, redacted on write like every Artifact (ADR-0011), for `factory logs`.
+    const content = this.opts.artifacts.writeContent({
+      source: 'harness',
       role: input.role,
-      harnessId: harness.id,
       n: input.n,
+      harnessId: harness.id,
+      executionId: started.executionId,
       exit: result.exit,
       durationMs: result.durationMs,
-      events,
-      usage: result.usage,
-      ...(judged === undefined ? {} : judged),
+      output: result.output,
+    } satisfies HarnessLogContent);
+    this.opts.db.transaction((tx) => {
+      const log = this.opts.artifacts.record(
+        tx,
+        {
+          jobId: input.jobId,
+          taskId: input.taskId,
+          attemptId: input.attemptId,
+          kind: 'log',
+          content,
+        },
+        ACTOR,
+      );
+      appendEvent(tx, {
+        entityKind: 'harness_run',
+        entityId: started.executionId,
+        jobId: input.jobId,
+        type: 'harness_run.finished',
+        actor: ACTOR,
+        payload: {
+          attemptId: input.attemptId,
+          taskId: input.taskId,
+          role: input.role,
+          harnessId: harness.id,
+          n: input.n,
+          exit: result.exit,
+          durationMs: result.durationMs,
+          events,
+          usage: result.usage,
+          outputArtifactId: log.id,
+          ...(judged === undefined ? {} : judged),
+        },
+      });
     });
+    this.opts.onCommit();
     return { result, sessionRef: started.sessionRef };
   }
 
@@ -901,6 +935,7 @@ export class TaskScheduler {
         durationMs: exit.durationMs,
         output: exit.output,
         content: this.opts.artifacts.writeContent({
+          source: 'verification' as const,
           key: v.key,
           command: v.command,
           exitCode,

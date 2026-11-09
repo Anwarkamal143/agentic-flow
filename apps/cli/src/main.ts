@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { doctor } from './commands/doctor.js';
 import { init } from './commands/init.js';
 import { jobCancel, jobCreate, jobList, jobShow } from './commands/job.js';
+import { logs } from './commands/logs.js';
 import { repoAdd } from './commands/repo.js';
 import { start, status, stop } from './commands/lifecycle.js';
 
@@ -24,6 +25,8 @@ Commands:
   job show <id> [--json]          Show a Job: status, Stages, Workflow Snapshot, config
   job cancel <id> [--reason <text>]
                                   Cancel a Job that has no running Stage
+  logs <job> [--json]             Show the (redacted) Harness and verification output
+                                  of a Job's Attempts
 
 Environment:
   FACTORY_HOME   factory home directory (default ~/.factory)
@@ -85,6 +88,19 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'job':
       return job(rest);
+    case 'logs': {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { json: { type: 'boolean' } },
+      });
+      const [id, ...extra] = positionals;
+      if (id === undefined || extra.length > 0) {
+        process.stderr.write(`factory: logs takes exactly one Job id\n\n${USAGE}`);
+        return 2;
+      }
+      return logs(id, { json: values.json === true });
+    }
     case undefined:
     case 'help':
     case '--help':

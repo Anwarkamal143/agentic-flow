@@ -6,6 +6,7 @@ import {
   ProjectConfigSchema,
   RegisterRepositoryInputSchema,
   type ApiError,
+  type JobLogEntry,
 } from '@factory/domain';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
@@ -41,6 +42,8 @@ export interface AppDeps {
   repositories: RepositoryService;
   jobs: JobService;
   artifacts: ArtifactStore;
+  /** The (redacted) Harness and verification output of a Job's Attempts. */
+  logs(jobId: string): JobLogEntry[];
   outbox: Outbox;
   /** Begins a graceful shutdown after the response is sent. */
   requestShutdown(): void;
@@ -98,6 +101,11 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/v1/jobs/:id/tasks', (c) => c.json(deps.jobs.tasks(c.req.param('id'))));
   app.get('/v1/jobs/:id/attempts', (c) => c.json(deps.jobs.attempts(c.req.param('id'))));
   app.get('/v1/jobs/:id/reviews', (c) => c.json(deps.jobs.reviews(c.req.param('id'))));
+  app.get('/v1/jobs/:id/logs', (c) => {
+    const id = c.req.param('id');
+    deps.jobs.get(id); // 404 for an unknown Job
+    return c.json(deps.logs(id));
+  });
   app.get('/v1/jobs/:id/worktrees', (c) => c.json(deps.jobs.worktrees(c.req.param('id'))));
   app.get('/v1/artifacts/:id', (c) => c.json(deps.artifacts.get(c.req.param('id'))));
   /** The exact bytes the content hash was computed over. */

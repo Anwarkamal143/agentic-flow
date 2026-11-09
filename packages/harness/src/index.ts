@@ -6,6 +6,7 @@
 export { FakeHarness, FakeScriptError, loadFakeScript, parseFakeScript } from './fake.js';
 export type { FakeScript, FakeResponse, FakeReviewResponse, FakeTaskResponse } from './fake.js';
 export { ENV_ALLOWLIST, guardrailEnv, spawnGuarded } from './guardrail.js';
+export { redactingHarness } from './redacting.js';
 export type { GuardedExit, GuardedOptions, GuardedProcess } from './guardrail.js';
 
 export type HarnessCapability = 'resume' | 'structured_output' | 'cancel';
