@@ -3,10 +3,10 @@
  * Harness Run (ARCHITECTURE §7). Its id and hash are recorded on the Attempt.
  */
 import { createHash } from 'node:crypto';
-import { TaskResultSchema, type TaskPacket } from '@factory/domain';
+import { TaskResultSchema, type RuleIssue, type TaskPacket } from '@factory/domain';
 import { z } from 'zod';
 
-export const TASK_TEMPLATE_ID = 'task-packet@2';
+export const TASK_TEMPLATE_ID = 'task-packet@3';
 
 const TEMPLATE = `You are the developer for one Task in an automated software factory.
 Work only in the current directory: a git Worktree checked out on branch {{branch}}.
@@ -24,17 +24,28 @@ Rules:
 - You cannot ask questions in this Run.
 - When you are done, write the Task Result as one JSON object to {{resultFile}} (it is never committed). It must match this JSON Schema:
 {{schema}}
-`;
+{{rejected}}`;
 
 /** Hash of the template text, recorded with each Attempt. */
 export const TASK_TEMPLATE_HASH = `sha256:${createHash('sha256').update(TEMPLATE).digest('hex')}`;
 
-export function renderTaskPrompt(packet: TaskPacket): string {
+/**
+ * The developer prompt. `rejected`: this is the Attempt's one re-prompt, after a
+ * Run that left no valid Task Result; it lists the violated rules.
+ */
+export function renderTaskPrompt(packet: TaskPacket, rejected?: readonly RuleIssue[]): string {
   const values: Record<string, string> = {
     branch: packet.repository.taskBranch,
     packet: JSON.stringify(packet, null, 2),
     resultFile: packet.protocol.resultFile,
     schema: JSON.stringify(z.toJSONSchema(TaskResultSchema, { io: 'input' })),
+    rejected:
+      rejected === undefined
+        ? ''
+        : `\nThis is a re-prompt. An earlier Run of this Attempt ended without a valid Task Result, so it was rejected.\n` +
+          `Its commits are on the branch. Write a Task Result that fixes every problem below:\n${rejected
+            .map((i) => `- [${i.rule}] ${i.message}`)
+            .join('\n')}\n`,
   };
   return TEMPLATE.replace(/\{\{(\w+)\}\}/g, (_, key: string) => values[key] ?? '');
 }

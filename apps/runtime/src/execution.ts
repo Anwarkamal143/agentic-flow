@@ -108,6 +108,8 @@ const DEFAULT_HARNESS_WALL_CLOCK_MS = 30 * 60_000;
 const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60_000;
 /** Default wall-clock limit of one reviewer Harness Run. */
 const DEFAULT_REVIEW_WALL_CLOCK_MS = 10 * 60_000;
+/** Developer Harness Runs per Attempt: the first, plus one re-prompt for an invalid Task Result. */
+const DEVELOPER_RUNS = 2;
 /** Reviewer Harness Runs per review: the first, plus one re-prompt. */
 const REVIEW_RUNS = 2;
 /** Verification commands budgeted for in an Attempt's lease. */
@@ -117,7 +119,7 @@ const LEASE_SLACK_MS = 60_000;
 
 /**
  * How long an Attempt's leases (its Task, its port block) run before they
- * expire: one developer Harness Run, a budget of verification commands, the
+ * expire: the developer Harness Runs (with the re-prompt), a budget of verification commands, the
  * reviewer Runs (with the re-prompt), and slack. There is no heartbeat yet
  * (#13), so this bounds a whole Attempt.
  */
@@ -127,7 +129,7 @@ export function attemptLeaseMs(limits: {
   reviewWallClockMs: number;
 }): number {
   return (
-    limits.wallClockMs +
+    limits.wallClockMs * DEVELOPER_RUNS +
     limits.verifyTimeoutMs * LEASE_VERIFICATION_BUDGET +
     limits.reviewWallClockMs * REVIEW_RUNS +
     LEASE_SLACK_MS
@@ -530,20 +532,44 @@ export class TaskScheduler {
       CI: 'true',
     });
 
-    const { result } = await this.harnessRun(harness, {
-      role: 'developer',
-      template: { id: TASK_TEMPLATE_ID, hash: TASK_TEMPLATE_HASH },
-      jobId: job.id,
-      taskId,
-      taskKey: task.key,
-      attemptId,
-      n,
-      prompt: renderTaskPrompt(packet),
-      cwd: path,
-      env,
-      wallClockMs,
-    });
-    if (this.closed) return; // shutdown: left running (recovery is #13)
+    // One developer Run, plus one re-prompt (a new Session, same Attempt) when it
+    // exits cleanly without a valid Task Result. The re-prompt carries the violated rules.
+    let result: HarnessRawResult | undefined;
+    let usage: Usage | null = null;
+    let rejected: RuleIssue[] | undefined;
+    for (let run = 1; run <= DEVELOPER_RUNS; run++) {
+      /** What is wrong with this Run's Task Result; `undefined` when the Run did not exit 0. */
+      let issues: RuleIssue[] | undefined;
+      ({ result } = await this.harnessRun(
+        harness,
+        {
+          role: 'developer',
+          template: { id: TASK_TEMPLATE_ID, hash: TASK_TEMPLATE_HASH },
+          jobId: job.id,
+          taskId,
+          taskKey: task.key,
+          attemptId,
+          n,
+          prompt: renderTaskPrompt(packet, rejected),
+          cwd: path,
+          env,
+          wallClockMs,
+          ...(rejected === undefined ? {} : { reprompt: rejected }),
+        },
+        (r) => {
+          if (!exitedCleanly(r)) return { outcome: 'harness_failed' };
+          issues = taskResultIssues(readTaskResult(path));
+          return issues.length === 0 ? { outcome: 'valid' } : { outcome: 'invalid', issues };
+        },
+      ));
+      if (this.closed) return; // shutdown: left running (recovery is #13)
+      usage = usage === null ? usageOf(result) : addUsage(usage, usageOf(result));
+      if (issues === undefined || issues.length === 0) break;
+      rejected = issues;
+      // The re-prompted Run writes its own Task Result; the rejected one is never read again.
+      if (run < DEVELOPER_RUNS)
+        rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
+    }
 
     this.toVerifying(job.id, taskId, attemptId);
 
@@ -567,23 +593,21 @@ export class TaskScheduler {
 
     let outcome: Outcome;
     let verificationRuns: VerificationRunRecord[] = [];
-    if (result === undefined || result.exit.kind !== 'exited' || result.exit.code !== 0) {
+    if (!exitedCleanly(result)) {
       outcome = {
         state: 'failed',
         exitReason: 'harness_failed',
         detail: `the ${harness.id} Harness Run ${result === undefined ? 'did not start' : describeHarnessExit(result.exit)}`,
       };
-    } else if (inspection.result.kind === 'missing') {
+    } else if (inspection.result.kind !== 'valid') {
       outcome = {
         state: 'failed',
         exitReason: 'invalid_output',
-        detail: `[result.missing] no Task Result at ${RESULT_FILE}`,
-      };
-    } else if (inspection.result.kind === 'invalid') {
-      outcome = {
-        state: 'failed',
-        exitReason: 'invalid_output',
-        detail: inspection.result.issues.map((i) => `[${i.rule}] ${i.message}`).join('; '),
+        detail: `the Task Result was invalid after ${String(DEVELOPER_RUNS - 1)} re-prompt: ${taskResultIssues(
+          inspection.result,
+        )
+          .map((i) => `[${i.rule}] ${i.message}`)
+          .join('; ')}`,
       };
     } else if (inspection.result.value.status !== 'done') {
       outcome = {
@@ -619,7 +643,6 @@ export class TaskScheduler {
       ];
       if (problems.length === 0) {
         // Every factory Gate passed: the independent review decides the rest.
-        const usage = usageOf(result);
         this.toReview({
           jobId: job.id,
           taskId,
@@ -674,7 +697,7 @@ export class TaskScheduler {
       resultContent,
       verificationRuns,
       outcome,
-      usage: usageOf(result),
+      usage,
     });
   }
 
@@ -1468,6 +1491,33 @@ async function inspect(worktree: string, baseSha: string): Promise<Inspection> {
   if (headSha === undefined) throw new Error(`the Worktree ${worktree} has no HEAD`);
   const commits = (await commitsBetween(worktree, baseSha, headSha)).map((c) => c.sha);
 
+  const result = readTaskResult(worktree);
+  const violations: RuleIssue[] = [];
+  const committed = (await changedPaths(worktree, baseSha, headSha)).filter(
+    (p) => p === RESULT_FILE || p.startsWith(`${dirname(RESULT_FILE)}/`),
+  );
+  if (committed.length > 0) {
+    violations.push({
+      rule: 'result.not_committed',
+      message: `the Task Branch commits the reserved ${dirname(RESULT_FILE)}/ path: ${committed.join(', ')}`,
+    });
+  }
+  if (result.kind === 'valid') {
+    for (const claimed of result.value.commits) {
+      const lower = claimed.toLowerCase();
+      if (lower.length < 7 || !commits.some((c) => c.startsWith(lower))) {
+        violations.push({
+          rule: 'result.commits_exist',
+          message: `the Task Result lists commit ${claimed}, which is not on the Task Branch (base..head)`,
+        });
+      }
+    }
+  }
+  return { headSha, commits, wipCommit, result, violations };
+}
+
+/** The Task Result the Harness left in the Worktree, parsed and schema-checked. */
+function readTaskResult(worktree: string): Inspection['result'] {
   const file = join(worktree, RESULT_FILE);
   let result: Inspection['result'] = { kind: 'missing' };
   // Untrusted: never follow a link out of the Worktree, never read without a bound.
@@ -1507,28 +1557,34 @@ async function inspect(worktree: string, baseSha: string): Promise<Inspection> {
         : { kind: 'invalid', content: json, issues: schemaIssues(parsed.error) };
     }
   }
-  const violations: RuleIssue[] = [];
-  const committed = (await changedPaths(worktree, baseSha, headSha)).filter(
-    (p) => p === RESULT_FILE || p.startsWith(`${dirname(RESULT_FILE)}/`),
-  );
-  if (committed.length > 0) {
-    violations.push({
-      rule: 'result.not_committed',
-      message: `the Task Branch commits the reserved ${dirname(RESULT_FILE)}/ path: ${committed.join(', ')}`,
-    });
-  }
-  if (result.kind === 'valid') {
-    for (const claimed of result.value.commits) {
-      const lower = claimed.toLowerCase();
-      if (lower.length < 7 || !commits.some((c) => c.startsWith(lower))) {
-        violations.push({
-          rule: 'result.commits_exist',
-          message: `the Task Result lists commit ${claimed}, which is not on the Task Branch (base..head)`,
-        });
-      }
-    }
-  }
-  return { headSha, commits, wipCommit, result, violations };
+  return result;
+}
+
+/** Why a Task Result is not valid, each problem naming its rule; empty when it is valid. */
+function taskResultIssues(result: Inspection['result']): RuleIssue[] {
+  if (result.kind === 'missing')
+    return [{ rule: 'result.missing', message: `no Task Result at ${RESULT_FILE}` }];
+  return result.kind === 'invalid' ? result.issues : [];
+}
+
+/** The Run exited by itself with code 0. That proves nothing about its work. */
+function exitedCleanly(
+  result: HarnessRawResult | undefined,
+): result is HarnessRawResult & { exit: { kind: 'exited'; code: 0 } } {
+  return result !== undefined && result.exit.kind === 'exited' && result.exit.code === 0;
+}
+
+/** The usage of two Harness Runs together, as trustworthy as the less trusted one. */
+function addUsage(a: Usage, b: Usage): Usage {
+  const trust = ['actual', 'estimated', 'unknown'] as const;
+  const sum = (x: number | null, y: number | null) => (x === null || y === null ? null : x + y);
+  return {
+    tag: trust[Math.max(trust.indexOf(a.tag), trust.indexOf(b.tag))] ?? 'unknown',
+    inputTokens: sum(a.inputTokens, b.inputTokens),
+    outputTokens: sum(a.outputTokens, b.outputTokens),
+    costUsd: sum(a.costUsd, b.costUsd),
+    durationMs: a.durationMs + b.durationMs,
+  };
 }
 
 /** The reviewer's proposal and what it was given, or why there is none. */

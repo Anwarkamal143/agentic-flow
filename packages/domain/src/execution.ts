@@ -76,7 +76,7 @@ export type AttemptState = z.infer<typeof AttemptStateSchema>;
  * (recorded for another `(head, base)`). `changes_requested`: the review requested changes.
  * `review_failed`: the reviewer Harness Run did not exit 0 (it crashed, timed
  * out or did not start), so there is no review. `invalid_output`: no valid
- * Task Result, or the review was still invalid after its one re-prompt.
+ * Task Result, or no valid review, after its one re-prompt.
  * `not_done`: the Task Result's status is not `done`. `harness_failed`: the
  * Harness Run did not exit 0. `factory_error`: the factory itself broke.
  */

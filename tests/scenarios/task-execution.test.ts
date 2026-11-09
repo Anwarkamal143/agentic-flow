@@ -176,7 +176,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       usage: { tag: 'unknown' },
       worktreeId: worktree.id,
     });
-    expect(attempt.promptTemplate.id).toBe('task-packet@2');
+    expect(attempt.promptTemplate.id).toBe('task-packet@3');
     expect(attempt.promptTemplate.hash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(git(repo.clonePath, ['show', `${head}:src/math.ts`])).toBe(SUM_SOURCE);
 
@@ -414,14 +414,16 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
     writeFileSync(join(outside, 'id_rsa'), 'TOP-SECRET-KEY-MATERIAL\n');
     const response = validTaskResponse();
     delete (response as { result?: unknown }).result;
-    response.steps.push({
-      run: `mkdir -p .factory && ln -s '${outside}/id_rsa' .factory/result.json`,
-    });
-    const { rt, repo } = await executionRuntime(scriptWith({}, { 'add-sum': [response] }));
+    const plant = { run: `mkdir -p .factory && ln -s '${outside}/id_rsa' .factory/result.json` };
+    response.steps.push(plant);
+    // The re-prompted Run plants the link again: it is never read on either Run.
+    const { rt, repo } = await executionRuntime(
+      scriptWith({}, { 'add-sum': [response, { steps: [plant] }] }),
+    );
 
     const job = await runJob(rt, repo.id);
 
-    // invalid_output is no verdict on the work, so no Rework follows (its re-prompt is #10).
+    // Still invalid after its re-prompt; invalid_output is no verdict on the work, so no Rework.
     expect(job.status).toBe('failed');
     const attempt = await onlyAttempt<AttemptBody & { exitDetail: string }>(rt, job.id);
     expect(attempt).toMatchObject({ state: 'failed', exitReason: 'invalid_output' });
