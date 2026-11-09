@@ -368,6 +368,7 @@ describe('Harness selection by runtime configuration', () => {
       id: 'fake',
       version: '1',
       installed: true,
+      credentials: 'not_required',
     });
     const status = await rt.home.cli(['status']);
     expect(status.stdout).toMatch(/harness: +fake 1/);

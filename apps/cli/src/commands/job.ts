@@ -12,6 +12,7 @@ import type {
   Review,
   Task,
 } from '@factory/domain';
+import { costTagOf } from '@factory/domain';
 import { resolveHome } from '@factory/home';
 import { ApiRequestError, findRuntime, type RuntimeClient } from '../client.js';
 import { EXIT_NOT_RUNNING } from './lifecycle.js';
@@ -159,7 +160,11 @@ async function getJob(api: RuntimeClient, id: string): Promise<Job | undefined> 
 
 function writeJob(job: Job): void {
   const config = Object.entries(job.effectiveConfig)
-    .map(([key, v]) => `${key}=${String(v.value)} (from ${v.source})`)
+    .map(([key, v]) =>
+      typeof v.value === 'object'
+        ? `${key} (from ${v.source})`
+        : `${key}=${String(v.value)} (from ${v.source})`,
+    )
     .join(', ');
   const lines = [
     `Job ${job.id}: ${job.title}`,
@@ -211,6 +216,19 @@ function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
   if (lines.length > 0) process.stdout.write(lines.join('\n') + '\n');
 }
 
+/** Usage with its honest tags: `usage 1200 in / 80 out tokens (actual), cost unknown/subscription`. */
+function describeUsage(usage: Attempt['usage']): string {
+  if (usage === null) return 'usage not recorded';
+  const tokens =
+    usage.inputTokens === null || usage.outputTokens === null
+      ? `tokens ${usage.tag}`
+      : `${String(usage.inputTokens)} in / ${String(usage.outputTokens)} out tokens (${usage.tag})`;
+  const costTag = costTagOf(usage);
+  const cost =
+    usage.costUsd === null ? `cost ${costTag}` : `cost $${usage.costUsd.toFixed(4)} (${costTag})`;
+  return `usage ${tokens}, ${cost}`;
+}
+
 function writeAttempts(
   tasks: Task[],
   attempts: Attempt[],
@@ -228,7 +246,8 @@ function writeAttempts(
         (a.exitReason === null
           ? ''
           : ` (${a.exitReason}${a.exitDetail === null ? '' : `: ${a.exitDetail}`})`),
-      `    harness:   ${a.harness.id} ${a.harness.version ?? '?'}, template ${a.promptTemplate.id}, usage ${a.usage?.tag ?? 'not recorded'}`,
+      `    harness:   ${a.harness.id} ${a.harness.version ?? '?'}, template ${a.promptTemplate.id}, ${describeUsage(a.usage)}`,
+      ...(a.sessionRef === null ? [] : [`    session:   ${a.sessionRef}`]),
       `    worktree:  ${wt === undefined ? a.worktreeId : `${wt.path} (${wt.state}) on ${wt.branch}`}`,
       `    commits:   ${a.baseSha.slice(0, 12)}..${a.headSha?.slice(0, 12) ?? '?'} (${String(a.commits.length)})` +
         (a.wipCommit === null ? '' : `, WIP commit ${a.wipCommit.slice(0, 12)} by the factory`),

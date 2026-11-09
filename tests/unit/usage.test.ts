@@ -3,7 +3,7 @@
  * total is only as trustworthy as its least trusted part. Pure; tested
  * through `@factory/domain`.
  */
-import { addUsage, type Usage } from '@factory/domain';
+import { addUsage, costTagOf, type Usage } from '@factory/domain';
 import { describe, expect, it } from 'vitest';
 
 const actual: Usage = {
@@ -21,6 +21,7 @@ describe('addUsage', () => {
       inputTokens: 150,
       outputTokens: 40,
       costUsd: 0.75,
+      costTag: 'actual',
       durationMs: 2_000,
     });
   });
@@ -45,7 +46,35 @@ describe('addUsage', () => {
       inputTokens: null,
       outputTokens: null,
       costUsd: null,
+      costTag: 'unknown',
       durationMs: 1_300,
     });
+  });
+
+  it('keeps a subscription cost as unknown/subscription, never as a figure', () => {
+    const subscription: Usage = {
+      ...actual,
+      costUsd: null,
+      costTag: 'unknown/subscription',
+    };
+    const total = addUsage(subscription, subscription);
+    expect(total.tag).toBe('actual');
+    expect(total.costTag).toBe('unknown/subscription');
+    expect(total.costUsd).toBeNull();
+  });
+
+  it('ranks a subscription cost below an estimate and above an unknown one', () => {
+    const subscription: Usage = { ...actual, costUsd: null, costTag: 'unknown/subscription' };
+    expect(addUsage(subscription, { ...actual, costTag: 'estimated' }).costTag).toBe(
+      'unknown/subscription',
+    );
+    expect(addUsage(subscription, { ...actual, tag: 'unknown', costTag: 'unknown' }).costTag).toBe(
+      'unknown',
+    );
+  });
+
+  it('reads usage recorded before cost tags existed by its one tag', () => {
+    expect(costTagOf({ tag: 'estimated' })).toBe('estimated');
+    expect(addUsage(actual, { ...actual, tag: 'unknown' }).costTag).toBe('unknown');
   });
 });

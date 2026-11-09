@@ -123,25 +123,50 @@ export function attemptsCountedForRework(attempts: readonly { cause: AttemptCaus
   return attempts.filter((a) => a.cause !== 'retry').length;
 }
 
-/** Usage as recorded per Attempt, tagged with how much it can be trusted (ARCHITECTURE §13). */
+/** How far a usage value can be trusted (ARCHITECTURE §13). */
+export const UsageTagSchema = z.enum(['actual', 'estimated', 'unknown']);
+export type UsageTag = z.infer<typeof UsageTagSchema>;
+
+/**
+ * How far the cost can be trusted. `unknown/subscription`: the Run was billed
+ * to a subscription, so it has no per-Run cost (ARCHITECTURE §13).
+ */
+export const CostTagSchema = z.enum(['actual', 'estimated', 'unknown/subscription', 'unknown']);
+export type CostTag = z.infer<typeof CostTagSchema>;
+
+/**
+ * Usage as recorded per Attempt (ARCHITECTURE §13). `tag` is the trust of the
+ * token counts; `costTag` the trust of `costUsd`. Usage recorded before #14 has
+ * no `costTag`: its `tag` covered both.
+ */
 export const UsageSchema = z.object({
-  tag: z.enum(['actual', 'estimated', 'unknown']),
+  tag: UsageTagSchema,
   inputTokens: z.number().nullable(),
   outputTokens: z.number().nullable(),
   costUsd: z.number().nullable(),
+  costTag: CostTagSchema.optional(),
   durationMs: z.number().int().nonnegative(),
 });
 export type Usage = z.infer<typeof UsageSchema>;
 
+/** The trust of a usage's cost: its `costTag`, or (before #14) its `tag`. Pure. */
+export function costTagOf(usage: Pick<Usage, 'tag' | 'costTag'>): CostTag {
+  return usage.costTag ?? usage.tag;
+}
+
 /** The usage of two Harness Runs together, as trustworthy as the less trusted one. Pure. */
 export function addUsage(a: Usage, b: Usage): Usage {
-  const trust = ['actual', 'estimated', 'unknown'] as const;
+  const trust = UsageTagSchema.options;
+  const costTrust = CostTagSchema.options;
   const sum = (x: number | null, y: number | null) => (x === null || y === null ? null : x + y);
   return {
     tag: trust[Math.max(trust.indexOf(a.tag), trust.indexOf(b.tag))] ?? 'unknown',
     inputTokens: sum(a.inputTokens, b.inputTokens),
     outputTokens: sum(a.outputTokens, b.outputTokens),
     costUsd: sum(a.costUsd, b.costUsd),
+    costTag:
+      costTrust[Math.max(costTrust.indexOf(costTagOf(a)), costTrust.indexOf(costTagOf(b)))] ??
+      'unknown',
     durationMs: a.durationMs + b.durationMs,
   };
 }

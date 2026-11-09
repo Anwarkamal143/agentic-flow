@@ -55,6 +55,7 @@ import {
   type TaskPacket,
   type TaskResult,
   type Usage,
+  toolPolicyOf,
 } from '@factory/domain';
 import {
   addWorktree,
@@ -1169,6 +1170,7 @@ export class TaskScheduler {
         env: ctx.env,
         subject: { jobId: ctx.job.id, stageId: 'execution', taskKey: ctx.task.key },
         limits: { wallClockMs: input.wallClockMs, maxTurns: MAX_TURNS },
+        policy: toolPolicyOf(ctx.job.configSnapshotJson, input.role),
         spool,
       });
     } catch (err) {

@@ -11,6 +11,7 @@ import {
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
+import type { HarnessCredentials } from '@factory/harness';
 import type { ArtifactStore } from './artifacts.js';
 import type { DoctorReport } from './doctor.js';
 import type { Outbox } from './outbox.js';
@@ -31,7 +32,12 @@ export interface RuntimeStatus {
   workspaceRoot: string;
   database: { journalMode: string; migrations: number };
   /** The Harness chosen by runtime configuration, or `null` when none is. */
-  harness: { id: string; version: string | null; installed: boolean } | null;
+  harness: {
+    id: string;
+    version: string | null;
+    installed: boolean;
+    credentials: HarnessCredentials;
+  } | null;
 }
 
 export interface AppDeps {

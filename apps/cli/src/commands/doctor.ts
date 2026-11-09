@@ -14,6 +14,7 @@ interface DoctorBody {
     version?: string;
     path?: string;
     fix?: string;
+    notes?: string[];
   }[];
   credentials: { name: string; source: string; present: boolean }[];
 }
@@ -62,16 +63,16 @@ export async function doctor(opts: { json: boolean }): Promise<number> {
       );
     } else {
       lines.push(
-        `  ${tool.status.padEnd(9)}${name}${tool.status === 'missing' ? 'not found' : 'version unknown'}`,
+        `  ${tool.status.padEnd(9)}${name}${tool.status === 'missing' ? 'not found' : (tool.version ?? 'version unknown')}`,
       );
       if (tool.fix !== undefined) lines.push(`           fix: ${tool.fix}`);
     }
+    for (const note of tool.notes ?? []) lines.push(`           note: ${note}`);
   }
   lines.push('', 'Credentials (presence only; values are never shown):');
   for (const cred of body.credentials) {
     lines.push(`  ${(cred.present ? 'present' : 'absent').padEnd(9)}${cred.name} (${cred.source})`);
   }
-  lines.push("  (not checked: Claude Code's own stored login from `claude /login`)");
   process.stdout.write(lines.join('\n') + '\n');
   return 0;
 }

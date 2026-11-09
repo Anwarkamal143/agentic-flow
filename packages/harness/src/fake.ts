@@ -184,7 +184,12 @@ export class FakeHarness implements AgentHarness {
   }
 
   detect(): Promise<HarnessDetection> {
-    return Promise.resolve({ installed: true, version: '1', credentials: 'not_required' });
+    return Promise.resolve({
+      installed: true,
+      version: '1',
+      credentials: 'not_required',
+      problems: [],
+    });
   }
 
   start(input: HarnessStartInput): Promise<HarnessRun> {

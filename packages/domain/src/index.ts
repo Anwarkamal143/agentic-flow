@@ -7,6 +7,12 @@ import { z } from 'zod';
 import { TaskStateSchema } from './execution.js';
 import { BlockerSchema } from './rework.js';
 import {
+  DEFAULT_TOOL_POLICIES,
+  ToolPoliciesSchema,
+  type HarnessRole,
+  type ToolPolicy,
+} from './tool-policy.js';
+import {
   RiskSchema,
   RuleIssueSchema,
   TaskRoleSchema,
@@ -22,6 +28,7 @@ export * from './rework.js';
 export * from './redaction.js';
 export * from './logs.js';
 export * from './recovery.js';
+export * from './tool-policy.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -260,6 +267,14 @@ export const EffectiveConfigSchema = z.object({
     value: 2,
     source: 'recipe',
   }),
+  /**
+   * The Tier 0 tool policy per Role (ARCHITECTURE §11). Recipe-level only: a
+   * Project can't widen it. Jobs created before #14 get the recipe default.
+   */
+  toolPolicies: effectiveValue(ToolPoliciesSchema).default({
+    value: DEFAULT_TOOL_POLICIES,
+    source: 'recipe',
+  }),
 });
 export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
 
@@ -267,6 +282,11 @@ export const RECIPE_DEFAULTS: { readonly maxAttempts: number; readonly maxRetrie
   maxAttempts: 3,
   maxRetries: 2,
 };
+
+/** The Tier 0 tool policy of `role` in a Job's frozen Effective Configuration (its JSON). Pure. */
+export function toolPolicyOf(configSnapshotJson: string, role: HarnessRole): ToolPolicy {
+  return EffectiveConfigSchema.parse(JSON.parse(configSnapshotJson)).toolPolicies.value[role];
+}
 
 /** Resolves the Effective Configuration. Pure; frozen onto the Job at creation. */
 export function resolveEffectiveConfig(levels: { project: ProjectConfig }): EffectiveConfig {
@@ -280,6 +300,7 @@ export function resolveEffectiveConfig(levels: { project: ProjectConfig }): Effe
       project.maxRetries === undefined
         ? { value: RECIPE_DEFAULTS.maxRetries, source: 'recipe' }
         : { value: project.maxRetries, source: 'project' },
+    toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
   };
 }
 

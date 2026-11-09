@@ -1,3 +1,4 @@
+import { DEFAULT_TOOL_POLICIES } from '@factory/domain';
 import { describe, expect, it } from 'vitest';
 import { startRuntime } from '../support/factory.js';
 import {
@@ -101,6 +102,7 @@ describe('factory job create / job show', () => {
     expect(first.effectiveConfig).toEqual({
       maxAttempts: { value: 3, source: 'recipe' },
       maxRetries: { value: 2, source: 'recipe' },
+      toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
     });
 
     const edit = await post(rt, `/v1/projects/${repo.projectId}/config`, { maxAttempts: 5 });
@@ -110,6 +112,7 @@ describe('factory job create / job show', () => {
     expect(second.effectiveConfig).toEqual({
       maxAttempts: { value: 5, source: 'project' },
       maxRetries: { value: 2, source: 'recipe' },
+      toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
     });
 
     expect(
@@ -133,6 +136,7 @@ describe('factory job create / job show', () => {
     expect(third.effectiveConfig).toEqual({
       maxAttempts: { value: 1, source: 'project' },
       maxRetries: { value: 0, source: 'project' },
+      toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
     });
   });
 

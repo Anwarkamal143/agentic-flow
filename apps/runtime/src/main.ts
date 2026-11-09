@@ -21,6 +21,7 @@ import {
   writeRuntimeRecord,
 } from '@factory/home';
 import {
+  ClaudeCodeHarness,
   FakeHarness,
   FakeScriptError,
   loadFakeScript,
@@ -40,6 +41,10 @@ import { CRASH_POINTS, TaskScheduler } from './execution.js';
 import { recoverTasks } from './recovery.js';
 
 const ACTOR = 'system:runtime';
+
+function log(message: string): void {
+  process.stderr.write(`factory runtime: ${message}\n`);
+}
 
 function fail(message: string): never {
   process.stderr.write(`factory runtime: ${message}\n`);
@@ -107,12 +112,20 @@ if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 655
 function configuredHarness(): AgentHarness | undefined {
   const harness = config?.harness;
   if (harness === undefined) return undefined;
+  if (harness.id === 'claude-code') {
+    return redactingHarness(
+      new ClaudeCodeHarness({
+        command: harness.command,
+        ...(harness.model === undefined ? {} : { model: harness.model }),
+        env: process.env,
+      }),
+      redact,
+    );
+  }
   try {
-    // A second Harness id makes this a type error, so it can't silently be built as the Fake.
-    const fake: Extract<typeof harness, { id: 'fake' }> = harness;
     // The Run counts survive a restart, so a restarted runtime goes on with the next response.
     return redactingHarness(
-      new FakeHarness(loadFakeScript(fake.script), `${fake.script}.runs.json`),
+      new FakeHarness(loadFakeScript(harness.script), `${harness.script}.runs.json`),
       redact,
     );
   } catch (err) {
@@ -122,6 +135,19 @@ function configuredHarness(): AgentHarness | undefined {
 }
 const harness = configuredHarness();
 const detection = await harness?.detect();
+// A configured Harness that can't be driven is a configuration error: no Run would be honest.
+if (harness !== undefined && detection !== undefined) {
+  if (!detection.installed)
+    fail(`harness '${harness.id}' is not installed: ${detection.problems.join('; ')}`);
+  if (detection.problems.length > 0) {
+    fail(
+      `harness '${harness.id}' ${detection.version ?? ''} can't be used: ${detection.problems.join('; ')}`,
+    );
+  }
+  if (detection.credentials === 'absent') {
+    log(`warning: harness '${harness.id}' reports no login; its Runs will fail until there is one`);
+  }
+}
 
 const database = openDatabase(home.dbPath, { redact });
 const startedAt = new Date();
@@ -130,7 +156,6 @@ let port = 0;
 
 const outbox = new Outbox(database.db);
 const artifacts = new ArtifactStore(database.db, home.root, redact);
-const log = (message: string) => process.stderr.write(`factory runtime: ${message}\n`);
 const holder = `runtime:${String(process.pid)}`;
 
 /**
@@ -204,9 +229,18 @@ const app = createApp({
     harness:
       harness === undefined || detection === undefined
         ? null
-        : { id: harness.id, version: detection.version, installed: detection.installed },
+        : {
+            id: harness.id,
+            version: detection.version,
+            installed: detection.installed,
+            credentials: detection.credentials,
+          },
   }),
-  doctor: () => runDoctor(process.env),
+  doctor: () =>
+    runDoctor(
+      process.env,
+      config.harness?.id === 'claude-code' ? config.harness.command : 'claude',
+    ),
   repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
   jobs: new JobService(database.db, notify, async (jobId) => {
     await Promise.all([scheduler.cancelJob(jobId), tasks.cancelJob(jobId)]);

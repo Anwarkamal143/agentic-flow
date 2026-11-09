@@ -73,6 +73,20 @@ export const HarnessConfigSchema = z.discriminatedUnion('id', [
     /** The Fake Harness's YAML script. */
     script: z.string().refine((p) => isAbsolute(p), 'must be an absolute path'),
   }),
+  z
+    .object({
+      id: z.literal('claude-code'),
+      /** The `claude` executable: an absolute path, or a name looked up on the runtime's PATH. */
+      command: z.string().min(1).default('claude'),
+      /** `--model` for every Run; the CLI's default when unset. */
+      model: z.string().min(1).optional(),
+      /**
+       * How Runs are billed. Only the operator's subscription login for now;
+       * an API key would have to be passed to the Harness process (ADR-0013).
+       */
+      billing: z.literal('subscription').default('subscription'),
+    })
+    .strict(),
 ]);
 export type HarnessConfig = z.infer<typeof HarnessConfigSchema>;
 
