@@ -91,13 +91,15 @@ A job runs a **workflow snapshot**, a frozen copy of its recipe taken at creatio
 | `completed` | Terminal stage succeeded |
 | `failed` | A stage failed with retries exhausted, no rework route |
 | `cancelled` | Cancelled by a human |
-| `rejected` | Rejected at triage or plan approval |
+| `rejected` | A stage run is `rejected` (at triage or plan approval). Derived straight from that state, never from an artifact |
 
 Board columns show **the current stage**. Status shows as a badge.
 
 ### 4.3 Stage-run states
 
-`pending → queued → running → (succeeded | failed | blocked | waiting_human | skipped | cancelled)`
+`pending → queued → running → (succeeded | failed | blocked | waiting_human | skipped | cancelled | rejected)`
+
+`rejected` is terminal and means a correct "no", not a broken stage: `running → rejected` (triage) and `waiting_human → rejected` (plan_approval). It is never `failed` (which would mix it up with a broken stage in retries and metrics) and never `succeeded` with the verdict only in an artifact (the status derivation reads state tables, not artifacts).
 
 Every blocked or waiting stage run stores `resume_stage_id` (usually itself) and `blocker` (kind, reason, required action, evidence links). **Resolving the blocker re-queues `resume_stage_id`, not the start of the job.**
 
@@ -149,8 +151,8 @@ repositories(id, project_id, name, source /*path or URL given at registration*/,
 jobs(id, project_id, title, description, type, priority, status, workflow_snapshot_json,
      config_snapshot_json, created_by, created_at, version)
 job_repositories(job_id, repository_id)
-stage_runs(id, job_id, stage_id, state, attempt, resume_stage_id, blocker_json,
-           started_at, finished_at, version)
+stage_runs(id, job_id, stage_id, position /*recipe order, ADR-0005*/, state, attempt,
+           resume_stage_id, blocker_json, started_at, finished_at, version)
 artifacts(id, job_id, task_id?, attempt_id?, kind, content_hash, path, schema_version, created_at)
          -- kind: discovery | spec | plan | task_result | review | qa | report | log
 acceptance_criteria(id, job_id, code /*AC-01*/, text, mandatory)
