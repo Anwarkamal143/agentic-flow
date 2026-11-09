@@ -42,7 +42,7 @@ export function renderTaskPrompt(packet: TaskPacket, rejected?: readonly RuleIss
     rejected:
       rejected === undefined
         ? ''
-        : `\nThis is a re-prompt. An earlier Run of this Attempt ended without a valid Task Result, so it was rejected.\n` +
+        : `\nThis is a re-prompt. An earlier Harness Run of this Attempt ended without a valid Task Result, so it was rejected.\n` +
           `Its commits are on the branch. Write a Task Result that fixes every problem below:\n${rejected
             .map((i) => `- [${i.rule}] ${i.message}`)
             .join('\n')}\n`,

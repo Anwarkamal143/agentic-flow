@@ -105,6 +105,19 @@ export const UsageSchema = z.object({
 });
 export type Usage = z.infer<typeof UsageSchema>;
 
+/** The usage of two Harness Runs together, as trustworthy as the less trusted one. Pure. */
+export function addUsage(a: Usage, b: Usage): Usage {
+  const trust = ['actual', 'estimated', 'unknown'] as const;
+  const sum = (x: number | null, y: number | null) => (x === null || y === null ? null : x + y);
+  return {
+    tag: trust[Math.max(trust.indexOf(a.tag), trust.indexOf(b.tag))] ?? 'unknown',
+    inputTokens: sum(a.inputTokens, b.inputTokens),
+    outputTokens: sum(a.outputTokens, b.outputTokens),
+    costUsd: sum(a.costUsd, b.costUsd),
+    durationMs: a.durationMs + b.durationMs,
+  };
+}
+
 // ---- Task Packet and Task Result (ARCHITECTURE §7) ---------------------------
 
 /** Where the Harness writes its Task Result, relative to the Worktree. Never committed. */

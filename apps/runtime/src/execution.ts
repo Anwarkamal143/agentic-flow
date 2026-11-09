@@ -17,6 +17,7 @@ import {
   BlockerSchema,
   checkPathScope,
   criterionVerdict,
+  addUsage,
   routeFailedAttempt,
   type AttemptCause,
   type AttemptFinding,
@@ -532,13 +533,13 @@ export class TaskScheduler {
       CI: 'true',
     });
 
-    // One developer Run, plus one re-prompt (a new Session, same Attempt) when it
-    // exits cleanly without a valid Task Result. The re-prompt carries the violated rules.
+    // One developer Harness Run, plus one re-prompt (a new Session, same Attempt) when
+    // it exits cleanly without a valid Task Result. The re-prompt carries the violated rules.
     let result: HarnessRawResult | undefined;
     let usage: Usage | null = null;
     let rejected: RuleIssue[] | undefined;
     for (let run = 1; run <= DEVELOPER_RUNS; run++) {
-      /** What is wrong with this Run's Task Result; `undefined` when the Run did not exit 0. */
+      /** What is wrong with this Harness Run's Task Result; `undefined` when it did not exit 0. */
       let issues: RuleIssue[] | undefined;
       ({ result } = await this.harnessRun(
         harness,
@@ -566,7 +567,7 @@ export class TaskScheduler {
       usage = usage === null ? usageOf(result) : addUsage(usage, usageOf(result));
       if (issues === undefined || issues.length === 0) break;
       rejected = issues;
-      // The re-prompted Run writes its own Task Result; the rejected one is never read again.
+      // The re-prompted Harness Run writes its own Task Result; the rejected one is never read again.
       if (run < DEVELOPER_RUNS)
         rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
     }
@@ -1567,24 +1568,11 @@ function taskResultIssues(result: Inspection['result']): RuleIssue[] {
   return result.kind === 'invalid' ? result.issues : [];
 }
 
-/** The Run exited by itself with code 0. That proves nothing about its work. */
+/** The Harness Run exited by itself with code 0. That proves nothing about its work. */
 function exitedCleanly(
   result: HarnessRawResult | undefined,
 ): result is HarnessRawResult & { exit: { kind: 'exited'; code: 0 } } {
   return result !== undefined && result.exit.kind === 'exited' && result.exit.code === 0;
-}
-
-/** The usage of two Harness Runs together, as trustworthy as the less trusted one. */
-function addUsage(a: Usage, b: Usage): Usage {
-  const trust = ['actual', 'estimated', 'unknown'] as const;
-  const sum = (x: number | null, y: number | null) => (x === null || y === null ? null : x + y);
-  return {
-    tag: trust[Math.max(trust.indexOf(a.tag), trust.indexOf(b.tag))] ?? 'unknown',
-    inputTokens: sum(a.inputTokens, b.inputTokens),
-    outputTokens: sum(a.outputTokens, b.outputTokens),
-    costUsd: sum(a.costUsd, b.costUsd),
-    durationMs: a.durationMs + b.durationMs,
-  };
 }
 
 /** The reviewer's proposal and what it was given, or why there is none. */

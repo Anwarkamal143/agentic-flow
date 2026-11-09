@@ -25,7 +25,7 @@ import {
   type EventBody,
   type JobBody,
 } from '../support/api.js';
-import { scriptWith, validTaskResponse } from '../support/scripts.js';
+import { scriptWith, SUM_SOURCE, validTaskResponse } from '../support/scripts.js';
 
 interface AttemptBody {
   id: string;
@@ -36,6 +36,8 @@ interface AttemptBody {
   headSha: string | null;
   commits: string[];
   worktreeId: string;
+  cause: string;
+  packet: { context: { priorFindings: { rule: string | null; attemptN: number }[] } };
   evidence: {
     kind: string;
     source: string;
@@ -89,6 +91,19 @@ function workWithoutResult() {
 /** A re-prompted developer response: the work is already committed, so it only writes the result. */
 function resultOnly(result: unknown = validTaskResponse().result) {
   return { steps: [], result };
+}
+
+/** Wrong work (no sum()) whose Task Result still claims AC-01 is met. */
+function falseClaim() {
+  const response = validTaskResponse();
+  response.steps = [
+    { write: { path: 'src/math.ts', content: '// sum() is coming\n' } },
+    { commit: 'Claim sum() without writing it' },
+  ];
+  expect(response.result['criteria']).toEqual([
+    expect.objectContaining({ code: 'AC-01', claim: 'met' }),
+  ]);
+  return response;
 }
 
 describe('the Task Result is checked, re-prompted once, and never trusted', () => {
@@ -146,6 +161,10 @@ describe('the Task Result is checked, re-prompted once, and never trusted', () =
     expect(git(repo.clonePath, ['show', `${worktree.branch}:src/math.ts`])).toContain(
       'export function sum',
     );
+    // The Attempt's head is pinned too, whatever later happens to the branch.
+    expect(git(repo.clonePath, ['rev-parse', `refs/factory/attempts/${attempt.id}`]).trim()).toBe(
+      attempt.headSha,
+    );
   });
 
   it.each([
@@ -198,17 +217,29 @@ describe('the Task Result is checked, re-prompted once, and never trusted', () =
     },
   );
 
-  it("A3 false claim: the Task Result says AC-01 is met, the factory's test fails, so the claim is ignored and the Task is not approved", async () => {
-    const response = validTaskResponse();
-    // The work is wrong (no sum()), but the Task Result claims AC-01 is met.
-    response.steps = [
-      { write: { path: 'src/math.ts', content: '// sum() is coming\n' } },
-      { commit: 'Claim sum() without writing it' },
+  it('A3 false claim, then Rework: the ignored claim sends the Task to a Rework Attempt that fixes the work', async () => {
+    const fixed = validTaskResponse();
+    fixed.steps = [
+      { write: { path: 'src/math.ts', content: SUM_SOURCE } },
+      { commit: 'Add sum() for real' },
     ];
-    expect(response.result['criteria']).toEqual([
-      expect.objectContaining({ code: 'AC-01', claim: 'met' }),
+    const { rt, repo } = await runtimeWith(scriptWith({}, { 'add-sum': [falseClaim(), fixed] }));
+
+    const job = await runJob(rt, repo.id);
+
+    expect(job.status).toBe('completed');
+    const attempts = await json<AttemptBody[]>(rt.request(`/v1/jobs/${job.id}/attempts`));
+    expect(attempts.map((a) => [a.n, a.cause, a.state, a.exitReason])).toEqual([
+      [1, 'initial', 'failed', 'gates_failed'],
+      [2, 'rework', 'passed', 'completed'],
     ]);
-    const { rt, repo } = await runtimeWith(scriptWith({}, { 'add-sum': [response] }));
+    // The Rework Attempt is told what the factory found, not what the Harness claimed.
+    const carried = attempts[1]?.packet.context.priorFindings.map((f) => [f.attemptN, f.rule]);
+    expect(carried).toContainEqual([1, 'criteria']);
+  });
+
+  it("A3 false claim: the Task Result says AC-01 is met, the factory's test fails, so the claim is ignored and the Task is not approved", async () => {
+    const { rt, repo } = await runtimeWith(scriptWith({}, { 'add-sum': [falseClaim()] }));
     await capAttempts(rt, repo.projectId, 1);
 
     const job = await runJob(rt, repo.id);
