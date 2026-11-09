@@ -84,7 +84,7 @@ export function appendEvent(db: FactoryDb | Tx, event: NewEvent): number {
 }
 
 /** Methods of a better-sqlite3 Statement that bind parameters and execute. */
-const EXECUTING = new Set<string | symbol>(['run', 'get', 'all', 'iterate']);
+const EXECUTING = new Set<string | symbol>(['run', 'get', 'all', 'iterate', 'bind']);
 
 /**
  * Wraps `sqlite.prepare` so every statement redacts the strings bound to it

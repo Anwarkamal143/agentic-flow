@@ -76,6 +76,16 @@ for (const stream of [process.stdout, process.stderr]) {
     );
 }
 
+// Node would print an uncaught error from native code, past the redacted streams.
+for (const event of ['uncaughtException', 'unhandledRejection'] as const) {
+  process.on(event, (err: unknown) => {
+    process.stderr.write(
+      `factory runtime: ${event}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+    );
+    process.exit(1);
+  });
+}
+
 const existing = readRuntimeRecord(home);
 if (existing !== undefined && existing.pid !== process.pid && isProcessAlive(existing.pid)) {
   fail(`a runtime is already running for ${home.root} (pid ${String(existing.pid)})`);

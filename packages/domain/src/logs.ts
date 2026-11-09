@@ -5,11 +5,20 @@
  */
 import { z } from 'zod';
 
-const HarnessExitSchema = z.discriminatedUnion('kind', [
+/** How a Harness Run ended. Exit code 0 is not evidence that the output is valid. */
+export const HarnessExitSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('exited'), code: z.number().int() }),
   z.object({ kind: z.literal('cancelled') }),
   z.object({ kind: z.literal('timed_out'), afterMs: z.number() }),
 ]);
+export type HarnessExit = z.infer<typeof HarnessExitSchema>;
+
+/** How a Harness Run ended, in words: `exited with code 2`, `timed out after 600000 ms`, `was cancelled`. */
+export function describeHarnessExit(exit: HarnessExit): string {
+  if (exit.kind === 'exited') return `exited with code ${String(exit.code)}`;
+  if (exit.kind === 'timed_out') return `timed out after ${String(exit.afterMs)} ms`;
+  return 'was cancelled';
+}
 
 /** The content of a Harness Run's `log` Artifact. */
 export const HarnessLogContentSchema = z.object({
@@ -37,10 +46,15 @@ export const VerificationLogContentSchema = z.object({
 });
 export type VerificationLogContent = z.infer<typeof VerificationLogContentSchema>;
 
-export const LogContentSchema = z.discriminatedUnion('source', [
-  HarnessLogContentSchema,
-  VerificationLogContentSchema,
-]);
+/**
+ * A `log` Artifact's content. Verification logs written before #11 have no
+ * `source`; they are read as verification logs.
+ */
+export const LogContentSchema = z.preprocess(
+  (v) =>
+    v !== null && typeof v === 'object' && !('source' in v) ? { ...v, source: 'verification' } : v,
+  z.discriminatedUnion('source', [HarnessLogContentSchema, VerificationLogContentSchema]),
+);
 
 /** One entry of `GET /v1/jobs/:id/logs`, in the order the logs were stored. */
 export const JobLogEntrySchema = z.object({

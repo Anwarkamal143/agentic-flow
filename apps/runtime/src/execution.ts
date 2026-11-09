@@ -26,6 +26,7 @@ import {
   evidenceSource,
   type GateRef,
   type HarnessLogContent,
+  type VerificationLogContent,
   EvidenceVerdictSchema,
   isBlocking,
   isCurrent,
@@ -935,14 +936,14 @@ export class TaskScheduler {
         durationMs: exit.durationMs,
         output: exit.output,
         content: this.opts.artifacts.writeContent({
-          source: 'verification' as const,
+          source: 'verification',
           key: v.key,
           command: v.command,
           exitCode,
           timedOut: exit.timedOut,
           truncated: exit.truncated,
           output: exit.output,
-        }),
+        } satisfies VerificationLogContent),
       });
     }
     return records;

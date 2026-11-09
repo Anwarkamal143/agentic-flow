@@ -1,15 +1,13 @@
 /**
  * A Harness that never sees or returns a secret value (ADR-0011): the prompt
- * is redacted before the Run starts (no secret is passed to an agent), and the
+ * is redacted before the Run starts (no secret is passed to a Harness), and the
  * Run's output and events are redacted before the runtime reads them. The
  * stores redact again on write; this keeps secrets out of memory too.
  */
+import type { Redactor } from '@factory/domain';
 import type { AgentHarness, HarnessEvent, HarnessRun, HarnessStartInput } from './index.js';
 
-export function redactingHarness(
-  inner: AgentHarness,
-  redact: (text: string) => string,
-): AgentHarness {
+export function redactingHarness(inner: AgentHarness, redact: Redactor): AgentHarness {
   const wrap = (run: HarnessRun): HarnessRun => ({
     executionId: run.executionId,
     ...(run.sessionRef === undefined ? {} : { sessionRef: run.sessionRef }),
@@ -36,7 +34,7 @@ export function redactingHarness(
 
 async function* redactEvents(
   events: AsyncIterable<HarnessEvent>,
-  redact: (text: string) => string,
+  redact: Redactor,
 ): AsyncGenerator<HarnessEvent> {
   for await (const e of events) {
     if (e.kind === 'text') yield { kind: 'text', text: redact(e.text) };
