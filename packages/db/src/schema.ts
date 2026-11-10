@@ -422,3 +422,44 @@ export const reviewFindings = sqliteTable(
   },
   (t) => [uniqueIndex('review_findings_review_position').on(t.reviewId, t.position)],
 );
+
+/**
+ * An Inbox Item (ARCHITECTURE §5, ADR-0016): a decision only a human makes.
+ * `subject_ref` is what is decided on (for `plan`, the plan Artifact id);
+ * `version` is bumped by every change, and a decision names both. Items stay
+ * pending (`expires_policy: remain_pending`) and never auto-approve.
+ */
+export const approvals = sqliteTable(
+  'approvals',
+  {
+    id: text('id').primaryKey(),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    taskId: text('task_id').references(() => tasks.id),
+    /** The Stage Run it holds, when it holds one (`plan_approval` for a plan). */
+    stageRunId: text('stage_run_id').references(() => stageRuns.id),
+    /** `question | plan | spec_change | blocker | cleanup`. */
+    kind: text('kind').notNull(),
+    subjectRef: text('subject_ref').notNull(),
+    question: text('question').notNull(),
+    why: text('why').notNull(),
+    /** JSON array of `ApprovalOption`. */
+    optionsJson: text('options_json').notNull(),
+    recommended: text('recommended'),
+    /** JSON array of the Artifact ids that back it. */
+    evidenceJson: text('evidence_json').notNull(),
+    /** `open | decided | cancelled | superseded`. */
+    state: text('state').notNull(),
+    deferred: integer('deferred', { mode: 'boolean' }).notNull(),
+    requestedBy: text('requested_by').notNull(),
+    decidedBy: text('decided_by'),
+    decidedAt: text('decided_at'),
+    /** `InboxDecision` once decided. */
+    decisionJson: text('decision_json'),
+    expiresPolicy: text('expires_policy').notNull(),
+    createdAt: text('created_at').notNull(),
+    version: integer('version').notNull(),
+  },
+  (t) => [index('approvals_job').on(t.jobId), index('approvals_state').on(t.state)],
+);

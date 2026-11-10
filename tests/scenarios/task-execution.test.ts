@@ -21,6 +21,7 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
+  skipPlanApproval,
 } from '../support/api.js';
 import { scriptWith, SUM_SOURCE, validTaskResponse, VALID_SCRIPT } from '../support/scripts.js';
 
@@ -114,6 +115,7 @@ async function executionRuntime(script: string, env?: NodeJS.ProcessEnv) {
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await skipPlanApproval(rt, repo.projectId);
   return { rt, repo, source };
 }
 
@@ -145,6 +147,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       ['discovery', 'succeeded'],
       ['specification', 'succeeded'],
       ['planning', 'succeeded'],
+      ['plan_approval', 'skipped'],
       ['execution', 'succeeded'],
       ['closure', 'succeeded'],
     ]);

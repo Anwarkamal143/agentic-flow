@@ -31,6 +31,7 @@ import {
 } from '@factory/harness';
 import { API_KEY_MISSING, createRedactor, secretsFromEnv, type Billing } from '@factory/domain';
 import { createApp, type RuntimeStatus } from './app.js';
+import { InboxService } from './inbox.js';
 import { ArtifactStore } from './artifacts.js';
 import { runDoctor } from './doctor.js';
 import { JobService } from './jobs.js';
@@ -262,6 +263,12 @@ const app = createApp({
   jobs: new JobService(database.db, notify, async (jobId) => {
     await Promise.all([scheduler.cancelJob(jobId), tasks.cancelJob(jobId)]);
   }),
+  inbox: new InboxService(
+    database.db,
+    artifacts,
+    notify,
+    config.harness?.id === 'claude-code' ? config.harness.billing : null,
+  ),
   artifacts,
   logs: (jobId) => jobLogs(database.db, artifacts, jobId),
   activity: new ActivityService(database.db, redact),

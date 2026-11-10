@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import { activity, DEFAULT_TAIL_LINES } from './commands/activity.js';
 import { doctor } from './commands/doctor.js';
+import { inboxDecide, inboxDefer, inboxList, inboxShow, planShow } from './commands/inbox.js';
 import { init } from './commands/init.js';
 import { jobCancel, jobCreate, jobList, jobShow } from './commands/job.js';
 import { logs } from './commands/logs.js';
@@ -28,6 +29,13 @@ Commands:
                                   Cancel a Job, stopping its running work
   logs <job> [--json]             Show the (redacted) Harness and verification output
                                   of a Job's Attempts
+  plan show <job> [--json]        Show the Job's Plan for approval: Specification, DAG,
+                                  parallel waves, risks, decision points, estimate
+  inbox [--all] [--json]          List open Inbox Items (--all: every item, deferred too)
+  inbox show <id> [--json]        Show an Inbox Item, its version and options
+  inbox decide <id> <option> --expect-version <n> [--subject <ref>] [--comment <text>]
+                                  Decide an item (a stale version or subject is refused)
+  inbox defer <id> | undefer <id> Hide an item from the default view, or show it again
   activity [--lines <n>] [--json] What is running now: each running Attempt with its
                                   Harness, model, Repository, tier, heartbeat, ports and
                                   the redacted tail of its output (default 20 lines)
@@ -92,6 +100,22 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'job':
       return job(rest);
+    case 'inbox':
+      return inbox(rest);
+    case 'plan': {
+      const [sub, ...subArgs] = rest;
+      const { values, positionals } = parseArgs({
+        args: subArgs,
+        allowPositionals: true,
+        options: { json: { type: 'boolean' } },
+      });
+      const [id, ...extra] = positionals;
+      if (sub !== 'show' || id === undefined || extra.length > 0) {
+        process.stderr.write(`factory: plan show takes exactly one Job id\n\n${USAGE}`);
+        return 2;
+      }
+      return planShow(id, { json: values.json === true });
+    }
     case 'logs': {
       const { values, positionals } = parseArgs({
         args: rest,
@@ -169,6 +193,56 @@ function job(argv: string[]): Promise<number> | number {
     }
     default:
       process.stderr.write(`factory: unknown job command '${sub ?? ''}'\n\n${USAGE}`);
+      return 2;
+  }
+}
+
+function inbox(argv: string[]): Promise<number> | number {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      all: { type: 'boolean' },
+      json: { type: 'boolean' },
+      'expect-version': { type: 'string' },
+      subject: { type: 'string' },
+      comment: { type: 'string' },
+    },
+  });
+  const [sub, id, ...extra] = positionals;
+  const json = values.json === true;
+  switch (sub) {
+    case undefined:
+      return inboxList({ all: values.all === true, json });
+    case 'show':
+    case 'defer':
+    case 'undefer':
+      if (id === undefined || extra.length > 0) {
+        process.stderr.write(`factory: inbox ${sub} takes exactly one item id\n\n${USAGE}`);
+        return 2;
+      }
+      return sub === 'show' ? inboxShow(id, { json }) : inboxDefer(id, sub === 'defer');
+    case 'decide': {
+      const [option, ...more] = extra;
+      const version = Number(values['expect-version']);
+      if (id === undefined || option === undefined || more.length > 0) {
+        process.stderr.write(`factory: inbox decide takes an item id and an option\n\n${USAGE}`);
+        return 2;
+      }
+      if (values['expect-version'] === undefined || !Number.isInteger(version) || version < 0) {
+        process.stderr.write(
+          `factory: inbox decide needs --expect-version <n> (the version 'inbox show' printed)\n`,
+        );
+        return 2;
+      }
+      return inboxDecide(id, option, {
+        expectVersion: version,
+        subject: values.subject,
+        comment: values.comment,
+      });
+    }
+    default:
+      process.stderr.write(`factory: unknown inbox command '${sub}'\n\n${USAGE}`);
       return 2;
   }
 }

@@ -40,6 +40,7 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { changeJob, changeJobIn, readJobState, stepTask, type JobState } from './engine.js';
 import { ApiFailure } from './errors.js';
 import { attemptFindings } from './findings.js';
+import { cancelOpenItems } from './inbox.js';
 import { newId } from './ids.js';
 
 const OPERATOR = 'user:local';
@@ -205,6 +206,7 @@ export class JobService {
           }
         }
         cancelOpenTasks(tx, id, input.reason);
+        cancelOpenItems(tx, id, OPERATOR);
         appendEvent(tx, {
           entityKind: 'job',
           entityId: id,

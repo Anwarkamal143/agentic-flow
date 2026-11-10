@@ -7,6 +7,7 @@ import {
   registeredRepo,
   type EventBody,
   type JobBody,
+  phaseAConfig,
 } from '../support/api.js';
 import { openStream, type SseMessage } from '../support/sse.js';
 
@@ -36,7 +37,7 @@ describe('event stream (SSE)', () => {
 
     // Generate events while no client is connected.
     const second = await createJob(rt, repo.id, 'second');
-    await post(rt, `/v1/projects/${repo.projectId}/config`, { maxAttempts: 4 });
+    await post(rt, `/v1/projects/${repo.projectId}/config`, phaseAConfig({ maxAttempts: 4 }));
     await post(rt, `/v1/jobs/${first.id}/cancel`, { expectedVersion: first.version });
     const third = await createJob(rt, repo.id, 'third');
     const log = await allEvents(rt);

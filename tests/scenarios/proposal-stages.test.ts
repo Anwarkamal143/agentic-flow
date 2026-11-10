@@ -61,6 +61,7 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       ['discovery', 'succeeded'],
       ['specification', 'succeeded'],
       ['planning', 'succeeded'],
+      ['plan_approval', 'skipped'],
       ['execution', 'succeeded'],
       ['closure', 'succeeded'],
     ]);

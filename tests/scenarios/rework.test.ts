@@ -24,6 +24,7 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
+  skipPlanApproval,
 } from '../support/api.js';
 import { scriptWith, validReviewResponse, validTaskResponse } from '../support/scripts.js';
 
@@ -87,6 +88,7 @@ async function runWith(script: string, opts: { maxAttempts?: number } = {}) {
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await skipPlanApproval(rt, repo.projectId);
   if (opts.maxAttempts !== undefined) await capAttempts(rt, repo.projectId, opts.maxAttempts);
   const created = await post(rt, '/v1/jobs', {
     repositoryId: repo.id,

@@ -17,7 +17,7 @@ import { resolveHome } from '@factory/home';
 import { ApiRequestError, findRuntime, type RuntimeClient } from '../client.js';
 import { EXIT_NOT_RUNNING } from './lifecycle.js';
 
-function client(): RuntimeClient | undefined {
+export function client(): RuntimeClient | undefined {
   const found = findRuntime(resolveHome());
   if (found.kind === 'not_running') {
     process.stderr.write('Runtime: not running. Run: factory start\n');
