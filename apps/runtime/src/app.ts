@@ -5,6 +5,8 @@ import {
   DecideInputSchema,
   DeferInputSchema,
   PlanDecisionInputSchema,
+  EditPlanInputSchema,
+  RequestPlanChangesInputSchema,
   InspectRepositoryInputSchema,
   ProjectConfigSchema,
   RegisterRepositoryInputSchema,
@@ -197,6 +199,14 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/v1/jobs/:id/plan/reject', async (c) => {
     const input = await parseBody(c, PlanDecisionInputSchema);
     return c.json(deps.inbox.decidePlan(c.req.param('id'), 'reject', input, OPERATOR));
+  });
+  app.post('/v1/jobs/:id/plan/request-changes', async (c) => {
+    const input = await parseBody(c, RequestPlanChangesInputSchema);
+    return c.json(deps.inbox.requestPlanChanges(c.req.param('id'), input, OPERATOR));
+  });
+  app.post('/v1/jobs/:id/plan/edit', async (c) => {
+    const input = await parseBody(c, EditPlanInputSchema);
+    return c.json(await deps.inbox.editPlan(c.req.param('id'), input, OPERATOR));
   });
   app.get('/v1/inbox', (c) => {
     const { all } = parseQuery(c, z.object({ all: z.enum(['true', 'false']).optional() }));

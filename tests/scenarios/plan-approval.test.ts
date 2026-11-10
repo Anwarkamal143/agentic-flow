@@ -82,7 +82,7 @@ describe('plan_approval', () => {
       deferred: false,
       version: 0,
       expiresPolicy: 'remain_pending',
-      options: [{ id: 'approve' }, { id: 'reject' }],
+      options: [{ id: 'approve' }, { id: 'reject' }, { id: 'request_changes' }],
     });
     // No Task runs while the Plan waits.
     expect(await json<unknown[]>(rt.request(`/v1/jobs/${job.id}/attempts`))).toEqual([]);
