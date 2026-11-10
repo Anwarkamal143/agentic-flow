@@ -43,6 +43,7 @@ import { RepositoryService } from './repositories.js';
 import { StageScheduler } from './scheduler.js';
 import { CRASH_POINTS, TaskScheduler } from './execution.js';
 import { recoverTasks } from './recovery.js';
+import { CleanupWorker, openMissingCleanupItems } from './cleanup.js';
 import { applyLeaseKnobs, parseLeaseKnobs } from './sweeper.js';
 
 const ACTOR = 'system:runtime';
@@ -197,6 +198,19 @@ const recovered =
         log,
       });
 
+/**
+ * A cancel a crash cut short opens its cleanup item now (ADR-0027), and the
+ * worker carries out the discards the operator decided.
+ */
+openMissingCleanupItems(database.db);
+const cleanup = new CleanupWorker(
+  database.db,
+  () => {
+    notify();
+  },
+  log,
+);
+
 /** Test-only fault injection (ADR-0012); an unknown point is refused, never ignored. */
 const crashEnv = process.env['FACTORY_TEST_CRASH_AT'];
 const crashAt = CRASH_POINTS.find((p) => p === crashEnv);
@@ -235,6 +249,7 @@ const notify = () => {
   outbox.notify();
   scheduler.wake();
   tasks.wake();
+  cleanup.wake();
 };
 
 const app = createApp({
@@ -301,6 +316,7 @@ const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requested
   outbox.start();
   scheduler.start();
   tasks.start();
+  cleanup.start();
   writeRuntimeRecord(home, {
     pid: process.pid,
     host: RUNTIME_HOST,
@@ -330,7 +346,7 @@ function shutdown(reason: string): void {
   outbox.close();
   // A Harness Run in flight is cancelled; its Stage Run is resumed at the next start.
   // So is a developer Harness Run or verification command; its Attempt is recovered at the next start.
-  const stopped = Promise.all([scheduler.close(), tasks.close()]);
+  const stopped = Promise.all([scheduler.close(), tasks.close(), cleanup.close()]);
   server.close(() => {
     void stopped.then(() => {
       finish(reason);

@@ -42,6 +42,7 @@ import {
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
+import { applyCleanupDecision } from './cleanup.js';
 import { changeJob, stepTask, type StageRunStepper } from './engine.js';
 import { ApiFailure } from './errors.js';
 import { latestArtifact, openPlanItem, queueNextStage, startReplan } from './plan-approval.js';
@@ -133,6 +134,7 @@ export class InboxService {
         payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
       });
       if (row.kind === 'plan') applyPlanDecision(tx, row, input.option, step, actor);
+      else if (row.kind === 'cleanup') applyCleanupDecision(tx, row, input.option);
       else throw new ApiFailure(409, 'not_decidable', `no ${row.kind} items are decided yet`);
     });
     this.onCommit();

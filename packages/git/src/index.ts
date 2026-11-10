@@ -200,11 +200,23 @@ export async function addWorktree(opts: {
 }
 
 /**
- * Removes a Worktree; its branch stays. Never forced: git refuses when the
- * Worktree has changes that are neither committed nor ignored.
+ * Removes a Worktree; its branch stays. Not forced by default: git refuses
+ * when the Worktree has changes that are neither committed nor ignored.
+ * `force` removes it with those changes; only an explicit human discard
+ * (a `cleanup` decision, ADR-0027) passes it.
  */
-export async function removeWorktree(repo: string, path: string): Promise<void> {
-  await worktreeGit(repo, ['worktree', 'remove', '--', path]);
+export async function removeWorktree(
+  repo: string,
+  path: string,
+  opts: { force?: boolean } = {},
+): Promise<void> {
+  await worktreeGit(repo, [
+    'worktree',
+    'remove',
+    ...(opts.force === true ? ['--force'] : []),
+    '--',
+    path,
+  ]);
 }
 
 /** Paths with uncommitted changes (tracked or untracked, not ignored). */

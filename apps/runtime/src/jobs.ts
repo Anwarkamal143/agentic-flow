@@ -40,6 +40,7 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { changeJob, changeJobIn, readJobState, stepTask, type JobState } from './engine.js';
 import { ApiFailure } from './errors.js';
 import { attemptFindings } from './findings.js';
+import { openCleanupItem } from './cleanup.js';
 import { cancelOpenItems } from './inbox.js';
 import { newId } from './ids.js';
 
@@ -190,7 +191,10 @@ export class JobService {
    * included, and the Tasks not in flight. Then the work in flight is stopped:
    * its process group gets SIGTERM, then SIGKILL after a grace period, and its
    * Attempt and Task are recorded `cancelled` with the Worktree preserved and
-   * the leases released. Settles when all of that is recorded.
+   * the leases released. Only then, in a last transaction, is anything the
+   * stopped work moved on or opened cancelled, and the Job's one `cleanup`
+   * Inbox Item opened (PRODUCT_SPEC §12, ADR-0027) when a Worktree is left
+   * preserved. Settles when all of that is recorded.
    */
   async cancel(id: string, input: CancelJobInput): Promise<Job> {
     changeJob(
@@ -220,9 +224,12 @@ export class JobService {
     );
     this.onCommit();
     await this.stopWork(id);
-    // A Task the work in flight moved on (say, to Rework) just before it stopped is cancelled too.
+    // A Task the work in flight moved on (say, to Rework), or an item it opened (say, a
+    // Question), just before it stopped is cancelled too. Then, last, the cleanup item.
     changeJob(this.db, { jobId: id, expectedVersion: 'current', actor: OPERATOR }, (tx) => {
       cancelOpenTasks(tx, id, input.reason);
+      cancelOpenItems(tx, id, OPERATOR);
+      openCleanupItem(tx, id, OPERATOR);
     });
     this.onCommit();
     return this.get(id);
