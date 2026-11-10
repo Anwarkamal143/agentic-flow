@@ -62,8 +62,9 @@ pnpm install
 pnpm build         # tsc -b (every package to dist/), then next build (apps/dashboard)
 pnpm typecheck     # tsc -b, the tests/ project, and the dashboard (next typegen + tsc)
 pnpm lint          # ESLint (strict, type-checked) + Prettier --check + migration drift check
-pnpm test          # builds, then runs every Vitest test in tests/ (unit/ and scenarios/)
+pnpm test          # builds, then runs every Vitest test in tests/ (unit/, integration/ and scenarios/)
 pnpm test:e2e      # only the scenario tests (tests/scenarios)
+pnpm test:integration # only the integration tests (tests/integration); builds first, as pnpm test does
 pnpm test:real     # on demand only, never CI: [real] tests with the real Claude Code (needs `claude` logged in; minutes, uses your usage)
 pnpm format        # Prettier --write
 pnpm --filter @factory/db db:generate   # write a migration after editing packages/db/src/schema.ts
@@ -79,6 +80,9 @@ Scenario tests spawn the built runtime and CLI as child processes against a temp
 (helper: `tests/support/factory.ts`). They never import runtime internals or open the database. The dashboard scenario
 also runs the built dashboard (`next start`, helper `tests/support/dashboard.ts`) and reads its pages over HTTP.
 Unit tests (`tests/unit/`) cover pure `@factory/domain` rules only, such as the approval rule and the review validation rules.
+Integration tests (`tests/integration/`, ADR-0025) open a real SQLite file with `openDatabase` and call functions the
+built runtime exports from real child processes, such as two processes racing `claimNextTask` (B2). They may seed
+fixture rows directly. The tier is test-only: in production only `apps/runtime` writes the database (one writer).
 
 ## 7. Questions for the human, before Phase A
 
