@@ -59,7 +59,7 @@ export const PROPOSAL_STAGES: readonly ProposalStage[] = [
     role: 'planner',
     kind: 'plan',
     schema: PlanProposalSchema,
-    ask: "Plan the work as Tasks. Each Task is one coherent change in one of the Job's Repositories, with writable and forbidden path globs relative to the Repository root, its dependencies, the Acceptance Criteria it covers, and the commands that verify it.",
+    ask: "Plan the work as Tasks. Each Task is one coherent change in one of the Job's Repositories, with writable and forbidden path globs relative to the Repository root, its dependencies, the Acceptance Criteria it covers, and the commands that verify it. Tasks that no dependency path orders may run in parallel, so their writable paths must not overlap. Give each Task a priority (low, normal or high); a Task's maxAttempts may only lower the configured limit.",
     validate: (value, ctx) => validatePlan(PlanProposalSchema.parse(value), ctx),
   },
 ];
