@@ -26,6 +26,13 @@ export const TaskStateSchema = z.enum([
   'failed',
   'cancelled',
 ]);
+
+/**
+ * Why a Task is `cancelled` (spec #33): its dependency `failed` (`dependency_failed`), a Replan
+ * didn't carry it over (`replan`), or the human cancelled the Job (`human`).
+ */
+export const TaskCancelReasonSchema = z.enum(['dependency_failed', 'replan', 'human']);
+export type TaskCancelReason = z.infer<typeof TaskCancelReasonSchema>;
 export type TaskState = z.infer<typeof TaskStateSchema>;
 
 /** Allowed Task transitions. Everything else is refused by the engine. */

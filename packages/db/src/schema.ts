@@ -90,6 +90,11 @@ export const jobs = sqliteTable(
     version: integer('version').notNull(),
     /** Replans used, against `maxReplans` (ARCHITECTURE §4.7). A Plan Edit is not one (ADR-0019). */
     replansUsed: integer('replans_used').notNull().default(0),
+    /**
+     * A Replan was requested and waits for in-flight Attempts to settle (ARCHITECTURE §4.7).
+     * State, not only an event, so the UI shows persisted state (spec #33 story 79).
+     */
+    replanRequested: integer('replan_requested', { mode: 'boolean' }).notNull().default(false),
   },
   (t) => [index('jobs_project').on(t.projectId), index('jobs_status').on(t.status)],
 );
@@ -206,6 +211,8 @@ export const tasks = sqliteTable(
     maxQuestions: integer('max_questions').notNull().default(3),
     /** Why a `blocked` Task can't go on (`Blocker`), while it is blocked. */
     blockerJson: text('blocker_json'),
+    /** Why a `cancelled` Task was cancelled (`TaskCancelReason`); null in every other state. */
+    cancelReason: text('cancel_reason'),
     version: integer('version').notNull(),
   },
   // A key is unique within its Plan: a replaced Plan's Task may share a key with the new one (ADR-0019).
