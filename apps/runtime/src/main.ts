@@ -43,6 +43,7 @@ import { RepositoryService } from './repositories.js';
 import { StageScheduler } from './scheduler.js';
 import { CRASH_POINTS, TaskScheduler } from './execution.js';
 import { recoverTasks } from './recovery.js';
+import { applyLeaseKnobs, parseLeaseKnobs } from './sweeper.js';
 
 const ACTOR = 'system:runtime';
 
@@ -54,6 +55,11 @@ function fail(message: string): never {
   process.stderr.write(`factory runtime: ${message}\n`);
   process.exit(1);
 }
+
+/** Test-only lease knobs (ADR-0024); an unknown value is refused, never ignored. */
+const leaseKnobs = parseLeaseKnobs(process.env);
+if (!leaseKnobs.ok) fail(leaseKnobs.error);
+applyLeaseKnobs(leaseKnobs.knobs);
 
 const home = resolveHome();
 const config = readConfig(home);

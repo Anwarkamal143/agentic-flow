@@ -79,7 +79,8 @@ import {
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore, StoredContent } from './artifacts.js';
-import { claimNextTask, leaseExpiry } from './claim.js';
+import { claimNextTask, heartbeatIntervalMs, leaseExpiry } from './claim.js';
+import { heartbeatTick, sweptAttempt } from './sweeper.js';
 import { criteriaCoveredBy } from './criteria.js';
 import { makeDependencyBase } from './dependency-base.js';
 import {
@@ -126,9 +127,7 @@ const DEVELOPER_RUNS = 2;
 /** The security tier every Harness Run runs under in Phase A: Tier 0, the local guardrail. */
 const TIER: SecurityTier = 'local';
 
-/** How often the runtime renews the leases it holds (ARCHITECTURE §12 step 4). */
-export const LEASE_HEARTBEAT_MS = 15_000;
-export { LEASE_TTL_MS, leaseExpiry } from './claim.js';
+export { LEASE_HEARTBEAT_MS, LEASE_TTL_MS, leaseExpiry } from './claim.js';
 export { claimNextTask, type Claim, type ClaimOptions } from './claim.js';
 
 export interface TaskSchedulerOptions {
@@ -310,7 +309,7 @@ export class TaskScheduler {
     this.renewLeases();
     this.heartbeat = setInterval(() => {
       this.renewLeases();
-    }, LEASE_HEARTBEAT_MS);
+    }, heartbeatIntervalMs());
     this.heartbeat.unref();
     this.loop.start();
   }
@@ -353,17 +352,18 @@ export class TaskScheduler {
     await Promise.all(slots.map((s) => s.done));
   }
 
-  /** Renews every lease this runtime holds (ARCHITECTURE §12 step 4). */
+  /** The heartbeat tick: renews every lease this runtime holds, then sweeps expired ones (ADR-0024). */
   private renewLeases(): void {
     if (this.closed) return;
-    const now = Date.now();
-    this.opts.db
-      .update(schema.leases)
-      .set({ heartbeatAt: new Date(now).toISOString(), expiresAt: leaseExpiry(now) })
-      .where(
-        sql`${schema.leases.holder} = ${this.holder} OR ${schema.leases.holder} LIKE ${`${this.holder}/%`}`,
-      )
-      .run();
+    heartbeatTick({
+      db: this.opts.db,
+      holder: this.holder,
+      spoolRoot: this.opts.spoolRoot,
+      inFlight: (taskId) => this.slots.get(taskId)?.done,
+      closed: () => this.closed,
+      onCommit: this.opts.onCommit,
+      log: this.opts.log,
+    });
   }
 
   private jobOf(r: Resumption): string | undefined {
@@ -508,6 +508,7 @@ export class TaskScheduler {
    * recorded `cancelled` first; on shutdown it is left as it is.
    */
   private async stopped(ctx: AttemptContext): Promise<boolean> {
+    if (sweptAttempt(ctx.attemptId)) return true; // its lease expired: the sweeper ends it (ADR-0024)
     const reason = this.stopReason(ctx.job.id);
     if (reason === undefined) return false;
     if (reason === 'cancelled') await this.recordCancelled(ctx.attemptId);

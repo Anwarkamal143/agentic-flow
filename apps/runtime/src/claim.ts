@@ -25,10 +25,29 @@ import { newId } from './ids.js';
 
 /** How long a lease lasts without a heartbeat (ARCHITECTURE §12 step 4). */
 export const LEASE_TTL_MS = 90_000;
+/** How often the runtime renews the leases it holds (ARCHITECTURE §12 step 4). */
+export const LEASE_HEARTBEAT_MS = 15_000;
+
+/** The lease TTL in force: {@link LEASE_TTL_MS}, unless a test shortened it (ADR-0024). */
+let leaseTtlMs = LEASE_TTL_MS;
+
+/**
+ * Test-only (ADR-0024): shortens every lease to `ms`, set once at startup
+ * from `FACTORY_TEST_LEASE_TTL_MS`. The heartbeat (and so the sweeper) then
+ * ticks three times per TTL.
+ */
+export function setLeaseTtlForTests(ms: number): void {
+  leaseTtlMs = ms;
+}
+
+/** How often the heartbeat ticks: every 15 s, or a third of a shortened TTL. */
+export function heartbeatIntervalMs(): number {
+  return Math.min(LEASE_HEARTBEAT_MS, Math.max(1, Math.floor(leaseTtlMs / 3)));
+}
 
 /** When a lease renewed now expires. */
 export function leaseExpiry(now = Date.now()): string {
-  return new Date(now + LEASE_TTL_MS).toISOString();
+  return new Date(now + leaseTtlMs).toISOString();
 }
 
 export interface ClaimOptions {
