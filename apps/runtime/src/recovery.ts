@@ -199,7 +199,7 @@ function executionCancelled(db: FactoryDb, jobId: string): boolean {
 }
 
 /** `unknown` when the Worktree is gone or git can't read it. */
-async function worktreeStatus(path: string): Promise<RecoveredWorktree> {
+export async function worktreeStatus(path: string): Promise<RecoveredWorktree> {
   if (!existsSync(path)) return 'unknown';
   try {
     if ((await resolveCommit(path, 'HEAD')) === undefined) return 'unknown';
@@ -237,7 +237,7 @@ function takeOverLeases(
  * time): SIGTERM to its group, then SIGKILL. A dead leader's group is left
  * alone: without the leader, nothing proves the group is still ours.
  */
-async function stopIfAlive(spool: string, startedAt: number): Promise<void> {
+export async function stopIfAlive(spool: string, startedAt: number): Promise<void> {
   if (inspectSpool(spool).state !== 'alive') return;
   await attachGuarded({ spool, startedAt, timeoutMs: Number.MAX_SAFE_INTEGER })?.cancel();
 }
