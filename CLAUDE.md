@@ -70,6 +70,7 @@ pnpm --filter @factory/db db:generate   # write a migration after editing packag
 pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | repo add | job create|list|show|cancel | logs | activity
                    #   | plan show <job> [--raw] | plan edit <job> --file <plan.json>
                    #   | plan request-changes <job> --feedback <text> | inbox [--all] | inbox show|defer|undefer <id> | inbox decide <id> <option> --expect-version <n>
+                   #   | inbox answer <id> --answer [<q>=]<text>... | --file <answers.json> [--expect-version <n>]
 pnpm fixtures      # generate fixtures/repos/tiny-ts (gitignored; tests make their own)
 pnpm dev           # factory start + the dashboard (next dev) on http://127.0.0.1:7421 (FACTORY_DASHBOARD_PORT); needs `factory init`
 ```
