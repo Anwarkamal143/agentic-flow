@@ -22,7 +22,7 @@ export const CLEANUP_OPTIONS: readonly ApprovalOption[] = [
     id: CLEANUP_DISCARD,
     label: 'Discard',
     description:
-      'Remove the preserved Worktree directories, including any uncommitted changes in them. The Task Branches, and every commit on them, stay in the Factory Clone.',
+      'Remove the preserved Worktree directories. Any uncommitted leftovers are first kept as a flagged WIP commit on the Task Branch; the Task Branches, and every commit on them, stay in the Factory Clone.',
     agentProposed: false,
   },
 ];

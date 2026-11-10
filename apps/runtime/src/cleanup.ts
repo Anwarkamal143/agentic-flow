@@ -3,8 +3,9 @@
  * cancel opens once everything is stopped, its decision, and the discard
  * itself. A decision only records what the human chose; a discard's removals
  * are done afterwards by {@link CleanupWorker} from that persisted decision,
- * one Worktree at a time, each row moving to `removed` only once its
- * directory is gone. The Task Branches are never touched.
+ * one Worktree at a time: leftovers become a flagged WIP commit on the Task
+ * Branch first, and the row moves to `removed` only once its directory is
+ * gone. The Task Branches are never deleted, and no uncommitted work is lost.
  */
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
@@ -21,7 +22,7 @@ import { and, eq, notExists } from 'drizzle-orm';
 import { changeJob, stepWorktree } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
-import { requireWorktree } from './worktree.js';
+import { commitLeftovers, requireWorktree } from './worktree.js';
 
 type ApprovalRow = typeof schema.approvals.$inferSelect;
 
@@ -135,11 +136,13 @@ export function applyCleanupDecision(tx: Tx, item: ApprovalRow, option: string):
 }
 
 /**
- * Carries out every decided discard not yet completed: removes each of the
- * Job's preserved Worktrees (forced: the human chose to discard what is in
- * them), records it `removed`, and then `cleanup.completed` on the item. A
- * Worktree git can't remove stays `preserved` with a `worktree.remove_failed`
- * event, and is not retried until the next runtime start. Task Branches stay.
+ * Carries out every decided discard not yet completed. For each of the Job's
+ * preserved Worktrees: any leftovers are committed as a flagged WIP commit on
+ * its Task Branch (`worktree.wip_committed`), then the Worktree is removed,
+ * never forced, and recorded `removed`; then `cleanup.completed` on the item.
+ * A Worktree that can't be committed or removed stays `preserved` with a
+ * `worktree.remove_failed` event saying why, and is not retried until the
+ * next runtime start. Task Branches stay.
  */
 export class CleanupWorker {
   private readonly loop: PassLoop;
@@ -213,7 +216,7 @@ export class CleanupWorker {
 
   private async discard(item: ApprovalRow): Promise<void> {
     const { jobId } = item;
-    const removed: string[] = [];
+    const removed: { worktreeId: string; wipCommit: string | null }[] = [];
     const failed: string[] = [];
     for (const worktree of preservedWorktrees(this.db, jobId)) {
       const repo = this.db
@@ -221,26 +224,34 @@ export class CleanupWorker {
         .from(schema.repositories)
         .where(eq(schema.repositories.id, worktree.repositoryId))
         .get();
+      let step: 'wip_commit' | 'remove' = 'wip_commit';
+      let wip: { sha: string; paths: string[] } | undefined;
       try {
         if (repo === undefined) throw new Error('no Repository');
-        await removeWorktree(repo.clonePath, worktree.path, { force: true });
+        // Never discard uncommitted work (CLAUDE.md §3): it goes onto the Task Branch first.
+        wip = await commitLeftovers(worktree.path);
+        if (wip !== undefined) {
+          const committed = wip;
+          this.event(jobId, worktree.id, 'worktree.wip_committed', {
+            taskId: worktree.taskId,
+            branch: worktree.branch,
+            approvalId: item.id,
+            wipCommit: committed.sha,
+            paths: committed.paths,
+          });
+        }
+        step = 'remove';
+        // Not forced: git refuses a Worktree with anything still uncommitted.
+        await removeWorktree(repo.clonePath, worktree.path);
       } catch (err) {
         failed.push(worktree.id);
-        this.db.transaction((tx) => {
-          appendEvent(tx, {
-            entityKind: 'worktree',
-            entityId: worktree.id,
-            jobId,
-            type: 'worktree.remove_failed',
-            actor: ACTOR,
-            payload: {
-              path: worktree.path,
-              approvalId: item.id,
-              message: err instanceof Error ? err.message : String(err),
-            },
-          });
+        this.event(jobId, worktree.id, 'worktree.remove_failed', {
+          path: worktree.path,
+          approvalId: item.id,
+          step,
+          wipCommit: wip?.sha ?? null,
+          message: err instanceof Error ? err.message : String(err),
         });
-        this.onCommit();
         continue;
       }
       changeJob(this.db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx) => {
@@ -250,10 +261,10 @@ export class CleanupWorker {
           requireWorktree(tx, worktree.id),
           'preserved',
           'removed',
-          { approvalId: item.id, reason: 'discarded' },
+          { approvalId: item.id, reason: 'discarded', wipCommit: wip?.sha ?? null },
         );
       });
-      removed.push(worktree.id);
+      removed.push({ worktreeId: worktree.id, wipCommit: wip?.sha ?? null });
       this.onCommit();
     }
     if (failed.length > 0) return; // Retried at the next start; no completion recorded.
@@ -270,6 +281,25 @@ export class CleanupWorker {
       },
       { behavior: 'immediate' },
     );
+    this.onCommit();
+  }
+
+  private event(
+    jobId: string,
+    worktreeId: string,
+    type: string,
+    payload: Record<string, unknown>,
+  ): void {
+    this.db.transaction((tx) => {
+      appendEvent(tx, {
+        entityKind: 'worktree',
+        entityId: worktreeId,
+        jobId,
+        type,
+        actor: ACTOR,
+        payload,
+      });
+    });
     this.onCommit();
   }
 }

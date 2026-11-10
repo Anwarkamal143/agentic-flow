@@ -24,10 +24,16 @@ So `approval.opened` for the cleanup item comes after every `attempt.cancelled`,
 
 - It goes through the generic `POST /v1/inbox/:id/decide` and `checkInboxChange` (version, subject, human actor), so `factory inbox decide <id> keep|discard` and the dashboard's generic decide form work with no new route or UI. `inbox.ts` gains one dispatch line to `applyCleanupDecision` (`apps/runtime/src/cleanup.ts`).
 - The decide transaction only records the decision. `keep` changes nothing more.
-- **`discard` is carried out after the commit, from the persisted decision**, by `CleanupWorker` (a `PassLoop`, woken on every commit and every 5 s). For each of the Job's `preserved` Worktrees: `git worktree remove --force` in the Factory Clone, then one transaction moves the row `preserved → removed` (`worktree.removed`, with the approval id). The row says `removed` only once the directory is gone. When every removal is done, `cleanup.completed` (on the approval) marks the item finished.
-- **Forced, on purpose.** The human chose to discard what is in the Worktrees, uncommitted changes included, and the option's description says so. Without `--force`, git refuses every Worktree a cancelled Attempt left dirty. `@factory/git` `removeWorktree` gains an optional `force`; closure still never forces.
-- **Task Branches are never touched.** `git worktree remove` leaves the branch and its commits in the Factory Clone (the discard scenario checks the branch tips are unchanged).
-- A removal git refuses records `worktree.remove_failed` and leaves the row `preserved`; no `cleanup.completed` is written, and the worker tries that item again only at the next runtime start.
+- **`discard` is carried out after the commit, from the persisted decision**, by `CleanupWorker` (a `PassLoop`, woken on every commit and every 5 s). For each of the Job's `preserved` Worktrees:
+  1. **Leftovers are committed first.** CLAUDE.md §3 ("never discard uncommitted changes") outranks the spec's "discard", so whatever a cancelled Attempt left uncommitted becomes one flagged WIP commit on its Task Branch (`Factory-WIP: true`, one `Factory-WIP-Path` per path). This is the same mechanism as the WIP commit after a developer Run, factored out of `execution.ts` into `commitLeftovers` (`worktree.ts`). The commit is recorded as `worktree.wip_committed` (its sha and paths).
+  2. **Removed, never forced:** `git worktree remove` in the Factory Clone. git refuses a Worktree that still holds anything uncommitted, so nothing can be lost.
+  3. One transaction moves the row `preserved → removed` (`worktree.removed`, with the approval id and `wipCommit`, or `null` when there was nothing to commit). The row says `removed` only once the directory is gone.
+
+  When every Worktree is removed, `cleanup.completed` (on the approval) marks the item finished.
+- **The discard removes directories, never work.** The option's description says leftovers are kept as a WIP commit on the branch. `@factory/git` `removeWorktree` is unchanged and still never forces.
+- **Task Branches are kept.** `git worktree remove` leaves the branch and its commits in the Factory Clone. The discard scenario checks each branch's old tip is the WIP commit's parent, and that the WIP commit holds the leftovers.
+- A WIP commit or removal that fails records `worktree.remove_failed` (`step`: `wip_commit` or `remove`, the `wipCommit` if one was made, git's message) and leaves the row `preserved`. No `cleanup.completed` is written, and the worker tries that item again only at the next runtime start.
+- **No Delivery Report entry.** A cancelled Job never runs closure, so it has no Delivery Report. The WIP commit is on the events and on the branch (`git log` shows the `Factory-WIP` trailers).
 
 ## Crash safety
 

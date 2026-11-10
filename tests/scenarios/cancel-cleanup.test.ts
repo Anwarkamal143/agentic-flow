@@ -294,14 +294,29 @@ describe('discarding the preserved Worktrees', { timeout: 90_000 }, () => {
       'the Worktrees to be removed',
     );
     for (const w of worktrees) expect(existsSync(w.path), w.path).toBe(false);
-    // The Task Branches stay, at the same commits, holding the committed work.
+    // The Task Branches stay: their earlier commits, plus one flagged WIP commit
+    // holding what the cancelled Attempt left uncommitted. Nothing was discarded.
+    const log = await events(rt, created.id);
     worktrees.forEach((w, i) => {
-      expect(git(repo.clonePath, ['rev-parse', w.branch]).trim()).toBe(tips[i]);
+      const tip = git(repo.clonePath, ['rev-parse', w.branch]).trim();
+      expect(git(repo.clonePath, ['rev-parse', `${tip}^`]).trim(), 'the old tip is kept').toBe(
+        tips[i],
+      );
+      const message = git(repo.clonePath, ['log', '-1', '--format=%B', tip]);
+      expect(message).toContain('Factory-WIP: true');
+      const key = w.branch.endsWith('-x') ? 'x' : 'y';
+      expect(message).toContain(`Factory-WIP-Path: docs/${key}-draft.md`);
+      expect(git(repo.clonePath, ['show', `${tip}:docs/${key}-draft.md`])).toBe('not committed\n');
+      expect(git(repo.clonePath, ['show', `${tip}:docs/${key}.md`])).toBe(`# ${key}\n`);
+      const recorded = log.find((e) => e.type === 'worktree.removed' && e.entityId === w.id);
+      expect(recorded?.payload['wipCommit'], 'the WIP commit is on the event').toBe(tip);
+      expect(
+        log.some((e) => e.type === 'worktree.wip_committed' && e.payload['wipCommit'] === tip),
+      ).toBe(true);
     });
-    const x = worktrees.find((w) => w.branch.endsWith('-x'));
-    expect(git(repo.clonePath, ['show', `${x?.branch ?? ''}:docs/x.md`])).toBe('# x\n');
-    const types = (await events(rt, created.id)).map((e) => e.type);
+    const types = log.map((e) => e.type);
     expect(types.filter((t) => t === 'worktree.removed')).toHaveLength(2);
+    expect(types).not.toContain('worktree.remove_failed');
     expect(types).toContain('cleanup.completed');
   });
 });
