@@ -24,6 +24,7 @@ import {
   type StageRunState,
 } from '@factory/domain';
 import { and, asc, eq, sql } from 'drizzle-orm';
+import { openBlockerItem } from './blocker-approvals.js';
 import { ApiFailure } from './errors.js';
 
 /** A Job's row and its Stage Runs, as read inside a transaction. */
@@ -192,7 +193,9 @@ type TaskRow = typeof schema.tasks.$inferSelect;
  * Moves one Task of the Job being changed (call inside {@link changeJob}, which
  * has already bumped the Job version), writing its `task.<to>` event. The
  * update is guarded by the Task's state and version; zero rows is a conflict.
- * A Task goes `blocked` with its `blocker`, which is cleared when it leaves.
+ * A Task goes `blocked` with its `blocker`, which is cleared when it leaves;
+ * a human Blocker with options opens its Blocker Approval in the same
+ * transaction (ADR-0026).
  */
 export function stepTask(
   tx: Tx,
@@ -238,6 +241,7 @@ export function stepTask(
       ...opts.payload,
     },
   });
+  if (opts.blocker !== undefined) openBlockerItem(tx, op, task, opts.blocker);
   return { ...task, state: to, blockerJson, version: task.version + 1 };
 }
 

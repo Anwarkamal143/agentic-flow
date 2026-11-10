@@ -411,7 +411,7 @@ describe('a developer that asks pauses durably, and an answer continues the Task
     expect((await tasks(rt, job.id))[0]?.state).toBe('blocked');
   });
 
-  it('answer Attempts are capped by maxQuestions: asking again past the cap is a question_cap_reached Blocker with no new Question', async () => {
+  it('answer Attempts are capped by maxQuestions: asking again past the cap is a question_cap_reached Blocker (a Blocker Approval) with no new Question', async () => {
     const { rt, repo } = await runtimeWith([asks(), asks({}, '// sum() still goes here\n')], {
       maxQuestions: 1,
     });
@@ -439,7 +439,8 @@ describe('a developer that asks pauses durably, and an answer continues the Task
       maxQuestions: 1,
       blocker: { kind: 'human', reason: 'question_cap_reached', attemptId: all[1]?.id },
     });
-    expect(await inbox(rt)).toEqual([]);
+    // No new Question: the cap opens a Blocker Approval instead (#43, ADR-0026).
+    expect((await inbox(rt)).map((i) => [i.kind, i.subjectRef])).toEqual([['blocker', all[1]?.id]]);
     // The second Attempt's questions are kept on it, for whoever looks next.
     expect(all[1]?.questions.map((q) => q.id)).toEqual(['q1', 'q2']);
   });
