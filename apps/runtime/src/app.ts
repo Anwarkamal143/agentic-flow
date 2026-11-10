@@ -2,6 +2,9 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   CancelJobInputSchema,
   CreateJobInputSchema,
+  DecideInputSchema,
+  DeferInputSchema,
+  PlanDecisionInputSchema,
   InspectRepositoryInputSchema,
   ProjectConfigSchema,
   RegisterRepositoryInputSchema,
@@ -18,6 +21,7 @@ import type { DoctorReport } from './doctor.js';
 import type { Outbox } from './outbox.js';
 import { MAX_EVENT_PAGE } from './events.js';
 import { ApiFailure } from './errors.js';
+import type { InboxService } from './inbox.js';
 import type { JobService } from './jobs.js';
 import type { RepositoryService } from './repositories.js';
 
@@ -50,6 +54,7 @@ export interface AppDeps {
   doctor(): Promise<DoctorReport>;
   repositories: RepositoryService;
   jobs: JobService;
+  inbox: InboxService;
   artifacts: ArtifactStore;
   /** The (redacted) Harness and verification output of a Job's Attempts. */
   logs(jobId: string): JobLogEntry[];
@@ -183,6 +188,34 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(await deps.jobs.cancel(c.req.param('id'), input));
   });
 
+  // The operator is the only actor the API token stands for (ARCHITECTURE §16).
+  app.get('/v1/jobs/:id/plan', (c) => c.json(deps.inbox.planView(c.req.param('id'))));
+  app.post('/v1/jobs/:id/plan/approve', async (c) => {
+    const input = await parseBody(c, PlanDecisionInputSchema);
+    return c.json(deps.inbox.decidePlan(c.req.param('id'), 'approve', input, OPERATOR));
+  });
+  app.post('/v1/jobs/:id/plan/reject', async (c) => {
+    const input = await parseBody(c, PlanDecisionInputSchema);
+    return c.json(deps.inbox.decidePlan(c.req.param('id'), 'reject', input, OPERATOR));
+  });
+  app.get('/v1/inbox', (c) => {
+    const { all } = parseQuery(c, z.object({ all: z.enum(['true', 'false']).optional() }));
+    return c.json(deps.inbox.list({ all: all === 'true' }));
+  });
+  app.get('/v1/inbox/:id', (c) => c.json(deps.inbox.get(c.req.param('id'))));
+  app.post('/v1/inbox/:id/decide', async (c) => {
+    const input = await parseBody(c, DecideInputSchema);
+    return c.json(deps.inbox.decide(c.req.param('id'), input, OPERATOR));
+  });
+  app.post('/v1/inbox/:id/defer', async (c) => {
+    const input = await parseBody(c, DeferInputSchema);
+    return c.json(deps.inbox.defer(c.req.param('id'), input, OPERATOR, true));
+  });
+  app.post('/v1/inbox/:id/undefer', async (c) => {
+    const input = await parseBody(c, DeferInputSchema);
+    return c.json(deps.inbox.defer(c.req.param('id'), input, OPERATOR, false));
+  });
+
   app.post('/v1/shutdown', (c) => {
     setImmediate(() => {
       deps.requestShutdown();
@@ -202,6 +235,8 @@ export function createApp(deps: AppDeps): Hono {
   });
   return app;
 }
+
+const OPERATOR = 'user:local';
 
 const EventPageQuerySchema = z.object({
   after: z.coerce.number().int().nonnegative().optional(),

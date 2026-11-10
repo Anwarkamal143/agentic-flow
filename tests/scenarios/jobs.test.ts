@@ -6,7 +6,7 @@ import {
   json,
   post,
   registeredRepo,
-  PHASE_A_FEATURE_STAGES,
+  FEATURE_STAGES,
   type JobBody,
 } from '../support/api.js';
 
@@ -50,6 +50,7 @@ describe('factory job create / job show', () => {
       ['discovery', 'pending'],
       ['specification', 'pending'],
       ['planning', 'pending'],
+      ['plan_approval', 'pending'],
       ['execution', 'pending'],
       ['closure', 'pending'],
     ]);
@@ -91,18 +92,20 @@ describe('factory job create / job show', () => {
 
   it('freezes the Workflow Snapshot and Effective Configuration onto the Job at creation', async () => {
     const rt = await startRuntime();
-    const repo = await registeredRepo(rt);
+    const repo = await registeredRepo(rt, { planApproval: 'required' });
 
     const first = await createJob(rt, repo.id, 'before any config edit');
     expect(first.workflowSnapshot).toEqual({
       recipeId: 'feature',
-      recipeVersion: 1,
-      stages: PHASE_A_FEATURE_STAGES.map((id) => ({ id })),
+      recipeVersion: 2,
+      stages: FEATURE_STAGES.map((id) => ({ id })),
     });
     expect(first.effectiveConfig).toEqual({
       maxAttempts: { value: 3, source: 'recipe' },
       maxRetries: { value: 2, source: 'recipe' },
       toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
+      maxQuestions: { value: 3, source: 'recipe' },
+      planApproval: { value: 'required', source: 'recipe' },
     });
 
     const edit = await post(rt, `/v1/projects/${repo.projectId}/config`, { maxAttempts: 5 });
@@ -113,6 +116,8 @@ describe('factory job create / job show', () => {
       maxAttempts: { value: 5, source: 'project' },
       maxRetries: { value: 2, source: 'recipe' },
       toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
+      maxQuestions: { value: 3, source: 'recipe' },
+      planApproval: { value: 'required', source: 'recipe' },
     });
 
     expect(
@@ -137,13 +142,20 @@ describe('factory job create / job show', () => {
       maxAttempts: { value: 1, source: 'project' },
       maxRetries: { value: 0, source: 'project' },
       toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
+      maxQuestions: { value: 3, source: 'recipe' },
+      planApproval: { value: 'required', source: 'recipe' },
     });
   });
 
   it('rejects a Project config the factory does not know or allow', async () => {
     const rt = await startRuntime();
-    const repo = await registeredRepo(rt);
-    for (const body of [{ maxAttempts: 0 }, { maxAttempts: 2.5 }, { mergePolicy: 'auto' }]) {
+    const repo = await registeredRepo(rt, { planApproval: 'required' });
+    for (const body of [
+      { maxAttempts: 0 },
+      { maxAttempts: 2.5 },
+      { mergePolicy: 'auto' },
+      { planApproval: 'auto' },
+    ]) {
       const res = await post(rt, `/v1/projects/${repo.projectId}/config`, body);
       expect(res.status, JSON.stringify(body)).toBe(400);
     }
