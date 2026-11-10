@@ -71,7 +71,6 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 Phase B (#33) on integration branch `phase-b/integration`, one worktree per ticket. Shared contracts: `packages/db/**` (schema + migrations) has exactly one owner at a time; other tickets wait for it.
 
-- #35 (plan_approval) → `packages/db/**` (sole schema owner), new `packages/domain/src/approvals.ts` + `plan-view.ts`, `apps/runtime/src/{engine,jobs,app}.ts` + new Inbox modules, `apps/cli/**`, ADR-0016
 - #49 (live activity) → new `apps/runtime/src/activity.ts`, new `apps/cli/src/commands/activity.ts`, `apps/dashboard/**` (dashboard owner this round), ADR-0018; only additive route/command registration lines in `apps/runtime/src/app.ts` and `apps/cli/src/main.ts` (owned by #35)
 
 ## Human decisions (outside CLAUDE.md §7)
