@@ -13,7 +13,8 @@ import { releaseClaim } from './claim.js';
 import { newId } from './ids.js';
 
 const PORT_BLOCK_START = 42_000;
-const PORT_BLOCK_SIZE = 10;
+/** How many ports an Attempt leases. */
+export const PORT_BLOCK_SIZE = 10;
 const PORT_BLOCKS = 1_000;
 
 export type WorktreeRow = typeof schema.worktrees.$inferSelect;

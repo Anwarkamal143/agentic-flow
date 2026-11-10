@@ -37,6 +37,7 @@ import { ArtifactStore } from './artifacts.js';
 import { runDoctor } from './doctor.js';
 import { JobService } from './jobs.js';
 import { jobLogs } from './logs.js';
+import { ActivityService } from './activity.js';
 import { Outbox } from './outbox.js';
 import { RepositoryService } from './repositories.js';
 import { StageScheduler } from './scheduler.js';
@@ -272,6 +273,7 @@ const app = createApp({
   ),
   artifacts,
   logs: (jobId) => jobLogs(database.db, artifacts, jobId),
+  activity: new ActivityService(database.db, redact),
   outbox,
   requestShutdown: () => {
     shutdown('api');
