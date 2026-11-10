@@ -69,7 +69,6 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 Phase B (#33) on integration branch `phase-b/integration`, one worktree per ticket. Shared contracts: `packages/db/**` (schema + migrations) has exactly one owner at a time; other tickets wait for it.
 
-- #34 (prefactor) → `apps/runtime/src/execution.ts`, `apps/runtime/src/review.ts`, new `apps/runtime/src/closure.ts`
 - #35 (plan_approval) → `packages/db/**` (sole schema owner), new `packages/domain/src/approvals.ts` + `plan-view.ts`, `apps/runtime/src/{engine,jobs,app}.ts` + new Inbox modules, `apps/cli/**`, ADR-0016
 - #36 (plan validation) → `packages/domain/src/proposals.ts`, `apps/runtime/src/{proposals,scheduler}.ts`, ADR-0017
 
