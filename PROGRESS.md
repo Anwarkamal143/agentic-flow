@@ -90,6 +90,8 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 Phase B (#33) on integration branch `phase-b/integration`, one worktree per ticket. Shared contracts: `packages/db/**` (schema + migrations) has exactly one owner at a time; other tickets wait for it.
 
+- #43 (Blocker Approvals) → `packages/db/**` (sole schema owner this round, e.g. `audit_log`), `apps/runtime/src/{inbox,execution,recovery}.ts`, new Blocker-Approval module, `packages/domain/src/{rework,approvals}.ts` + Blocker option sets, `apps/dashboard/**`, ADR-0026
+- #48 (cancel cleanup) → `apps/runtime/src/jobs.ts` (cancel), `apps/runtime/src/worktree.ts`, new cleanup module, `apps/cli/src/commands/job.ts`, B7 scenarios, ADR-0027; in `inbox.ts` only the one dispatch line for `cleanup` items; no schema change, no dashboard code (the Inbox renders options generically; a dashboard scenario is fine)
 
 ## Human decisions (outside CLAUDE.md §7)
 
