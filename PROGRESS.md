@@ -73,7 +73,6 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 Phase B (#33) on integration branch `phase-b/integration`, one worktree per ticket. Shared contracts: `packages/db/**` (schema + migrations) has exactly one owner at a time; other tickets wait for it.
 
-- #49 (live activity) → new `apps/runtime/src/activity.ts`, new `apps/cli/src/commands/activity.ts`, `apps/dashboard/**` (dashboard owner this round), ADR-0018; only additive route/command registration lines in `apps/runtime/src/app.ts` and `apps/cli/src/main.ts` (owned by #35)
 - #38 (Plan Edit, request changes) → `packages/db/**` (sole schema owner this round), `apps/runtime/src/{plan-approval,inbox,proposals}.ts`, new plan-edit module, `apps/cli/src/commands/plan.ts` + `inbox.ts`, `packages/domain/src/{approvals,plan-view}.ts`, ADR-0019
 - #39 (parallel DAG) → `apps/runtime/src/{scheduler,dispatch,execution,worktree}.ts`, Job creation in `apps/runtime/src/jobs.ts`, `packages/home/**` (`concurrency.global`), `packages/git/**`, new Dependency Base and capacity modules in runtime and domain, ADR-0020 + ADR-0021; no schema change
 - Effective Configuration in `packages/domain/src/index.ts`: `maxReplans` and `concurrency.perRepository/perJob` already added on the integration branch (b89e58f); #39 adds only the Job-level override
