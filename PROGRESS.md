@@ -86,6 +86,9 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 Phase B (#33) on integration branch `phase-b/integration`, one worktree per ticket. Shared contracts: `packages/db/**` (schema + migrations) has exactly one owner at a time; other tickets wait for it.
 
+- #42 (questions) → `packages/db/**` (sole schema owner this round), `apps/runtime/src/{execution,inbox,task-packet}.ts`, `packages/domain/src/execution.ts` + question protocol, `packages/harness/**`, `apps/cli/src/commands/inbox.ts`, `apps/dashboard/**` (answer form), ADR-0023
+- #41 (lease sweeper) → new `apps/runtime/src/sweeper.ts`, `apps/runtime/src/{recovery,claim}.ts`, `apps/runtime/src/main.ts` (test knobs); in `execution.ts` only the one call from the heartbeat tick (`renewLeases`); ADR-0024; no schema change
+- #40 (claim race) → new `tests/integration/**`, a new vitest config/script, `package.json` scripts, CLAUDE.md §6, ADR-0025; runtime read-only (use the exported `claimNextTask`)
 
 ## Human decisions (outside CLAUDE.md §7)
 
