@@ -88,6 +88,8 @@ export const jobs = sqliteTable(
     createdBy: text('created_by').notNull(),
     createdAt: text('created_at').notNull(),
     version: integer('version').notNull(),
+    /** Replans used, against `maxReplans` (ARCHITECTURE §4.7). A Plan Edit is not one (ADR-0019). */
+    replansUsed: integer('replans_used').notNull().default(0),
   },
   (t) => [index('jobs_project').on(t.projectId), index('jobs_status').on(t.status)],
 );
@@ -204,7 +206,12 @@ export const tasks = sqliteTable(
     blockerJson: text('blocker_json'),
     version: integer('version').notNull(),
   },
-  (t) => [uniqueIndex('tasks_job_key').on(t.jobId, t.key), index('tasks_state').on(t.state)],
+  // A key is unique within its Plan: a replaced Plan's Task may share a key with the new one (ADR-0019).
+  (t) => [
+    uniqueIndex('tasks_plan_key').on(t.planArtifactId, t.key),
+    index('tasks_job').on(t.jobId),
+    index('tasks_state').on(t.state),
+  ],
 );
 
 export const taskDependencies = sqliteTable(
