@@ -1,8 +1,8 @@
 /**
  * The Task scheduler, Phase A: one concurrency slot. It runs the `execution`
  * Stage (claim a ready Task, give it a Worktree, run the developer Harness,
- * verify the result itself) and the `closure` Stage (the Delivery Report, then
- * Worktree removal). ARCHITECTURE §7, §10, §12.
+ * verify the result itself, then hand it to the review flow in `review.ts`)
+ * and the `closure` Stage (`closure.ts`). ARCHITECTURE §7, §10, §12.
  *
  * After a Harness Run the factory trusts nothing it said: the head commit and
  * the commits come from git, leftovers become a flagged WIP commit, and every
@@ -22,24 +22,14 @@ import {
   attemptsCountedForRework,
   HarnessExitSchema,
   UsageSchema,
-  VerificationLogContentSchema,
   type HarnessExit,
   routeFailedAttempt,
   type AttemptCause,
   type AttemptFinding,
   type Blocker,
-  decideApproval,
-  evidenceSource,
-  type GateRef,
   type HarnessLogContent,
   type VerificationLogContent,
-  EvidenceVerdictSchema,
-  isBlocking,
-  isCurrent,
   verificationProblems,
-  type ApprovalInput,
-  type ReviewPacket,
-  type ReviewProposal,
   RESULT_FILE,
   RuleIssueSchema,
   schemaIssues,
@@ -48,8 +38,6 @@ import {
   TaskDefinitionSchema,
   TaskPacketSchema,
   TaskResultSchema,
-  type AttemptExitReason,
-  type AttemptState,
   type RuleIssue,
   type TaskDefinition,
   type TaskPacket,
@@ -65,7 +53,6 @@ import {
   commitAll,
   commitsBetween,
   fetchRemote,
-  removeWorktree,
   resolveCommit,
   uncommittedPaths,
   updateRef,
@@ -85,7 +72,13 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore, StoredContent } from './artifacts.js';
 import { criteriaCoveredBy } from './criteria.js';
-import { buildDeliveryReport } from './delivery.js';
+import {
+  failClosure,
+  nextClosure,
+  runClosure,
+  runningClosures,
+  type CrashPoint,
+} from './closure.js';
 import { attemptFindings, gateFinding, scopeFinding } from './findings.js';
 import {
   changeJob,
@@ -97,14 +90,7 @@ import {
 } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
-import {
-  buildReviewPacket,
-  evaluateReview,
-  renderReviewPrompt,
-  REVIEW_TEMPLATE_HASH,
-  REVIEW_TEMPLATE_ID,
-  type ReviewEvaluation,
-} from './review.js';
+import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
   allocatePortBlock,
@@ -125,8 +111,6 @@ const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_REVIEW_WALL_CLOCK_MS = 10 * 60_000;
 /** Developer Harness Runs per Attempt: the first, plus one re-prompt for an invalid Task Result. */
 const DEVELOPER_RUNS = 2;
-/** Reviewer Harness Runs per review: the first, plus one re-prompt. */
-const REVIEW_RUNS = 2;
 /** How often the runtime renews the leases it holds (ARCHITECTURE §12 step 4). */
 /** The security tier every Harness Run runs under in Phase A: Tier 0, the local guardrail. */
 const TIER: SecurityTier = 'local';
@@ -169,9 +153,7 @@ export interface TaskSchedulerOptions {
   crashAt?: CrashPoint;
 }
 
-/** Where the test-only fault injection (`FACTORY_TEST_CRASH_AT`) can kill the runtime. */
-export const CRASH_POINTS = ['closure.after_report'] as const;
-export type CrashPoint = (typeof CRASH_POINTS)[number];
+export { CRASH_POINTS, type CrashPoint } from './closure.js';
 
 /** An Attempt (or a closure) a previous runtime left in progress, to carry on with. */
 export type Resumption =
@@ -264,16 +246,7 @@ export function parseProcess(json: string): AttemptProcess {
   return AttemptProcessSchema.parse(JSON.parse(json));
 }
 
-/** A verification run as recorded, without its stored content. */
-type RecordedRun = Omit<VerificationRunRecord, 'content'>;
-
-interface Outcome {
-  state: Extract<AttemptState, 'passed' | 'failed'>;
-  exitReason: AttemptExitReason;
-  detail: string;
-  /** What the factory's Gates found (the review's Findings are recorded with the review). */
-  findings?: AttemptFinding[];
-}
+type Outcome = AttemptOutcome;
 
 /** Where a pinned ref keeps each Attempt's head, so later Attempts can't lose its commits. */
 export function attemptRef(attemptId: string): string {
@@ -310,11 +283,7 @@ export class TaskScheduler {
   start(): void {
     if (this.opts.harness === undefined) return;
     // A closure left running resumes too (it never writes its report twice).
-    for (const run of this.opts.db
-      .select({ id: schema.stageRuns.id, jobId: schema.stageRuns.jobId })
-      .from(schema.stageRuns)
-      .where(and(eq(schema.stageRuns.stageId, 'closure'), eq(schema.stageRuns.state, 'running')))
-      .all()) {
+    for (const run of runningClosures(this.opts.db)) {
       this.resumptions.push({ kind: 'closure', stageRunId: run.id, jobId: run.jobId });
     }
     this.renewLeases();
@@ -395,7 +364,7 @@ export class TaskScheduler {
       if (jobId === undefined) return true;
       if (resumption.kind === 'closure') {
         await this.hold(jobId, () =>
-          this.guard(jobId, () => this.runClosure(resumption.stageRunId, jobId, 'running'), {
+          this.guard(jobId, () => runClosure(this.opts, resumption.stageRunId, jobId, 'running'), {
             closureId: resumption.stageRunId,
           }),
         );
@@ -409,12 +378,16 @@ export class TaskScheduler {
       );
       return true;
     }
-    const closure = this.nextClosure();
+    const closure = nextClosure(this.opts.db);
     if (closure !== undefined) {
       await this.hold(closure.jobId, () =>
-        this.guard(closure.jobId, () => this.runClosure(closure.id, closure.jobId, 'queued'), {
-          closureId: closure.id,
-        }),
+        this.guard(
+          closure.jobId,
+          () => runClosure(this.opts, closure.id, closure.jobId, 'queued'),
+          {
+            closureId: closure.id,
+          },
+        ),
       );
       return true;
     }
@@ -442,7 +415,8 @@ export class TaskScheduler {
       if (this.closed) return;
       try {
         if (subject.taskId !== undefined) this.failTask(jobId, subject.taskId, message);
-        if (subject.closureId !== undefined) this.failClosure(jobId, subject.closureId, message);
+        if (subject.closureId !== undefined)
+          failClosure(this.opts, jobId, subject.closureId, message);
       } catch (failErr) {
         this.opts.log(`task scheduler: could not record the failure: ${String(failErr)}`);
       }
@@ -1015,49 +989,61 @@ export class TaskScheduler {
     };
     const usage =
       attempt.usageJson === null ? null : UsageSchema.parse(JSON.parse(attempt.usageJson));
-    const at = { headSha: facts.headSha, baseSha: ctx.baseSha };
-    const reviewed = await this.review(ctx, at, this.recordedRuns(ctx), from);
-    if (reviewed === undefined) return; // stopped during the review
-    this.finishReview({
-      jobId: ctx.job.id,
-      taskId: ctx.task.id,
-      attemptId: ctx.attemptId,
-      worktreeId: ctx.worktreeId,
-      inspection: facts,
-      usage,
-      reviewed,
-      current: {
-        headSha: (await resolveCommit(ctx.path, 'HEAD')) ?? '(none)',
-        baseSha: ctx.baseSha,
+    const reviewed = await runReview(
+      this.opts,
+      {
+        subject: {
+          jobId: ctx.job.id,
+          taskId: ctx.task.id,
+          taskKey: ctx.task.key,
+          attemptId: ctx.attemptId,
+        },
+        worktree: ctx.path,
+        definition: ctx.definition,
+        at: { headSha: facts.headSha, baseSha: ctx.baseSha },
+        runs: recordedRuns(this.opts, ctx.attemptId, ctx.definition),
+        harnessId: ctx.harness.id,
+        wallClockMs: this.reviewWallClockMs,
+        firstRun: from?.run ?? 1,
       },
-      reviewerChanges: await worktreeProblems(ctx.path, facts.headSha, 'reviewer'),
-    });
-  }
-
-  /** The Attempt's recorded verification runs, with their output, as the review is sent them. */
-  private recordedRuns(ctx: AttemptContext): RecordedRun[] {
-    return this.opts.db
-      .select()
-      .from(schema.verificationRuns)
-      .where(eq(schema.verificationRuns.attemptId, ctx.attemptId))
-      .orderBy(asc(sql`rowid`))
-      .all()
-      .map((r) => {
-        const log = VerificationLogContentSchema.parse(
-          this.opts.artifacts.readJson(r.outputArtifactId),
-        );
-        return {
-          key: r.commandKey,
-          command: r.command,
-          required: r.required,
-          criteria: ctx.definition.verification.find((v) => v.key === r.commandKey)?.criteria ?? [],
-          exitCode: r.exitCode,
-          timedOut: r.timedOut,
-          startedAt: r.startedAt,
-          durationMs: r.durationMs,
-          output: log.output,
-        };
-      });
+      {
+        run: (input, evaluate) =>
+          input.run === from?.run
+            ? this.finishRun(ctx, input, from.reattached, evaluate)
+            : this.harnessRun(ctx, input, evaluate),
+        stopped: () => this.stopped(ctx),
+      },
+    );
+    if (reviewed === undefined) return; // stopped during the review
+    finishReview(
+      this.opts,
+      {
+        jobId: ctx.job.id,
+        taskId: ctx.task.id,
+        attemptId: ctx.attemptId,
+        reviewedHead: facts.headSha,
+        reviewed,
+        current: {
+          headSha: (await resolveCommit(ctx.path, 'HEAD')) ?? '(none)',
+          baseSha: ctx.baseSha,
+        },
+        reviewerChanges: await worktreeProblems(ctx.path, facts.headSha, 'reviewer'),
+      },
+      (tx, state, step, outcome) => {
+        endAttempt(tx, state, step, {
+          jobId: ctx.job.id,
+          taskId: ctx.task.id,
+          attemptId: ctx.attemptId,
+          worktreeId: ctx.worktreeId,
+          baseSha: ctx.baseSha,
+          inspection: facts,
+          outcome,
+          usage,
+          from: 'in_review',
+        });
+      },
+    );
+    this.dropSpools(ctx.attemptId);
   }
 
   private packet(input: {
@@ -1491,80 +1477,6 @@ export class TaskScheduler {
   }
 
   /**
-   * The independent review: a reviewer Harness Run in a new Session, in the
-   * Worktree at the reviewed head, given the Review Packet only. Its output
-   * is checked like any proposal; one re-prompt (again a new Session) carries
-   * the problems. `undefined` when the work stopped.
-   */
-  private async review(
-    ctx: AttemptContext,
-    at: GateRef,
-    runs: readonly RecordedRun[],
-    from?: { run: number; reattached: HarnessRun | undefined },
-  ): Promise<Reviewed | undefined> {
-    const { db } = this.opts;
-    const { job, task, definition, attemptId, harness } = ctx;
-    const spec = this.opts.artifacts
-      .listForJob(job.id)
-      .find((a) => a.kind === 'spec' && a.stageRunId !== null);
-    if (spec === undefined) throw new Error(`Job ${job.id} has no Specification to review against`);
-    const criteria = criteriaCoveredBy(db, job.id, definition.acceptance);
-    const packet = await buildReviewPacket({
-      subject: { jobId: job.id, taskId: task.id, taskKey: task.key, attemptId, ...at },
-      repo: ctx.path,
-      specification: SpecificationProposalSchema.parse(this.opts.artifacts.readJson(spec.id)),
-      criteria,
-      runs,
-      commandVerdicts: criteria.map((c) => ({
-        code: c.code,
-        ...criterionVerdict(runs.filter((r) => r.criteria.includes(c.code))),
-      })),
-    });
-    let rejected: RuleIssue[] | undefined;
-    for (let n = from?.run ?? 1; n <= REVIEW_RUNS; n++) {
-      let evaluation: ReviewEvaluation | undefined;
-      const evaluate = (r: HarnessRawResult) => {
-        evaluation = evaluateReview(r, packet);
-        return evaluation.kind === 'invalid'
-          ? { outcome: 'invalid', issues: evaluation.issues }
-          : { outcome: evaluation.kind };
-      };
-      const input: RunInput = {
-        role: 'reviewer',
-        template: { id: REVIEW_TEMPLATE_ID, hash: REVIEW_TEMPLATE_HASH },
-        run: n,
-        prompt: renderReviewPrompt(packet, rejected),
-        wallClockMs: this.reviewWallClockMs,
-        ...(rejected === undefined ? {} : { reprompt: rejected }),
-      };
-      const { result, sessionRef } =
-        n === from?.run
-          ? await this.finishRun(ctx, input, from.reattached, evaluate)
-          : await this.harnessRun(ctx, input, evaluate);
-      if (await this.stopped(ctx)) return undefined;
-      evaluation ??= evaluateReview(result, packet);
-      if (evaluation.kind === 'valid') {
-        return {
-          kind: 'valid',
-          packet,
-          value: evaluation.value,
-          sessionRef: sessionRef ?? null,
-          harnessId: harness.id,
-        };
-      }
-      if (evaluation.kind === 'harness_failed') {
-        return { kind: 'failed', exitReason: 'review_failed', detail: evaluation.message };
-      }
-      rejected = evaluation.issues;
-    }
-    return {
-      kind: 'failed',
-      exitReason: 'invalid_output',
-      detail: `the review was invalid after ${String(REVIEW_RUNS - 1)} re-prompt: ${(rejected ?? []).map((i) => `[${i.rule}] ${i.message}`).join('; ')}`,
-    };
-  }
-
-  /**
    * Records a cancelled Job's Attempt as `cancelled` (#12), in one
    * transaction: the Attempt, its Task, the Worktree (`preserved`, never
    * removed) and the leases. Its process is already gone.
@@ -1636,164 +1548,6 @@ export class TaskScheduler {
       }
     }
     await this.recordCancelled(attemptId);
-  }
-
-  /**
-   * Records a valid review (its Artifact, its row, its Findings and its
-   * criterion verdicts as Evidence), then decides approval with the full rule
-   * against the Task Branch head as git reads it now, and ends the Attempt. One
-   * transaction. No review is stored without a valid proposal: the Attempt fails
-   * `invalid_output` (still invalid after the re-prompt) or `review_failed` (the
-   * reviewer Run crashed, timed out or did not start).
-   */
-  private finishReview(input: {
-    jobId: string;
-    taskId: string;
-    attemptId: string;
-    worktreeId: string;
-    inspection: GitFacts;
-    usage: Usage | null;
-    reviewed: Reviewed;
-    current: GateRef;
-    reviewerChanges: string[];
-  }): void {
-    const { jobId, taskId, attemptId, reviewed } = input;
-    const reviewedHead = input.inspection.headSha;
-    const base = input.current.baseSha;
-    const content =
-      reviewed.kind === 'valid' ? this.opts.artifacts.writeContent(reviewed.value) : undefined;
-    changeJob(
-      this.opts.db,
-      { jobId, expectedVersion: 'current', actor: ACTOR },
-      (tx, state, step) => {
-        const task = requireTask(tx, taskId, 'in_review');
-        const definition = TaskDefinitionSchema.parse(JSON.parse(task.definitionJson));
-        let review: ApprovalInput['review'] = null;
-        if (reviewed.kind === 'valid' && content !== undefined) {
-          const { value } = reviewed;
-          const artifact = this.opts.artifacts.record(
-            tx,
-            { jobId, taskId, attemptId, kind: 'review', content },
-            ACTOR,
-          );
-          const reviewId = newId('rev');
-          tx.insert(schema.reviews)
-            .values({
-              id: reviewId,
-              jobId,
-              taskId,
-              attemptId,
-              reviewerHarnessId: reviewed.harnessId,
-              reviewerHarnessVersion: this.opts.harnessVersion,
-              sessionRef: reviewed.sessionRef,
-              promptTemplateId: REVIEW_TEMPLATE_ID,
-              promptTemplateHash: REVIEW_TEMPLATE_HASH,
-              packetJson: JSON.stringify(reviewed.packet),
-              headSha: reviewedHead,
-              baseSha: base,
-              outcome: value.outcome,
-              summary: value.summary,
-              artifactId: artifact.id,
-              createdAt: new Date().toISOString(),
-            })
-            .run();
-          value.findings.forEach((f, position) => {
-            tx.insert(schema.reviewFindings)
-              .values({ id: newId('fnd'), reviewId, position, ...f, blocking: isBlocking(f) })
-              .run();
-          });
-          for (const criterion of criteriaCoveredBy(tx, jobId, definition.acceptance)) {
-            const verdict = value.criteria.find((c) => c.code === criterion.code);
-            tx.insert(schema.evidence)
-              .values({
-                id: newId('evd'),
-                attemptId,
-                kind: 'criterion',
-                criterionId: criterion.id,
-                reviewId,
-                verdict: verdict?.verdict ?? 'not_tested',
-                detail: verdict?.detail ?? 'the review gave no verdict',
-                headSha: reviewedHead,
-                baseSha: base,
-                artifactId: artifact.id,
-              })
-              .run();
-          }
-          appendEvent(tx, {
-            entityKind: 'review',
-            entityId: reviewId,
-            jobId,
-            type: 'review.recorded',
-            actor: ACTOR,
-            payload: {
-              taskId,
-              attemptId,
-              outcome: value.outcome,
-              headSha: reviewedHead,
-              baseSha: base,
-              findings: value.findings.length,
-              blocking: value.findings.filter(isBlocking).length,
-            },
-          });
-          review = {
-            outcome: value.outcome,
-            blockingFindings: value.findings.filter(isBlocking).length,
-            headSha: reviewedHead,
-            baseSha: base,
-          };
-        }
-        let outcome: Outcome;
-        if (reviewed.kind === 'failed') {
-          outcome = { state: 'failed', exitReason: reviewed.exitReason, detail: reviewed.detail };
-        } else {
-          const decision = decideApproval(
-            approvalInput(tx, {
-              jobId,
-              attemptId,
-              definition,
-              current: input.current,
-              review,
-            }),
-          );
-          const problems = [...decision.problems, ...input.reviewerChanges];
-          const changesRequested =
-            review?.outcome === 'changes_requested' && isCurrent(review, input.current);
-          const self = { id: attemptId, n: requireAttempt(tx, attemptId).n };
-          outcome =
-            problems.length === 0
-              ? {
-                  state: 'passed',
-                  exitReason: 'completed',
-                  detail: 'every Gate passed and the review approved',
-                }
-              : {
-                  state: 'failed',
-                  exitReason: changesRequested ? 'changes_requested' : 'gates_failed',
-                  detail: problems.join('; '),
-                  // A review that requested changes brings its own Findings; the rest are the Gates'.
-                  findings: [
-                    ...(changesRequested
-                      ? []
-                      : decision.problems.map((p) => gateFinding(self, 'approval', p))),
-                    ...input.reviewerChanges.map((p) => gateFinding(self, 'worktree.clean', p)),
-                  ],
-                };
-        }
-        endAttempt(tx, state, step, {
-          jobId,
-          taskId,
-          attemptId,
-          worktreeId: input.worktreeId,
-          baseSha: base,
-          inspection: input.inspection,
-          outcome,
-          usage: input.usage,
-          from: 'in_review',
-        });
-      },
-    );
-    this.opts.onCommit();
-    this.dropSpools(attemptId);
   }
 
   /** Records the Task Result claim, the verification runs, their logs and their Evidence. */
@@ -1937,107 +1691,6 @@ export class TaskScheduler {
     if (ended !== undefined) this.dropSpools(ended);
   }
 
-  // ---- closure ---------------------------------------------------------------------
-
-  private nextClosure(): { id: string; jobId: string } | undefined {
-    return this.opts.db
-      .select({ id: schema.stageRuns.id, jobId: schema.stageRuns.jobId })
-      .from(schema.stageRuns)
-      .innerJoin(schema.jobs, eq(schema.jobs.id, schema.stageRuns.jobId))
-      .where(and(eq(schema.stageRuns.stageId, 'closure'), eq(schema.stageRuns.state, 'queued')))
-      .orderBy(asc(schema.jobs.createdAt))
-      .limit(1)
-      .get();
-  }
-
-  /**
-   * Writes the Delivery Report, then removes the Job's Worktrees (their
-   * branches stay in the Factory Clone), then completes `closure`. A Worktree
-   * that git refuses to remove stays `preserved`.
-   */
-  private async runClosure(
-    stageRunId: string,
-    jobId: string,
-    from: 'queued' | 'running',
-  ): Promise<void> {
-    const { db } = this.opts;
-    if (from === 'queued') {
-      changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (_, state, step) => {
-        step(requireStageRun(state, stageRunId, 'queued'), 'running');
-      });
-      this.opts.onCommit();
-    }
-
-    // A closure that stopped after recording its report resumes from that report:
-    // it is never written twice.
-    const existing = this.opts.artifacts.listForJob(jobId).find((a) => a.kind === 'report');
-    if (existing === undefined) {
-      const content = this.opts.artifacts.writeContent(await buildDeliveryReport(db, jobId));
-      db.transaction(
-        (tx) => {
-          this.opts.artifacts.record(tx, { jobId, kind: 'report', content }, ACTOR);
-        },
-        { behavior: 'immediate' },
-      );
-      this.opts.onCommit();
-      if (this.opts.crashAt === 'closure.after_report') process.kill(process.pid, 'SIGKILL');
-    }
-
-    // Removal only after delivery: the branches hold the work, the report says where.
-    const preserved = db
-      .select()
-      .from(schema.worktrees)
-      .where(and(eq(schema.worktrees.jobId, jobId), eq(schema.worktrees.state, 'preserved')))
-      .all();
-    for (const worktree of preserved) {
-      const repo = db
-        .select()
-        .from(schema.repositories)
-        .where(eq(schema.repositories.id, worktree.repositoryId))
-        .get();
-      try {
-        if (repo === undefined) throw new Error('no Repository');
-        await removeWorktree(repo.clonePath, worktree.path);
-      } catch (err) {
-        this.event(jobId, 'worktree', worktree.id, 'worktree.remove_failed', {
-          path: worktree.path,
-          message: err instanceof Error ? err.message : String(err),
-        });
-        continue;
-      }
-      changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx) => {
-        stepWorktree(
-          tx,
-          { jobId, actor: ACTOR },
-          requireWorktree(tx, worktree.id),
-          'preserved',
-          'removed',
-        );
-      });
-      this.opts.onCommit();
-    }
-
-    changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (_, state, step) => {
-      step(requireStageRun(state, stageRunId, 'running'), 'succeeded');
-    });
-    this.opts.onCommit();
-  }
-
-  private failClosure(jobId: string, stageRunId: string, message: string): void {
-    changeJob(
-      this.opts.db,
-      { jobId, expectedVersion: 'current', actor: ACTOR },
-      (_, state, step) => {
-        const run = state.stageRuns.find((r) => r.id === stageRunId);
-        if (run?.state !== 'running') return;
-        step(run, 'failed', {
-          failure: { reason: 'factory_error', message: `closure failed: ${message}`, issues: [] },
-        });
-      },
-    );
-    this.opts.onCommit();
-  }
-
   private event(
     jobId: string,
     entityKind: string,
@@ -2158,17 +1811,6 @@ function exitedCleanly(
   return result !== undefined && result.exit.kind === 'exited' && result.exit.code === 0;
 }
 
-/** The reviewer's proposal and what it was given, or why there is none. */
-type Reviewed =
-  | {
-      kind: 'valid';
-      packet: ReviewPacket;
-      value: ReviewProposal;
-      sessionRef: string | null;
-      harnessId: string;
-    }
-  | { kind: 'failed'; exitReason: 'review_failed' | 'invalid_output'; detail: string };
-
 function usageOf(result: HarnessRawResult | undefined): Usage {
   return result === undefined
     ? { tag: 'unknown', inputTokens: null, outputTokens: null, costUsd: null, durationMs: 0 }
@@ -2227,54 +1869,6 @@ function commandCriteriaFailures(
       (c) => criterionVerdict(runs.filter((r) => r.criteria.includes(c.code))).verdict === 'fail',
     )
     .map((c) => `mandatory ${c.code} has Evidence fail from its verifying commands`);
-}
-
-/** The approval rule's input, read from what is recorded for the Attempt. */
-function approvalInput(
-  tx: Tx,
-  input: {
-    jobId: string;
-    attemptId: string;
-    definition: TaskDefinition;
-    current: GateRef;
-    review: ApprovalInput['review'];
-  },
-): ApprovalInput {
-  const { jobId, attemptId, definition, current, review } = input;
-  const runs = tx
-    .select()
-    .from(schema.verificationRuns)
-    .where(eq(schema.verificationRuns.attemptId, attemptId))
-    .all();
-  const evidence = tx
-    .select()
-    .from(schema.evidence)
-    .where(and(eq(schema.evidence.attemptId, attemptId), eq(schema.evidence.kind, 'criterion')))
-    .all();
-  return {
-    current,
-    verification: runs.map((r) => ({
-      key: r.commandKey,
-      required: r.required,
-      exitCode: r.exitCode,
-      timedOut: r.timedOut,
-      headSha: r.headSha,
-      baseSha: r.baseSha,
-    })),
-    criteria: criteriaCoveredBy(tx, jobId, definition.acceptance).map((c) => ({
-      code: c.code,
-      mandatory: c.mandatory,
-      evidence: evidence
-        .filter((e) => e.criterionId === c.id)
-        .map((e) => ({
-          source: evidenceSource(e),
-          verdict: EvidenceVerdictSchema.parse(e.verdict),
-          headSha: e.headSha,
-          baseSha: e.baseSha,
-        })),
-    })),
-    review,
-  };
 }
 
 /**
@@ -2399,13 +1993,6 @@ function requireAttempt(db: FactoryDb | Tx, id: string) {
   const attempt = db.select().from(schema.attempts).where(eq(schema.attempts.id, id)).get();
   if (attempt === undefined) throw new Error(`no Attempt ${id}`);
   return attempt;
-}
-
-function requireStageRun(state: JobState, id: string, expected: string) {
-  const run = state.stageRuns.find((r) => r.id === id);
-  if (run?.state !== expected)
-    throw new Error(`Stage Run ${id} is ${String(run?.state)}, not ${expected}`);
-  return run;
 }
 
 /** Task states in which the Task is still being worked on, or is about to be. */
