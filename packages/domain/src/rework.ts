@@ -181,7 +181,8 @@ export function routeFailedAttempt(input: {
         kind: 'human',
         reason: 'rework_cap_reached',
         detail: `Attempt ${String(input.n)} of at most ${String(input.maxAttempts)} failed, so no further Rework starts`,
-        requiredAction: 'look at the Attempts and decide how the Task goes on',
+        requiredAction:
+          'look at the Attempts, then decide the Blocker Approval in the Inbox: grant more Attempts (with guidance) or cancel the Job',
       },
     };
   }

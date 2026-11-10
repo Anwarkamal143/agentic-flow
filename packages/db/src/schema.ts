@@ -479,3 +479,30 @@ export const approvals = sqliteTable(
   },
   (t) => [index('approvals_job').on(t.jobId), index('approvals_state').on(t.state)],
 );
+
+/**
+ * The audit log (ARCHITECTURE §5): a human's change to what the factory may
+ * do, such as a cap raised by an Inbox grant (ADR-0026). Append-only, never
+ * deleted. `job_id` (beside §5's columns) lets a Job's audit be read.
+ */
+export const auditLog = sqliteTable(
+  'audit_log',
+  {
+    id: text('id').primaryKey(),
+    ts: text('ts').notNull(),
+    /** Who decided it: `user:<name>`. */
+    actor: text('actor').notNull(),
+    /** What changed, such as `cap.raised`. */
+    action: text('action').notNull(),
+    /** What it changed: `task:<id>`. */
+    target: text('target').notNull(),
+    jobId: text('job_id').references(() => jobs.id),
+    beforeJson: text('before_json').notNull(),
+    afterJson: text('after_json').notNull(),
+    /** The rule or decision that allowed it: `inbox:<approval id>/<option>`. */
+    policyRef: text('policy_ref'),
+    /** Ties it to the decision that made it (the Inbox Item's id). */
+    correlationId: text('correlation_id'),
+  },
+  (t) => [index('audit_log_job').on(t.jobId), index('audit_log_target').on(t.target)],
+);

@@ -30,6 +30,8 @@ export const InboxDecisionSchema = z.object({
   comment: z.string().nullable(),
   /** A `question` item's answers, one per answered question (ADR-0023). */
   answers: z.array(QuestionAnswerSchema).optional(),
+  /** A Blocker Approval's grant size, when its `grant` option was chosen (ADR-0026). */
+  grant: z.number().int().positive().optional(),
 });
 export type InboxDecision = z.infer<typeof InboxDecisionSchema>;
 
@@ -75,6 +77,8 @@ export const DecideInputSchema = z.object({
   subjectRef: z.string().min(1),
   option: z.string().min(1),
   comment: z.string().trim().max(5000).optional(),
+  /** A Blocker Approval's `grant` size: +1 (default) to +5 (ADR-0026). */
+  grant: z.number().optional(),
 });
 export type DecideInput = z.infer<typeof DecideInputSchema>;
 
