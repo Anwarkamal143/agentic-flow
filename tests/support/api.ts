@@ -36,25 +36,52 @@ export interface EventBody {
   payload: Record<string, unknown>;
 }
 
-export const PHASE_A_FEATURE_STAGES = [
+/** The Stages of the `feature` Recipe built so far (version 2, with `plan_approval`). */
+export const FEATURE_STAGES = [
   'intake',
   'triage',
   'discovery',
   'specification',
   'planning',
+  'plan_approval',
   'execution',
   'closure',
 ];
 
+/**
+ * The Project config the Phase A scenarios run under: `planApproval: skip`, so
+ * a Plan goes straight to execution as it did before `plan_approval` existed.
+ * The config endpoint replaces the whole config, so pass the rest in `extra`.
+ */
+export function phaseAConfig(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { planApproval: 'skip', ...extra };
+}
+
+/**
+ * Registers the `tiny-ts` fixture. Its Project skips plan approval (the Phase A
+ * scenarios), unless `planApproval: 'required'` is asked for.
+ */
 export async function registeredRepo(
   rt: RunningRuntime,
+  opts: { planApproval?: 'required' | 'skip' } = {},
 ): Promise<{ id: string; projectId: string }> {
   const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
   const [repo] = (await (await rt.request('/v1/repositories')).json()) as [
     { id: string; projectId: string },
   ];
+  if ((opts.planApproval ?? 'skip') === 'skip') await skipPlanApproval(rt, repo.projectId);
   return repo;
+}
+
+/** Sets the Project's config to {@link phaseAConfig}. Call before creating the Job. */
+export async function skipPlanApproval(
+  rt: RunningRuntime,
+  projectId: string,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  const res = await post(rt, `/v1/projects/${projectId}/config`, phaseAConfig(extra));
+  if (!res.ok) throw new Error(`setting the Project config failed: ${String(res.status)}`);
 }
 
 /**
@@ -67,8 +94,7 @@ export async function capAttempts(
   projectId: string,
   maxAttempts: number,
 ): Promise<void> {
-  const res = await post(rt, `/v1/projects/${projectId}/config`, { maxAttempts });
-  if (!res.ok) throw new Error(`setting maxAttempts failed: ${String(res.status)}`);
+  await skipPlanApproval(rt, projectId, { maxAttempts });
 }
 
 /** The Job's one Attempt; fails the test when there is not exactly one. */

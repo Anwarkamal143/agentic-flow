@@ -43,6 +43,7 @@ import type { ArtifactStore } from './artifacts.js';
 import { changeJob, readJobState, type JobState } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
+import { queueNextStage } from './plan-approval.js';
 import {
   PROMPT_TEMPLATE_HASH,
   PROMPT_TEMPLATE_ID,
@@ -413,10 +414,7 @@ export class StageScheduler {
           config: state.job.configSnapshotJson,
         });
         step(current, 'succeeded');
-        const next = state.stageRuns.find(
-          (r) => r.position > current.position && r.state === 'pending',
-        );
-        if (next !== undefined) step(next, 'queued');
+        queueNextStage(tx, run.jobId, step, current.position, ACTOR);
       },
     );
     this.opts.onCommit();

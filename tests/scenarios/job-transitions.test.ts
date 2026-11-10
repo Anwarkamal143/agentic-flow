@@ -65,16 +65,21 @@ describe('Job transitions', () => {
     expect(cancelled.version).toBeGreaterThan(job.version);
     expect(cancelled.stageRuns.map((s) => [s.stageId, s.state])).toEqual([
       ['intake', 'succeeded'],
-      ...['triage', 'discovery', 'specification', 'planning', 'execution', 'closure'].map((id) => [
-        id,
-        'cancelled',
-      ]),
+      ...[
+        'triage',
+        'discovery',
+        'specification',
+        'planning',
+        'plan_approval',
+        'execution',
+        'closure',
+      ].map((id) => [id, 'cancelled']),
     ]);
 
     const events = await json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events`));
     const added = events.slice(eventsBefore.length);
     expect(added.map((e) => e.type)).toEqual([
-      ...Array<string>(6).fill('stage_run.cancelled'),
+      ...Array<string>(7).fill('stage_run.cancelled'),
       'job.cancelled',
       'job.status_changed',
     ]);
