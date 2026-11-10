@@ -8,6 +8,8 @@
  */
 import {
   AcceptanceCriterionSchema,
+  ActivitySchema,
+  AttemptTailSchema,
   AttemptSchema,
   FactoryEventSchema,
   JobSchema,
@@ -15,6 +17,8 @@ import {
   ReviewSchema,
   TaskSchema,
   type AcceptanceCriterion,
+  type Activity,
+  type AttemptTail,
   type Attempt,
   type FactoryEvent,
   type Job,
@@ -128,4 +132,14 @@ async function jobEvents(base: string): Promise<FactoryEvent[]> {
     if (page.length === 0) return all;
     all.push(...page);
   }
+}
+
+/** The running Attempts (ADR-0018). */
+export function activity(): Promise<Activity> {
+  return get('/v1/activity', ActivitySchema);
+}
+
+/** The redacted tail of the process an Attempt waits on (ADR-0018). */
+export function attemptTail(attemptId: string): Promise<AttemptTail> {
+  return get(`/v1/attempts/${encodeURIComponent(attemptId)}/tail`, AttemptTailSchema);
 }
