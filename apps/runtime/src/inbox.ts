@@ -6,10 +6,19 @@
  * a human actor decides.
  */
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
+import { rmSync } from 'node:fs';
 import {
   ApprovalOptionSchema,
   ApprovalSchema,
+  AttemptCauseSchema,
+  AuditEntrySchema,
+  attemptsCountedForRework,
   BlockerSchema,
+  checkBlockerDecision,
+  grantedCap,
+  KILL_AND_RETRY_OPTIONS,
+  retriesAfterRetryNow,
+  retryNowCheck,
   checkAnswers,
   checkInboxChange,
   InboxQuestionSchema,
@@ -17,6 +26,8 @@ import {
   EffectiveConfigSchema,
   humanDecisionPoints,
   InboxDecisionSchema,
+  JobStatusSchema,
+  TERMINAL_JOB_STATUSES,
   parallelWaves,
   planEstimate,
   PlanProposalSchema,
@@ -29,6 +40,10 @@ import {
   type AnswerQuestionInput,
   type AnswerRefusal,
   type Approval,
+  type AuditEntry,
+  type Blocker,
+  type CancelJobInput,
+  type RetryNowProcess,
   type Billing,
   type DecideInput,
   type DeferInput,
@@ -42,8 +57,20 @@ import {
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
-import { changeJob, stepTask, type StageRunStepper } from './engine.js';
+import { inspectSpool } from '@factory/harness';
+import { raiseCap, replaceBlocker } from './blocker-approvals.js';
+import {
+  changeJob,
+  stepTask,
+  stepWorktree,
+  type JobState,
+  type StageRunStepper,
+} from './engine.js';
 import { ApiFailure } from './errors.js';
+import { parseProcess } from './execution.js';
+import { openQuestionItem } from './questions.js';
+import { stopIfAlive, worktreeStatus } from './recovery.js';
+import { requireWorktree } from './worktree.js';
 import { latestArtifact, openPlanItem, queueNextStage, startReplan } from './plan-approval.js';
 import { cancelPlanTasks, persistPlanTasks, planContextOf, repositoriesOf } from './plans.js';
 
@@ -76,6 +103,9 @@ export class InboxService {
     private readonly onCommit: () => void,
     /** The configured Harness's billing, for the estimate; `null` when it has none. */
     private readonly billing: Billing | null,
+    /** The Job cancel operation (`JobService.cancel`), for a Blocker Approval's "cancel the Job". */
+    private readonly cancelJob: (jobId: string, input: CancelJobInput) => Promise<unknown> = () =>
+      Promise.reject(new Error('no cancel operation configured')),
   ) {}
 
   /** Open items not deferred, oldest first; `all` lists every item. */
@@ -97,9 +127,37 @@ export class InboxService {
     return this.toApproval(requireItem(this.db, id));
   }
 
+  /** The Job's audit log, oldest first (cap raises by Blocker Approvals, ADR-0026). */
+  audit(jobId: string): AuditEntry[] {
+    requireJob(this.db, jobId);
+    return this.db
+      .select()
+      .from(schema.auditLog)
+      .where(eq(schema.auditLog.jobId, jobId))
+      .orderBy(asc(schema.auditLog.ts), asc(sql`"audit_log"."rowid"`))
+      .all()
+      .map((r) =>
+        AuditEntrySchema.parse({
+          id: r.id,
+          ts: r.ts,
+          actor: r.actor,
+          action: r.action,
+          target: r.target,
+          before: JSON.parse(r.beforeJson) as unknown,
+          after: JSON.parse(r.afterJson) as unknown,
+          policyRef: r.policyRef,
+          correlationId: r.correlationId,
+        }),
+      );
+  }
+
   /** Decides an item, refused unless it names the open item's version and subject. */
-  decide(id: string, input: DecideInput, actor: string): Approval {
+  async decide(id: string, input: DecideInput, actor: string): Promise<Approval> {
     const item = requireItem(this.db, id);
+    if (item.kind === 'blocker') return this.decideBlocker(item, input, actor);
+    if (input.grant !== undefined) {
+      throw new ApiFailure(400, 'invalid_grant', `a ${item.kind} item takes no grant size`);
+    }
     changeJob(this.db, { jobId: item.jobId, expectedVersion: 'current', actor }, (tx, _s, step) => {
       const row = requireItem(tx, id);
       if (row.kind === 'question') {
@@ -218,6 +276,183 @@ export class InboxService {
     return this.get(id);
   }
 
+  /**
+   * Decides a Blocker Approval (ARCHITECTURE §8.1, ADR-0026). `grant` raises
+   * the Task's cap by +N (audited) and the Task goes on: Rework is readied, a
+   * capped Question is opened for its answer. `retry_now` / `kill_and_retry`
+   * re-check the recorded process (pid plus start time) before a Retry, and
+   * never start one beside a live process. `cancel_job` decides the item, then
+   * runs the Job cancel operation.
+   */
+  private async decideBlocker(
+    item: ApprovalRow,
+    input: DecideInput,
+    actor: string,
+  ): Promise<Approval> {
+    refuseUnless(item, { actor, ...input });
+    const check = checkBlockerDecision({ option: input.option, grant: input.grant });
+    if (!check.ok) throw new ApiFailure(400, check.code, check.message);
+    const { blocker } = blockedTaskOf(this.db, item);
+
+    if (input.option === 'cancel_job') {
+      this.decideOnly(item, input, actor, null, (tx) => {
+        const job = requireJob(tx, item.jobId);
+        if (TERMINAL_JOB_STATUSES.includes(JobStatusSchema.parse(job.status))) {
+          throw new ApiFailure(409, 'job_terminal', `Job ${job.id} is already ${job.status}`);
+        }
+      });
+      await this.cancelFromItem(item);
+      return this.get(item.id);
+    }
+
+    if (input.option === 'grant') {
+      const grant = check.grant ?? 1;
+      this.decideOnly(item, input, actor, grant, (tx, state, step) => {
+        applyGrant(tx, { item, grant, actor }, state, step);
+      });
+      return this.get(item.id);
+    }
+
+    // retry_now or kill_and_retry: the process is checked (and, if asked, stopped) first.
+    const attempt = this.db
+      .select()
+      .from(schema.attempts)
+      .where(eq(schema.attempts.id, blocker.attemptId))
+      .get();
+    if (attempt === undefined) throw new Error(`Blocker Approval ${item.id} names no Attempt`);
+    const recorded = attempt.processJson === null ? undefined : parseProcess(attempt.processJson);
+    let process: RetryNowProcess =
+      recorded === undefined ? 'unrecorded' : inspectSpool(recorded.spool).state;
+    if (recorded !== undefined && process === 'alive' && input.option === 'kill_and_retry') {
+      // Proven ours (pid plus start time), so its group is stopped; the stop settles only
+      // once the group is gone. Its spool may be cleaned up meanwhile, so what was seen
+      // alive and then stopped counts as dead unless it still shows alive.
+      await stopIfAlive(recorded.spool, recorded.startedAt);
+      process = inspectSpool(recorded.spool).state === 'alive' ? 'alive' : 'dead';
+    }
+    const verdict = retryNowCheck(process);
+    if (verdict === 'kill_first') {
+      if (input.option === 'kill_and_retry') {
+        throw new ApiFailure(
+          409,
+          'process_alive',
+          `the recorded process of Attempt ${attempt.id} is still alive after it was stopped; nothing was retried`,
+        );
+      }
+      const version = this.offerKillAndRetry(item, actor);
+      throw new ApiFailure(
+        409,
+        'process_alive',
+        `the recorded process of Attempt ${attempt.id} is still alive (pid and start time match), so no Retry starts beside it. The item now offers kill_and_retry (version ${String(version)})`,
+      );
+    }
+    if (verdict === 'unconfirmed') {
+      throw new ApiFailure(
+        409,
+        'process_unconfirmed',
+        `the recorded process of Attempt ${attempt.id} can't be checked (its spool has no readable pid), so it may still be running. No Retry starts until it is proven gone (it writes its exit status when it ends); cancelling the Job remains`,
+      );
+    }
+    const worktree = requireWorktree(this.db, attempt.worktreeId);
+    if (worktree.state === 'quarantined' && (await worktreeStatus(worktree.path)) === 'unknown') {
+      throw new ApiFailure(
+        409,
+        'worktree_unknown',
+        `the quarantined Worktree ${worktree.path} is still missing or unreadable by git, so a Retry can't run there; restore it, or cancel the Job`,
+      );
+    }
+    this.decideOnly(item, input, actor, null, (tx, state, step) => {
+      applyRetry(tx, { item, process, actor }, state, step);
+    });
+    // The process is gone: its spool (raw output) goes too.
+    if (recorded !== undefined) rmSync(recorded.spool, { recursive: true, force: true });
+    return this.get(item.id);
+  }
+
+  /**
+   * Decides `item` in one versioned Job transaction: the version, subject and
+   * option are checked again inside it, then `body` applies the decision.
+   */
+  private decideOnly(
+    item: ApprovalRow,
+    input: DecideInput,
+    actor: string,
+    grant: number | null,
+    body: (tx: Tx, state: JobState, step: StageRunStepper) => void,
+  ): void {
+    changeJob(
+      this.db,
+      { jobId: item.jobId, expectedVersion: 'current', actor },
+      (tx, state, step) => {
+        const row = requireItem(tx, item.id);
+        refuseUnless(row, { actor, ...input });
+        const decision = InboxDecisionSchema.parse({
+          option: input.option,
+          comment: input.comment ?? null,
+          ...(grant === null ? {} : { grant }),
+        });
+        bumpItem(tx, row, {
+          state: 'decided',
+          decidedBy: actor,
+          decidedAt: new Date().toISOString(),
+          decisionJson: JSON.stringify(decision),
+        });
+        appendEvent(tx, {
+          entityKind: 'approval',
+          entityId: row.id,
+          jobId: row.jobId,
+          type: 'approval.decided',
+          actor,
+          payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
+        });
+        body(tx, state, step);
+      },
+    );
+    this.onCommit();
+  }
+
+  /** Swaps "retry now" for "kill and retry" on the item; returns its new version. */
+  private offerKillAndRetry(item: ApprovalRow, actor: string): number {
+    this.db.transaction(
+      (tx) => {
+        const row = requireItem(tx, item.id);
+        bumpItem(tx, row, { optionsJson: JSON.stringify(KILL_AND_RETRY_OPTIONS) });
+        appendEvent(tx, {
+          entityKind: 'approval',
+          entityId: row.id,
+          jobId: row.jobId,
+          type: 'approval.options_changed',
+          actor,
+          payload: {
+            kind: row.kind,
+            reason: 'process_alive',
+            options: KILL_AND_RETRY_OPTIONS.map((o) => o.id),
+          },
+        });
+      },
+      { behavior: 'immediate' },
+    );
+    this.onCommit();
+    return requireItem(this.db, item.id).version;
+  }
+
+  /** Runs the Job cancel operation at the Job's current version (re-read on a race). */
+  private async cancelFromItem(item: ApprovalRow): Promise<void> {
+    for (let tries = 0; ; tries++) {
+      const job = requireJob(this.db, item.jobId);
+      try {
+        await this.cancelJob(item.jobId, {
+          expectedVersion: job.version,
+          reason: `cancelled from Inbox item ${item.id}`,
+        });
+        return;
+      } catch (err) {
+        const conflict = err instanceof ApiFailure && err.code === 'version_conflict';
+        if (!conflict || tries >= 4) throw err;
+      }
+    }
+  }
+
   defer(id: string, input: DeferInput, actor: string, deferred: boolean): Approval {
     this.db.transaction(
       (tx) => {
@@ -252,7 +487,7 @@ export class InboxService {
     option: 'approve' | 'reject',
     input: PlanDecisionInput,
     actor: string,
-  ): Approval {
+  ): Promise<Approval> {
     const item = this.openPlanItemOf(jobId);
     return this.decide(
       item.id,
@@ -270,7 +505,11 @@ export class InboxService {
    * `requestPlanChanges`: a Replan of the waiting Plan with the human's
    * feedback (ARCHITECTURE §4.7). Refused at `maxReplans`.
    */
-  requestPlanChanges(jobId: string, input: RequestPlanChangesInput, actor: string): Approval {
+  requestPlanChanges(
+    jobId: string,
+    input: RequestPlanChangesInput,
+    actor: string,
+  ): Promise<Approval> {
     const item = this.openPlanItemOf(jobId);
     return this.decide(
       item.id,
@@ -528,6 +767,154 @@ function applyPlanDecision(
   }
   step(run, 'rejected', { reason: `Plan ${item.subjectRef} rejected by ${actor}` });
   cancelPlanTasks(tx, { jobId: item.jobId, actor }, item.subjectRef, 'plan_rejected');
+}
+
+/** The `blocked` Task a Blocker Approval holds, and the Blocker it was opened for. */
+function blockedTaskOf(
+  db: FactoryDb | Tx,
+  item: ApprovalRow,
+): { task: typeof schema.tasks.$inferSelect; blocker: Blocker } {
+  const task =
+    item.taskId === null
+      ? undefined
+      : db.select().from(schema.tasks).where(eq(schema.tasks.id, item.taskId)).get();
+  const blocker =
+    task?.blockerJson == null ? undefined : BlockerSchema.parse(JSON.parse(task.blockerJson));
+  if (task?.state !== 'blocked' || blocker?.attemptId !== item.subjectRef) {
+    throw new Error(`Blocker Approval ${item.id} holds no Task blocked by it`);
+  }
+  return { task, blocker };
+}
+
+function requireAttemptRow(tx: Tx, id: string): typeof schema.attempts.$inferSelect {
+  const row = tx.select().from(schema.attempts).where(eq(schema.attempts.id, id)).get();
+  if (row === undefined) throw new Error(`no Attempt ${id}`);
+  return row;
+}
+
+/** Re-queues `execution` once a Blocker is cleared, so the next claim picks the Task up. */
+function requeueExecution(state: JobState, step: StageRunStepper, reason: string): void {
+  const execution = state.stageRuns.filter((r) => r.stageId === 'execution').at(-1);
+  if (execution?.state === 'waiting_human' || execution?.state === 'blocked') {
+    step(execution, 'queued', { reason });
+  }
+}
+
+/**
+ * A grant of +N: the cap is raised to N more than were used (audited). A
+ * Rework cap readies the Task for its next Rework Attempt; a question cap
+ * opens the capped Attempt's Question, whose answer starts the next Attempt.
+ * The comment is guidance for every later Attempt (`guidanceAfter`).
+ */
+function applyGrant(
+  tx: Tx,
+  input: { item: ApprovalRow; grant: number; actor: string },
+  state: JobState,
+  step: StageRunStepper,
+): void {
+  const { item, grant, actor } = input;
+  const { task, blocker } = blockedTaskOf(tx, item);
+  const op = { jobId: item.jobId, actor };
+  const causes = tx
+    .select({ cause: schema.attempts.cause })
+    .from(schema.attempts)
+    .where(eq(schema.attempts.taskId, task.id))
+    .all()
+    .map((a) => ({ cause: AttemptCauseSchema.parse(a.cause) }));
+  const audit = { jobId: item.jobId, taskId: task.id, actor, approvalId: item.id, option: 'grant' };
+  if (blocker.reason === 'rework_cap_reached') {
+    const to = grantedCap({ used: attemptsCountedForRework(causes), cap: task.maxAttempts }, grant);
+    raiseCap(tx, { ...audit, cap: 'maxAttempts', from: task.maxAttempts, to });
+    stepTask(tx, op, task, 'ready', {
+      reason: 'granted',
+      payload: { approvalId: item.id, grant, maxAttempts: to, attemptId: blocker.attemptId },
+    });
+    requeueExecution(
+      state,
+      step,
+      `Blocker Approval ${item.id}: ${actor} granted +${String(grant)}`,
+    );
+    return;
+  }
+  if (blocker.reason !== 'question_cap_reached') {
+    throw new Error(`a ${blocker.reason} Blocker takes no grant`);
+  }
+  const used = causes.filter((c) => c.cause === 'answer').length;
+  const to = grantedCap({ used, cap: task.maxQuestions }, grant);
+  raiseCap(tx, { ...audit, cap: 'maxQuestions', from: task.maxQuestions, to });
+  const asking = requireAttemptRow(tx, blocker.attemptId);
+  const questionId = openQuestionItem(tx, {
+    jobId: item.jobId,
+    taskId: task.id,
+    taskKey: task.key,
+    attemptId: asking.id,
+    questions: z.array(InboxQuestionSchema).parse(JSON.parse(asking.questionsJson)),
+    evidence: [],
+    requestedBy: `agent:${asking.harnessId}/${asking.id}`,
+    actor,
+  });
+  replaceBlocker(tx, op, blockedTaskOf(tx, item).task, {
+    kind: 'human',
+    reason: 'awaiting_human',
+    detail: `the developer's questions were reopened by a grant of +${String(grant)} (maxQuestions ${String(to)})`,
+    requiredAction: `answer Inbox Item ${questionId} (factory inbox answer ${questionId})`,
+    taskId: task.id,
+    attemptId: asking.id,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * "Retry now" once the process is gone: the Task goes `ready` for a Retry in
+ * its Worktree (a quarantined one, readable again, is preserved first), with
+ * `maxRetries` raised by one (audited) when no Retry was left.
+ */
+function applyRetry(
+  tx: Tx,
+  input: { item: ApprovalRow; process: RetryNowProcess; actor: string },
+  state: JobState,
+  step: StageRunStepper,
+): void {
+  const { item, process, actor } = input;
+  const { task, blocker } = blockedTaskOf(tx, item);
+  const op = { jobId: item.jobId, actor };
+  const attempt = requireAttemptRow(tx, blocker.attemptId);
+  const worktree = requireWorktree(tx, attempt.worktreeId);
+  if (worktree.state === 'quarantined') {
+    stepWorktree(tx, op, worktree, 'quarantined', 'preserved', { approvalId: item.id });
+  }
+  // The process is proven gone: its record goes, so nothing checks it again.
+  tx.update(schema.attempts)
+    .set({ processJson: null })
+    .where(eq(schema.attempts.id, attempt.id))
+    .run();
+  const retriesUsed = tx
+    .select({ id: schema.attempts.id })
+    .from(schema.attempts)
+    .where(and(eq(schema.attempts.taskId, task.id), eq(schema.attempts.cause, 'retry')))
+    .all().length;
+  const raised = retriesAfterRetryNow({ retriesUsed, maxRetries: task.maxRetries });
+  if (raised !== undefined) {
+    raiseCap(tx, {
+      jobId: item.jobId,
+      taskId: task.id,
+      cap: 'maxRetries',
+      from: task.maxRetries,
+      to: raised,
+      actor,
+      approvalId: item.id,
+      option: item.optionsJson.includes('kill_and_retry') ? 'kill_and_retry' : 'retry_now',
+    });
+  }
+  stepTask(tx, op, task, 'ready', {
+    reason: 'retry_now',
+    payload: { approvalId: item.id, attemptId: attempt.id, process },
+  });
+  requeueExecution(
+    state,
+    step,
+    `Blocker Approval ${item.id}: ${actor} chose a Retry (process ${process})`,
+  );
 }
 
 /** Refuses "request changes" without feedback or at `maxReplans` (ADR-0019). */

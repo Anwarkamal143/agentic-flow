@@ -179,7 +179,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       usage: { tag: 'unknown' },
       worktreeId: worktree.id,
     });
-    expect(attempt.promptTemplate.id).toBe('task-packet@4');
+    expect(attempt.promptTemplate.id).toBe('task-packet@5');
     expect(attempt.promptTemplate.hash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(git(repo.clonePath, ['show', `${head}:src/math.ts`])).toBe(SUM_SOURCE);
 

@@ -33,6 +33,7 @@ import {
   routeFailedAttempt,
   type AttemptCause,
   type AnsweredQuestion,
+  type GrantGuidance,
   type AttemptFinding,
   type Blocker,
   type HarnessLogContent,
@@ -102,6 +103,7 @@ import {
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
 import { answersAfter, openQuestionItem } from './questions.js';
+import { guidanceAfter } from './blocker-approvals.js';
 import { latestArtifact } from './plan-approval.js';
 import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
@@ -446,7 +448,8 @@ export class TaskScheduler {
     const slot: Slot = { jobId, done: Promise.resolve(), run: undefined, proc: undefined };
     this.slots.set(key, slot);
     slot.done = body(slot).finally(() => {
-      this.slots.delete(key);
+      // A swept slot can end after a Retry of its Task took the key ("retry now", ADR-0026).
+      if (this.slots.get(key) === slot) this.slots.delete(key);
       this.wake();
     });
   }
@@ -559,6 +562,9 @@ export class TaskScheduler {
     // Every question asked so far on this Task, with the human's answers (ADR-0023).
     const answers =
       previous === undefined ? [] : db.transaction((tx) => answersAfter(tx, previous));
+    // Every grant's guidance so far on this Task (ADR-0026).
+    const guidance =
+      previous === undefined ? [] : db.transaction((tx) => guidanceAfter(tx, previous));
     const { wallClockMs } = this;
     let worktree: {
       id: string;
@@ -630,6 +636,7 @@ export class TaskScheduler {
       wallClockMs,
       priorFindings,
       answers,
+      guidance,
     });
     await this.withClone(clone, async () => {
       await excludeResultFile(clone);
@@ -736,6 +743,7 @@ export class TaskScheduler {
             baseSha,
             priorFindings: priorFindings.length,
             answers: answers.length,
+            guidance: guidance.length,
           },
         });
         stepTask(
@@ -1110,6 +1118,7 @@ export class TaskScheduler {
     wallClockMs: number;
     priorFindings: AttemptFinding[];
     answers: AnsweredQuestion[];
+    guidance: GrantGuidance[];
   }): TaskPacket {
     const { job, task, definition, repo } = input;
     const artifacts = this.opts.artifacts.listForJob(job.id).filter((a) => a.stageRunId !== null);
@@ -1161,6 +1170,7 @@ export class TaskScheduler {
         files,
         priorFindings: input.priorFindings,
         answers: input.answers,
+        guidance: input.guidance,
       },
       limits: { maxTurns: MAX_TURNS, wallClockS: input.wallClockMs / 1000 },
       // The developer may ask (ARCHITECTURE §7 Question rules); the reviewer never can.

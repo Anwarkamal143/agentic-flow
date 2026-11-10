@@ -237,6 +237,10 @@ const notify = () => {
   tasks.wake();
 };
 
+const jobs = new JobService(database.db, notify, async (jobId) => {
+  await Promise.all([scheduler.cancelJob(jobId), tasks.cancelJob(jobId)]);
+});
+
 const app = createApp({
   token,
   status: () => ({
@@ -268,14 +272,14 @@ const app = createApp({
       config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
     ),
   repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
-  jobs: new JobService(database.db, notify, async (jobId) => {
-    await Promise.all([scheduler.cancelJob(jobId), tasks.cancelJob(jobId)]);
-  }),
+  jobs,
   inbox: new InboxService(
     database.db,
     artifacts,
     notify,
     config.harness?.id === 'claude-code' ? config.harness.billing : null,
+    // A Blocker Approval's "cancel the Job" is the cancel operation itself (ADR-0026).
+    (jobId, input) => jobs.cancel(jobId, input),
   ),
   artifacts,
   logs: (jobId) => jobLogs(database.db, artifacts, jobId),

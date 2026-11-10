@@ -200,20 +200,22 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/v1/jobs/:id/plan', (c) => c.json(deps.inbox.planView(c.req.param('id'))));
   app.post('/v1/jobs/:id/plan/approve', async (c) => {
     const input = await parseBody(c, PlanDecisionInputSchema);
-    return c.json(deps.inbox.decidePlan(c.req.param('id'), 'approve', input, OPERATOR));
+    return c.json(await deps.inbox.decidePlan(c.req.param('id'), 'approve', input, OPERATOR));
   });
   app.post('/v1/jobs/:id/plan/reject', async (c) => {
     const input = await parseBody(c, PlanDecisionInputSchema);
-    return c.json(deps.inbox.decidePlan(c.req.param('id'), 'reject', input, OPERATOR));
+    return c.json(await deps.inbox.decidePlan(c.req.param('id'), 'reject', input, OPERATOR));
   });
   app.post('/v1/jobs/:id/plan/request-changes', async (c) => {
     const input = await parseBody(c, RequestPlanChangesInputSchema);
-    return c.json(deps.inbox.requestPlanChanges(c.req.param('id'), input, OPERATOR));
+    return c.json(await deps.inbox.requestPlanChanges(c.req.param('id'), input, OPERATOR));
   });
   app.post('/v1/jobs/:id/plan/edit', async (c) => {
     const input = await parseBody(c, EditPlanInputSchema);
     return c.json(await deps.inbox.editPlan(c.req.param('id'), input, OPERATOR));
   });
+  // The Job's audit log: cap raises by Inbox grants (ADR-0026).
+  app.get('/v1/jobs/:id/audit', (c) => c.json(deps.inbox.audit(c.req.param('id'))));
   app.get('/v1/inbox', (c) => {
     const { all } = parseQuery(c, z.object({ all: z.enum(['true', 'false']).optional() }));
     return c.json(deps.inbox.list({ all: all === 'true' }));
@@ -221,7 +223,7 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/v1/inbox/:id', (c) => c.json(deps.inbox.get(c.req.param('id'))));
   app.post('/v1/inbox/:id/decide', async (c) => {
     const input = await parseBody(c, DecideInputSchema);
-    return c.json(deps.inbox.decide(c.req.param('id'), input, OPERATOR));
+    return c.json(await deps.inbox.decide(c.req.param('id'), input, OPERATOR));
   });
   app.post('/v1/inbox/:id/answer', async (c) => {
     const input = await parseBody(c, AnswerQuestionInputSchema);
