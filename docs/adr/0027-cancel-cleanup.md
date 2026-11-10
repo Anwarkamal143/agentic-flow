@@ -1,0 +1,45 @@
+# Cancel cleanup: one `cleanup` Inbox Item, then a discard from the decision
+
+**Status:** accepted (#48, Phase B, ROADMAP exit test B7). Routine and reversible choices inside PRODUCT_SPEC §12, ARCHITECTURE §10 and the Phase B grilling (Q8). Builds on ADR-0012 (cancel in two steps, group SIGTERM then SIGKILL), ADR-0016 (Inbox Items) and ADR-0020 (capacity tokens).
+
+## Order
+
+`JobService.cancel` keeps ADR-0012's two steps and adds a last transaction:
+
+1. One versioned transaction: unfinished Stage Runs, Tasks not in flight and open Inbox Items `cancelled`, `job.cancelled`.
+2. The schedulers stop every slot of the Job (graceful, then forced, per process group) and record each Attempt `cancelled`, its Task `cancelled`, its Worktree `preserved`, and its Task lease, capacity tokens and port block released, in the Attempt-ending transaction.
+3. **Last transaction:** a Task the stopped work moved on, and an item it opened just before it stopped (for example a Question), are cancelled too. Only then is the Job's one `cleanup` item opened.
+
+So `approval.opened` for the cleanup item comes after every `attempt.cancelled`, `task.cancelled`, `worktree.preserved` and `approval.cancelled` of the cancel (the B7 scenario asserts it on event seqs).
+
+## The item
+
+- Kind `cleanup`, subject the Job id, no Stage Run, no Task. Question "Discard the N preserved Worktrees?". Options `keep` (recommended, the default) and `discard`, from `CLEANUP_OPTIONS` (`@factory/domain` `cleanup.ts`). `expires_policy` is `remain_pending`, as for every item: nothing is ever decided for the human.
+- **At most one per Job**, and **none when the cancel left no preserved Worktree** (say, a cancel during triage). An item asking to discard zero Worktrees asks nothing. Phase C adds the PR and remote-branch questions to the same item, so it will then be opened when any of them applies.
+- Quarantined Worktrees (unknown state after a crash) are never counted or discarded.
+- `approval.opened` records the Worktrees it covers (id, Task, path).
+- **No schema change:** the existing `approvals` table holds it.
+
+## The decision
+
+- It goes through the generic `POST /v1/inbox/:id/decide` and `checkInboxChange` (version, subject, human actor), so `factory inbox decide <id> keep|discard` and the dashboard's generic decide form work with no new route or UI. `inbox.ts` gains one dispatch line to `applyCleanupDecision` (`apps/runtime/src/cleanup.ts`).
+- The decide transaction only records the decision. `keep` changes nothing more.
+- **`discard` is carried out after the commit, from the persisted decision**, by `CleanupWorker` (a `PassLoop`, woken on every commit and every 5 s). For each of the Job's `preserved` Worktrees: `git worktree remove --force` in the Factory Clone, then one transaction moves the row `preserved → removed` (`worktree.removed`, with the approval id). The row says `removed` only once the directory is gone. When every removal is done, `cleanup.completed` (on the approval) marks the item finished.
+- **Forced, on purpose.** The human chose to discard what is in the Worktrees, uncommitted changes included, and the option's description says so. Without `--force`, git refuses every Worktree a cancelled Attempt left dirty. `@factory/git` `removeWorktree` gains an optional `force`; closure still never forces.
+- **Task Branches are never touched.** `git worktree remove` leaves the branch and its commits in the Factory Clone (the discard scenario checks the branch tips are unchanged).
+- A removal git refuses records `worktree.remove_failed` and leaves the row `preserved`; no `cleanup.completed` is written, and the worker tries that item again only at the next runtime start.
+
+## Crash safety
+
+- A discard cut short by a crash resumes at the next start: the worker picks every decided `discard` item without `cleanup.completed`, and each Worktree's removal is idempotent by its row state.
+- A cancel cut short between its steps leaves no cleanup item. At startup, after recovery and before the API listens (so no cancel is in progress), `openMissingCleanupItems` opens one for every cancelled Job with a preserved Worktree and none yet. A home with Jobs cancelled before #48 gets an item for each of them at its first start, which is the question those cancels never asked.
+
+## CLI
+
+`factory job cancel` prints, after the Job, `Cleanup Approval <id>: Discard the N preserved Worktrees? (default: keep; Task Branches are always kept)` and the `factory inbox decide` command line, or `No cleanup Approval: the cancel left no preserved Worktree.` It finds the item with `GET /v1/inbox?all=true` (the cancel response is still the Job).
+
+## Known limitations
+
+- Neither crash path (a cancel cut short before its last transaction; a discard cut short by a crash) is exercised by a scenario: there is no fault-injection point for them.
+- The removals are not under the per-clone git setup lock (ADR-0020), like closure's; a discard and another Job's Worktree setup on the same clone could race on git's lock files.
+- The dashboard has no "cancel the Job" action yet, so a cancel starts from the CLI or the API; its cleanup item is decided anywhere.
