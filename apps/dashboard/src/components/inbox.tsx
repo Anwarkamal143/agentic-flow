@@ -5,7 +5,7 @@
  * runtime server-side (ADR-0022). Options are rendered from the item, so any
  * kind's options show the same way; an agent-proposed option says so.
  */
-import type { Approval, PlanView } from '@factory/domain';
+import { GRANT_DEFAULT, GRANT_MAX, type Approval, type PlanView } from '@factory/domain';
 import Link from 'next/link';
 import { Field, State } from '@/components/job-sections';
 import { PlanRisks } from '@/components/plan-view';
@@ -141,7 +141,7 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
           <p className="text-sm">
             {item.decision === null
               ? `This item is ${humanize(item.state)}.`
-              : `Decided: ${label(item.decision.option)} by ${String(item.decidedBy)} at ${formatTime(item.decidedAt)}`}
+              : `Decided: ${label(item.decision.option)}${item.decision.grant === undefined ? '' : ` +${String(item.decision.grant)}`} by ${String(item.decidedBy)} at ${formatTime(item.decidedAt)}`}
             {item.decision?.comment != null && (
               <span className="block text-muted-foreground">Comment: {item.decision.comment}</span>
             )}
@@ -304,6 +304,24 @@ function ItemActions({ item, returnTo }: { item: Approval; returnTo: string }) {
           maxLength={5000}
           className="block w-full min-w-72 rounded-md border bg-background p-2 text-sm"
         />
+        {item.options.some((o) => o.id === 'grant') && (
+          <div>
+            <label htmlFor={`grant-${item.id}`} className="block text-xs text-muted-foreground">
+              Grant size (used by “{item.options.find((o) => o.id === 'grant')?.label}”; your
+              comment becomes guidance for the next Attempt)
+            </label>
+            <input
+              id={`grant-${item.id}`}
+              type="number"
+              name="grant"
+              min={1}
+              max={GRANT_MAX}
+              step={1}
+              defaultValue={GRANT_DEFAULT}
+              className="block w-24 rounded-md border bg-background p-2 text-sm"
+            />
+          </div>
+        )}
         <div className="flex flex-wrap gap-2">
           {item.options.map((o) => (
             <button

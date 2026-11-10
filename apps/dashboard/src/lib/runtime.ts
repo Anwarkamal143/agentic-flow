@@ -221,6 +221,8 @@ export async function changeInboxItem(
     subjectRef?: string;
     option?: string;
     comment?: string;
+    /** `decide` on a Blocker Approval's `grant` option only: its size (ADR-0026). */
+    grant?: number;
     /** `answer` only: one per answered question (ADR-0023). */
     answers?: { questionId: string; option?: string; text?: string }[];
   },

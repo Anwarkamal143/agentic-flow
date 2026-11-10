@@ -34,12 +34,24 @@ const comment = z
   .optional()
   .transform((c) => (c === undefined || c.trim() === '' ? undefined : c));
 const FORMS = {
-  decide: z.object({
-    expectedVersion: version,
-    subjectRef: z.string().min(1).max(200),
-    option: z.string().min(1).max(40),
-    comment,
-  }),
+  decide: z
+    .object({
+      expectedVersion: version,
+      subjectRef: z.string().min(1).max(200),
+      option: z.string().min(1).max(40),
+      comment,
+      /** A Blocker Approval's grant size; the runtime checks its range (ADR-0026). */
+      grant: z
+        .string()
+        .regex(/^\d{0,3}$/)
+        .optional(),
+    })
+    // The grant field is on the whole form, so it is sent only with the grant option.
+    .transform(({ grant, ...rest }) =>
+      rest.option === 'grant' && grant !== undefined && grant !== ''
+        ? { ...rest, grant: Number(grant) }
+        : rest,
+    ),
   answer: z.object({
     expectedVersion: version,
     subjectRef: z.string().min(1).max(200),
