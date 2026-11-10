@@ -90,7 +90,6 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 Phase B (#33) on integration branch `phase-b/integration`, one worktree per ticket. Shared contracts: `packages/db/**` (schema + migrations) has exactly one owner at a time; other tickets wait for it.
 
-- #42 (questions) → `packages/db/**` (sole schema owner this round), `apps/runtime/src/{execution,inbox,task-packet}.ts`, `packages/domain/src/execution.ts` + question protocol, `packages/harness/**`, `apps/cli/src/commands/inbox.ts`, `apps/dashboard/**` (answer form), ADR-0023
 
 ## Human decisions (outside CLAUDE.md §7)
 
