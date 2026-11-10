@@ -76,6 +76,21 @@ export type TaskScope = z.infer<typeof TaskScopeSchema>;
 
 export const TaskRoleSchema = z.enum(['developer']);
 
+/** A Task's scheduling priority (ARCHITECTURE §7, §12). */
+export const TaskPrioritySchema = z.enum(['low', 'normal', 'high']);
+export type TaskPriority = z.infer<typeof TaskPrioritySchema>;
+
+/**
+ * How a priority is stored in `tasks.priority` (an integer; higher runs
+ * first). `normal` is 0, so Tasks planned before priorities existed are
+ * `normal`. ADR-0017.
+ */
+export const TASK_PRIORITY_WEIGHT: Readonly<Record<TaskPriority, number>> = {
+  low: -1,
+  normal: 0,
+  high: 1,
+};
+
 export const PlanTaskProposalSchema = z.object({
   key: slug,
   title: shortText,
@@ -90,6 +105,9 @@ export const PlanTaskProposalSchema = z.object({
   /** Codes of the Acceptance Criteria this Task covers. */
   acceptance: z.array(z.string()).default([]),
   verification: z.array(VerificationCommandSchema).min(1),
+  priority: TaskPrioritySchema.default('normal'),
+  /** Attempts this Task may take. It may only narrow the Effective Configuration's value. */
+  maxAttempts: z.number().int().positive().optional(),
 });
 export type PlanTaskProposal = z.infer<typeof PlanTaskProposalSchema>;
 
@@ -135,12 +153,22 @@ export interface PlanContext {
   repositories: readonly { id: string; name: string }[];
   /** The Specification's Acceptance Criteria. */
   criteria: readonly { code: string; mandatory: boolean }[];
+  /** The Effective Configuration's `maxAttempts`, which a Task may only narrow. */
+  maxAttempts: number;
+  /**
+   * The tracked files of each Repository (by id) at the planning base in the
+   * Factory Clone. They only name the paths an overlap matches; they never
+   * decide whether globs overlap.
+   */
+  trackedFiles: ReadonlyMap<string, readonly string[]>;
 }
 
 /**
- * The Plan's DAG checks (ARCHITECTURE §3): unique keys, a Repository of the Job
- * on every Task, valid scope globs, existing dependencies, no cycles, and
- * Acceptance Criteria that exist and are all covered when mandatory.
+ * The Plan's DAG checks (ARCHITECTURE §3, §7): unique keys, a Repository of
+ * the Job on every Task, valid scope globs, existing dependencies, no cycles,
+ * Acceptance Criteria that exist and are all covered when mandatory, a
+ * `maxAttempts` that only narrows, and no overlapping writable paths between
+ * Tasks that no dependency path orders.
  */
 export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] {
   const issues: RuleIssue[] = [];
@@ -207,11 +235,18 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
         message: `${at}: verification key ${dup} is used more than once`,
       });
     }
+    if (task.maxAttempts !== undefined && task.maxAttempts > ctx.maxAttempts) {
+      issues.push({
+        rule: 'plan.max_attempts_narrow',
+        message: `${at}: maxAttempts ${String(task.maxAttempts)} is above the Effective Configuration (${String(ctx.maxAttempts)}); a Plan may only narrow it`,
+      });
+    }
   }
   const cycle = findCycle(plan.tasks);
   if (cycle !== undefined) {
     issues.push({ rule: 'plan.no_cycles', message: `dependency cycle: ${cycle.join(' → ')}` });
   }
+  issues.push(...overlapIssues(plan, ctx));
   for (const c of ctx.criteria) {
     if (c.mandatory && !plan.tasks.some((t) => t.acceptance.includes(c.code))) {
       issues.push({
@@ -243,6 +278,89 @@ export function globProblem(glob: string): string | undefined {
     return `is not a valid glob (${err instanceof Error ? err.message : String(err)})`;
   }
   return undefined;
+}
+
+/** Tracked paths listed in one overlap message, at most. */
+const MAX_LISTED_PATHS = 10;
+
+/**
+ * `plan.no_overlapping_writes`: two Tasks of one Repository that no dependency
+ * path orders (in either direction, transitively) could run in parallel, so
+ * their writable globs must not overlap. A static-prefix overlap decides; the
+ * tracked files at the planning base only name the paths both globs match.
+ */
+function overlapIssues(plan: PlanProposal, ctx: PlanContext): RuleIssue[] {
+  const repoOf = (t: PlanTaskProposal) =>
+    ctx.repositories.find((r) => r.id === t.repository || r.name === t.repository)?.id;
+  const ancestors = ancestorsOf(plan.tasks);
+  const ordered = (a: string, b: string) =>
+    (ancestors.get(a)?.has(b) ?? false) || (ancestors.get(b)?.has(a) ?? false);
+  const issues: RuleIssue[] = [];
+  plan.tasks.forEach((a, i) => {
+    for (const b of plan.tasks.slice(i + 1)) {
+      const repo = repoOf(a);
+      if (repo === undefined || repo !== repoOf(b) || a.key === b.key || ordered(a.key, b.key)) {
+        continue;
+      }
+      const pairs = a.scope.writable.flatMap((ga) =>
+        b.scope.writable.filter((gb) => globsOverlap(ga, gb)).map((gb) => [ga, gb] as const),
+      );
+      if (pairs.length === 0) continue;
+      const inA = matcherOf(a.scope.writable);
+      const inB = matcherOf(b.scope.writable);
+      const paths = (ctx.trackedFiles.get(repo) ?? []).filter((p) => inA(p) && inB(p));
+      const listed =
+        paths.length === 0
+          ? 'no tracked file at the planning base matches both yet'
+          : `tracked files at the planning base both match: ${paths.slice(0, MAX_LISTED_PATHS).join(', ')}${paths.length > MAX_LISTED_PATHS ? ` and ${String(paths.length - MAX_LISTED_PATHS)} more` : ''}`;
+      issues.push({
+        rule: 'plan.no_overlapping_writes',
+        message: `Tasks ${a.key} and ${b.key} may run in parallel (no dependency orders them) but both may write the same paths: ${pairs.map(([ga, gb]) => `'${ga}' and '${gb}'`).join('; ')}; ${listed}. Make one depend on the other, or split their writable paths.`,
+      });
+    }
+  });
+  return issues;
+}
+
+/**
+ * True when two globs may match a common path, judged by their static
+ * prefixes (the leading path segments without glob syntax): they overlap
+ * when one prefix is, segment by segment, a prefix of the other. An empty
+ * prefix (`**\/*.md`) overlaps everything. Conservative: `src/*.ts` and
+ * `src/*.css` overlap.
+ */
+function globsOverlap(a: string, b: string): boolean {
+  const pa = staticSegments(a);
+  const pb = staticSegments(b);
+  const n = Math.min(pa.length, pb.length);
+  return pa.slice(0, n).every((s, i) => s === pb[i]);
+}
+
+function staticSegments(glob: string): string[] {
+  const { base } = picomatch.scan(glob);
+  return base === '' ? [] : base.split('/');
+}
+
+function matcherOf(globs: readonly string[]): (path: string) => boolean {
+  const tests = globs.map((g) => picomatch(g, { dot: true }));
+  return (path) => tests.some((t) => t(path));
+}
+
+/** Every Task's transitive dependencies, by key (unknown keys and cycles tolerated). */
+function ancestorsOf(tasks: readonly { key: string; dependsOn: readonly string[] }[]) {
+  const deps = new Map(tasks.map((t) => [t.key, t.dependsOn]));
+  const result = new Map<string, Set<string>>();
+  for (const t of tasks) {
+    const seen = new Set<string>();
+    const stack = [...t.dependsOn];
+    for (let key = stack.pop(); key !== undefined; key = stack.pop()) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      stack.push(...(deps.get(key) ?? []));
+    }
+    result.set(t.key, seen);
+  }
+  return result;
 }
 
 /** A cycle in the dependency graph as a list of keys (first repeated at the end), if any. */
