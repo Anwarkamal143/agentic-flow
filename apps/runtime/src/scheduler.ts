@@ -19,6 +19,7 @@ import {
   PlanProposalSchema,
   schemaIssues,
   SpecificationProposalSchema,
+  TASK_PRIORITY_WEIGHT,
   TaskDefinitionSchema,
   type ArtifactKind,
   type PlanContext,
@@ -36,6 +37,7 @@ import {
   type HarnessRawResult,
   type HarnessRun,
 } from '@factory/harness';
+import { git, resolveCommit } from '@factory/git';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
 import { changeJob, readJobState, type JobState } from './engine.js';
@@ -261,7 +263,7 @@ export class StageScheduler {
       prompt: string;
       cwd: string;
       policy: ToolPolicy;
-      repositories: PlanContext['repositories'];
+      repositories: readonly RepositoryRow[];
       rejected: RuleIssue[] | undefined;
     },
   ): Promise<Outcome> {
@@ -307,15 +309,11 @@ export class StageScheduler {
     const eventCount = await drained;
     this.current = undefined;
     rmSync(spool, { recursive: true, force: true });
-    const outcome = this.evaluate(stage, result, {
-      repositories: input.repositories,
-      // Read after the Run: the Specification's criteria, for planning.
-      criteria: this.opts.db
-        .select()
-        .from(schema.acceptanceCriteria)
-        .where(eq(schema.acceptanceCriteria.jobId, run.jobId))
-        .all(),
-    });
+    const outcome = this.evaluate(
+      stage,
+      result,
+      await this.planContext(stage, run, input.repositories),
+    );
     this.event(run, started.executionId, 'harness_run.finished', {
       stageRunId: run.id,
       stageId: run.stageId,
@@ -329,6 +327,34 @@ export class StageScheduler {
       ...(outcome.kind === 'invalid' ? { issues: outcome.issues } : {}),
     });
     return outcome;
+  }
+
+  /**
+   * What the validators check a proposal against, read after the Run: the
+   * Specification's criteria, the Effective Configuration's `maxAttempts`,
+   * and, for planning only, the tracked files at the planning base.
+   */
+  private async planContext(
+    stage: ProposalStage,
+    run: StageRunRow,
+    repositories: readonly RepositoryRow[],
+  ): Promise<PlanContext> {
+    const { job } = readJobState(this.opts.db, run.jobId);
+    const config = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson));
+    const trackedFiles = new Map<string, readonly string[]>();
+    if (stage.stageId === 'planning') {
+      for (const repo of repositories) trackedFiles.set(repo.id, await planningBaseFiles(repo));
+    }
+    return {
+      repositories,
+      criteria: this.opts.db
+        .select()
+        .from(schema.acceptanceCriteria)
+        .where(eq(schema.acceptanceCriteria.jobId, run.jobId))
+        .all(),
+      maxAttempts: config.maxAttempts.value,
+      trackedFiles,
+    };
   }
 
   /** Decides what a Harness Run's output is worth. The exit code alone proves nothing. */
@@ -451,8 +477,8 @@ export class StageScheduler {
               } satisfies TaskDefinition),
             ),
             state,
-            priority: 0,
-            maxAttempts: config.maxAttempts.value,
+            priority: TASK_PRIORITY_WEIGHT[task.priority],
+            maxAttempts: task.maxAttempts ?? config.maxAttempts.value,
             maxRetries: config.maxRetries.value,
             version: 0,
           })
@@ -522,6 +548,7 @@ export class StageScheduler {
         id: schema.repositories.id,
         name: schema.repositories.name,
         clonePath: schema.repositories.clonePath,
+        defaultBranch: schema.repositories.defaultBranch,
       })
       .from(schema.jobRepositories)
       .innerJoin(
@@ -531,6 +558,27 @@ export class StageScheduler {
       .where(eq(schema.jobRepositories.jobId, jobId))
       .all();
   }
+}
+
+interface RepositoryRow {
+  id: string;
+  name: string;
+  clonePath: string;
+  defaultBranch: string;
+}
+
+/**
+ * The tracked files at the planning base: the commit a Task's Worktree would
+ * start from (the default branch, as fetched, in the Factory Clone; never the
+ * user's checkout). Empty when the clone has no such branch.
+ */
+async function planningBaseFiles(repo: RepositoryRow): Promise<string[]> {
+  const base =
+    (await resolveCommit(repo.clonePath, `refs/remotes/origin/${repo.defaultBranch}`)) ??
+    (await resolveCommit(repo.clonePath, `refs/heads/${repo.defaultBranch}`));
+  if (base === undefined) return [];
+  const out = await git(['ls-tree', '-r', '-z', '--name-only', base], { cwd: repo.clonePath });
+  return out.split('\0').filter((p) => p !== '');
 }
 
 /** The Stage Run `id` of the Job being changed, which must be in state `expected`. */

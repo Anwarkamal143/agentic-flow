@@ -85,6 +85,7 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore, StoredContent } from './artifacts.js';
 import { criteriaCoveredBy } from './criteria.js';
+import { READY_TASK_ORDER } from './dispatch.js';
 import { buildDeliveryReport } from './delivery.js';
 import { attemptFindings, gateFinding, scopeFinding } from './findings.js';
 import {
@@ -488,8 +489,9 @@ export class TaskScheduler {
   // ---- claim ------------------------------------------------------------------
 
   /**
-   * Claims the oldest Job's next ready Task: inserts its lease and moves it
-   * `ready → claimed` in one versioned transaction (and starts `execution`).
+   * Claims the next ready Task (by priority, then time ready; ADR-0017): inserts
+   * its lease and moves it `ready → claimed` in one versioned transaction (and
+   * starts `execution`).
    */
   private claimNext(): { jobId: string; taskId: string } | undefined {
     const next = this.opts.db
@@ -509,7 +511,7 @@ export class TaskScheduler {
           inArray(schema.stageRuns.state, ['queued', 'running']),
         ),
       )
-      .orderBy(asc(schema.jobs.createdAt), asc(schema.tasks.priority), asc(sql`"tasks"."rowid"`))
+      .orderBy(...READY_TASK_ORDER)
       .limit(1)
       .get();
     if (next === undefined) return undefined;
