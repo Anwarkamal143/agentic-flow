@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { activity, DEFAULT_TAIL_LINES } from './commands/activity.js';
 import { doctor } from './commands/doctor.js';
 import { init } from './commands/init.js';
 import { jobCancel, jobCreate, jobList, jobShow } from './commands/job.js';
@@ -27,6 +28,9 @@ Commands:
                                   Cancel a Job, stopping its running work
   logs <job> [--json]             Show the (redacted) Harness and verification output
                                   of a Job's Attempts
+  activity [--lines <n>] [--json] What is running now: each running Attempt with its
+                                  Harness, model, Repository, tier, heartbeat, ports and
+                                  the redacted tail of its output (default 20 lines)
 
 Environment:
   FACTORY_HOME   factory home directory (default ~/.factory)
@@ -100,6 +104,18 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       return logs(id, { json: values.json === true });
+    }
+    case 'activity': {
+      const { values } = parseArgs({
+        args: rest,
+        options: { json: { type: 'boolean' }, lines: { type: 'string' } },
+      });
+      const lines = values.lines === undefined ? DEFAULT_TAIL_LINES : Number(values.lines);
+      if (!Number.isInteger(lines) || lines < 0) {
+        process.stderr.write(`factory: --lines takes a whole number\n\n${USAGE}`);
+        return 2;
+      }
+      return activity({ json: values.json === true, lines });
     }
     case undefined:
     case 'help':
