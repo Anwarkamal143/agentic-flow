@@ -77,6 +77,16 @@ export const ProjectConfigSchema = z
     maxQuestions: z.number().int().min(0).max(10).optional(),
     /** Whether a new Plan waits for a human at `plan_approval` (ADR-0016). */
     planApproval: PlanApprovalPolicySchema.optional(),
+    /** Replans per Job; re-specification counts too, a Plan Edit doesn't (ARCHITECTURE §4.6, §4.7). */
+    maxReplans: z.number().int().min(0).max(10).optional(),
+    /** Task concurrency limits (ARCHITECTURE §12). A Job may override them at creation. */
+    concurrency: z
+      .object({
+        perRepository: z.number().int().min(1).max(16).optional(),
+        perJob: z.number().int().min(1).max(16).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -307,6 +317,21 @@ export const EffectiveConfigSchema = z.object({
     value: 'required',
     source: 'recipe',
   }),
+  /** Jobs created before Phase B get the recipe default. */
+  maxReplans: effectiveValue(z.number().int().nonnegative()).default({
+    value: 2,
+    source: 'recipe',
+  }),
+  /** Jobs created before Phase B get the recipe defaults. */
+  concurrency: z
+    .object({
+      perRepository: effectiveValue(z.number().int().positive()),
+      perJob: effectiveValue(z.number().int().positive()),
+    })
+    .default({
+      perRepository: { value: 2, source: 'recipe' },
+      perJob: { value: 2, source: 'recipe' },
+    }),
 });
 export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
 
@@ -315,11 +340,15 @@ export const RECIPE_DEFAULTS: {
   readonly maxRetries: number;
   readonly maxQuestions: number;
   readonly planApproval: PlanApprovalPolicy;
+  readonly maxReplans: number;
+  readonly concurrency: { readonly perRepository: number; readonly perJob: number };
 } = {
   maxAttempts: 3,
   maxRetries: 2,
   maxQuestions: 3,
   planApproval: 'required',
+  maxReplans: 2,
+  concurrency: { perRepository: 2, perJob: 2 },
 };
 
 /** The Tier 0 tool policy of `role` in a Job's frozen Effective Configuration (its JSON). Pure. */
@@ -348,6 +377,20 @@ export function resolveEffectiveConfig(levels: { project: ProjectConfig }): Effe
       project.planApproval === undefined
         ? { value: RECIPE_DEFAULTS.planApproval, source: 'recipe' }
         : { value: project.planApproval, source: 'project' },
+    maxReplans:
+      project.maxReplans === undefined
+        ? { value: RECIPE_DEFAULTS.maxReplans, source: 'recipe' }
+        : { value: project.maxReplans, source: 'project' },
+    concurrency: {
+      perRepository:
+        project.concurrency?.perRepository === undefined
+          ? { value: RECIPE_DEFAULTS.concurrency.perRepository, source: 'recipe' }
+          : { value: project.concurrency.perRepository, source: 'project' },
+      perJob:
+        project.concurrency?.perJob === undefined
+          ? { value: RECIPE_DEFAULTS.concurrency.perJob, source: 'recipe' }
+          : { value: project.concurrency.perJob, source: 'project' },
+    },
   };
 }
 

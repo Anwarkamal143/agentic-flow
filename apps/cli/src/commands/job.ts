@@ -159,7 +159,14 @@ async function getJob(api: RuntimeClient, id: string): Promise<Job | undefined> 
 }
 
 function writeJob(job: Job): void {
-  const config = Object.entries(job.effectiveConfig)
+  type Config = Job['effectiveConfig'];
+  type Setting = Config[Exclude<keyof Config, 'concurrency'>] | Config['concurrency']['perJob'];
+  const { concurrency, ...settings } = job.effectiveConfig;
+  const entries: [string, Setting][] = [
+    ...Object.entries(settings),
+    ...Object.entries(concurrency).map(([key, v]): [string, Setting] => [`concurrency.${key}`, v]),
+  ];
+  const config = entries
     .map(([key, v]) =>
       typeof v.value === 'object'
         ? `${key} (from ${v.source})`

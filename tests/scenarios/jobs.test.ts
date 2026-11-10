@@ -106,6 +106,11 @@ describe('factory job create / job show', () => {
       toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
       maxQuestions: { value: 3, source: 'recipe' },
       planApproval: { value: 'required', source: 'recipe' },
+      maxReplans: { value: 2, source: 'recipe' },
+      concurrency: {
+        perRepository: { value: 2, source: 'recipe' },
+        perJob: { value: 2, source: 'recipe' },
+      },
     });
 
     const edit = await post(rt, `/v1/projects/${repo.projectId}/config`, { maxAttempts: 5 });
@@ -118,6 +123,11 @@ describe('factory job create / job show', () => {
       toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
       maxQuestions: { value: 3, source: 'recipe' },
       planApproval: { value: 'required', source: 'recipe' },
+      maxReplans: { value: 2, source: 'recipe' },
+      concurrency: {
+        perRepository: { value: 2, source: 'recipe' },
+        perJob: { value: 2, source: 'recipe' },
+      },
     });
 
     expect(
@@ -125,6 +135,7 @@ describe('factory job create / job show', () => {
         await post(rt, `/v1/projects/${repo.projectId}/config`, {
           maxAttempts: 1,
           maxRetries: 0,
+          concurrency: { perJob: 1 },
         })
       ).status,
     ).toBe(200);
@@ -144,6 +155,11 @@ describe('factory job create / job show', () => {
       toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
       maxQuestions: { value: 3, source: 'recipe' },
       planApproval: { value: 'required', source: 'recipe' },
+      maxReplans: { value: 2, source: 'recipe' },
+      concurrency: {
+        perRepository: { value: 2, source: 'recipe' },
+        perJob: { value: 1, source: 'project' },
+      },
     });
   });
 
@@ -155,6 +171,9 @@ describe('factory job create / job show', () => {
       { maxAttempts: 2.5 },
       { mergePolicy: 'auto' },
       { planApproval: 'auto' },
+      { maxReplans: -1 },
+      { concurrency: { perJob: 0 } },
+      { concurrency: { global: 3 } },
     ]) {
       const res = await post(rt, `/v1/projects/${repo.projectId}/config`, body);
       expect(res.status, JSON.stringify(body)).toBe(400);
