@@ -17,9 +17,15 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <Link href="/" className="font-semibold">
               Software Factory
             </Link>
-            <nav aria-label="Main">
+            <nav aria-label="Main" className="flex gap-4">
               <Link href="/" className="text-sm text-muted-foreground hover:text-foreground">
                 Jobs
+              </Link>
+              <Link
+                href="/activity"
+                className="text-sm text-muted-foreground hover:text-foreground"
+              >
+                Live activity
               </Link>
             </nav>
             <span className="ml-auto text-xs text-muted-foreground">
