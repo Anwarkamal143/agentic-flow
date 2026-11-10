@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   CancelJobInputSchema,
   CreateJobInputSchema,
+  AnswerQuestionInputSchema,
   DecideInputSchema,
   DeferInputSchema,
   PlanDecisionInputSchema,
@@ -221,6 +222,10 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/v1/inbox/:id/decide', async (c) => {
     const input = await parseBody(c, DecideInputSchema);
     return c.json(deps.inbox.decide(c.req.param('id'), input, OPERATOR));
+  });
+  app.post('/v1/inbox/:id/answer', async (c) => {
+    const input = await parseBody(c, AnswerQuestionInputSchema);
+    return c.json(deps.inbox.answer(c.req.param('id'), input, OPERATOR));
   });
   app.post('/v1/inbox/:id/defer', async (c) => {
     const input = await parseBody(c, DeferInputSchema);

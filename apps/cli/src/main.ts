@@ -2,7 +2,14 @@
 import { parseArgs } from 'node:util';
 import { activity, DEFAULT_TAIL_LINES } from './commands/activity.js';
 import { doctor } from './commands/doctor.js';
-import { inboxDecide, inboxDefer, inboxList, inboxShow, planShow } from './commands/inbox.js';
+import {
+  inboxAnswer,
+  inboxDecide,
+  inboxDefer,
+  inboxList,
+  inboxShow,
+  planShow,
+} from './commands/inbox.js';
 import { init } from './commands/init.js';
 import { jobCancel, jobCreate, jobList, jobShow } from './commands/job.js';
 import { logs } from './commands/logs.js';
@@ -45,6 +52,9 @@ Commands:
   inbox show <id> [--json]        Show an Inbox Item, its version and options
   inbox decide <id> <option> --expect-version <n> [--subject <ref>] [--comment <text>]
                                   Decide an item (a stale version or subject is refused)
+  inbox answer <id> (--answer [<q>=]<text>... | --file <answers.json>) [--expect-version <n>]
+                                  Answer a Question (an option or free text per question);
+                                  a fresh Attempt continues the Task with the answers
   inbox defer <id> | undefer <id> Hide an item from the default view, or show it again
   activity [--lines <n>] [--json] What is running now: each running Attempt with its
                                   Harness, model, Repository, tier, heartbeat, ports and
@@ -256,6 +266,8 @@ function inbox(argv: string[]): Promise<number> | number {
       'expect-version': { type: 'string' },
       subject: { type: 'string' },
       comment: { type: 'string' },
+      answer: { type: 'string', multiple: true },
+      file: { type: 'string' },
     },
   });
   const [sub, id, ...extra] = positionals;
@@ -271,6 +283,30 @@ function inbox(argv: string[]): Promise<number> | number {
         return 2;
       }
       return sub === 'show' ? inboxShow(id, { json }) : inboxDefer(id, sub === 'defer');
+    case 'answer': {
+      if (id === undefined || extra.length > 0) {
+        process.stderr.write(`factory: inbox answer takes exactly one item id\n\n${USAGE}`);
+        return 2;
+      }
+      const answers = values.answer ?? [];
+      if (answers.length > 0 === (values.file !== undefined)) {
+        process.stderr.write(
+          `factory: inbox answer needs --answer <text>... or --file <path>, not both\n`,
+        );
+        return 2;
+      }
+      const raw = values['expect-version'];
+      const version = Number(raw);
+      if (raw !== undefined && (!Number.isInteger(version) || version < 0)) {
+        process.stderr.write(`factory: --expect-version needs a whole number, not '${raw}'\n`);
+        return 2;
+      }
+      return inboxAnswer(id, {
+        answers,
+        file: values.file,
+        expectVersion: raw === undefined ? undefined : version,
+      });
+    }
     case 'decide': {
       const [option, ...more] = extra;
       const version = Number(values['expect-version']);

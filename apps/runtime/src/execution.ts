@@ -24,10 +24,15 @@ import {
   addUsage,
   attemptsCountedForRework,
   HarnessExitSchema,
+  inboxQuestionsOf,
+  questionProtocolIssues,
+  questionRoute,
+  resultAsks,
   UsageSchema,
   type HarnessExit,
   routeFailedAttempt,
   type AttemptCause,
+  type AnsweredQuestion,
   type AttemptFinding,
   type Blocker,
   type HarnessLogContent,
@@ -95,6 +100,7 @@ import {
 } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
+import { answersAfter, openQuestionItem } from './questions.js';
 import { latestArtifact } from './plan-approval.js';
 import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
@@ -533,15 +539,25 @@ export class TaskScheduler {
     const clone = repo.clonePath;
     const attemptId = newId('att');
     const n = (previous?.n ?? 0) + 1;
-    // A Retry redoes an interrupted Attempt: its packet's Findings, none of its own.
+    // A Retry redoes an interrupted Attempt, and an answer Attempt goes on from one that
+    // asked: both carry its packet's Findings, none of its own (it raised none).
     const cause: AttemptCause =
-      previous === undefined ? 'initial' : previous.state === 'interrupted' ? 'retry' : 'rework';
+      previous === undefined
+        ? 'initial'
+        : previous.state === 'interrupted'
+          ? 'retry'
+          : previous.state === 'needs_decision'
+            ? 'answer'
+            : 'rework';
     const priorFindings =
       previous === undefined
         ? []
-        : cause === 'retry'
+        : cause === 'retry' || cause === 'answer'
           ? TaskPacketSchema.parse(JSON.parse(previous.packetJson)).context.priorFindings
           : attemptFindings(db, previous);
+    // Every question asked so far on this Task, with the human's answers (ADR-0023).
+    const answers =
+      previous === undefined ? [] : db.transaction((tx) => answersAfter(tx, previous));
     const { wallClockMs } = this;
     let worktree: {
       id: string;
@@ -612,6 +628,7 @@ export class TaskScheduler {
       baseSha,
       wallClockMs,
       priorFindings,
+      answers,
     });
     await this.withClone(clone, async () => {
       await excludeResultFile(clone);
@@ -717,6 +734,7 @@ export class TaskScheduler {
             worktreeId,
             baseSha,
             priorFindings: priorFindings.length,
+            answers: answers.length,
           },
         });
         stepTask(
@@ -928,11 +946,15 @@ export class TaskScheduler {
           .map((i) => `[${i.rule}] ${i.message}`)
           .join('; ')}`,
       };
+    } else if (resultAsks(inspection.result.value)) {
+      // A Question (ARCHITECTURE §8): no Gate runs on work that waits for an answer.
+      this.askHuman(ctx, { inspection, resultContent, usage, result: inspection.result.value });
+      return;
     } else if (inspection.result.value.status !== 'done') {
       outcome = {
         state: 'failed',
         exitReason: 'not_done',
-        detail: `the Task Result's status is ${inspection.result.value.status}; only done is handled before Phase B`,
+        detail: `the Task Result's status is ${inspection.result.value.status}, not done or needs_decision`,
       };
     } else if (scopeViolations.length > 0) {
       // The path-scope Gate (ARCHITECTURE §7 step 3): nothing runs on out-of-scope work.
@@ -1086,6 +1108,7 @@ export class TaskScheduler {
     baseSha: string;
     wallClockMs: number;
     priorFindings: AttemptFinding[];
+    answers: AnsweredQuestion[];
   }): TaskPacket {
     const { job, task, definition, repo } = input;
     const artifacts = this.opts.artifacts.listForJob(job.id).filter((a) => a.stageRunId !== null);
@@ -1136,9 +1159,11 @@ export class TaskScheduler {
         artifacts: artifacts.map((a) => ({ id: a.id, kind: a.kind, contentHash: a.contentHash })),
         files,
         priorFindings: input.priorFindings,
+        answers: input.answers,
       },
       limits: { maxTurns: MAX_TURNS, wallClockS: input.wallClockMs / 1000 },
-      protocol: { resultFile: RESULT_FILE, mayAskQuestions: false },
+      // The developer may ask (ARCHITECTURE §7 Question rules); the reviewer never can.
+      protocol: { resultFile: RESULT_FILE, mayAskQuestions: true },
     } satisfies TaskPacket);
   }
 
@@ -1468,6 +1493,117 @@ export class TaskScheduler {
     this.dropSpools(input.attemptId);
   }
 
+  /**
+   * The developer asked a human (ARCHITECTURE §8 step 2), in one transaction:
+   * the Task Result is recorded, the Attempt ends `needs_decision`, one
+   * `question` Inbox Item batches its questions (or, at `max_questions`, a
+   * `question_cap_reached` Blocker opens none), the Task is `blocked`, its
+   * lease and capacity tokens are released and the Worktree is preserved. No
+   * process stays alive while it waits.
+   */
+  private askHuman(
+    ctx: AttemptContext,
+    input: {
+      inspection: Inspection;
+      resultContent: StoredContent | undefined;
+      usage: Usage | null;
+      result: TaskResult;
+    },
+  ): void {
+    const jobId = ctx.job.id;
+    const taskId = ctx.task.id;
+    const { attemptId } = ctx;
+    const questions = inboxQuestionsOf(input.result);
+    changeJob(
+      this.opts.db,
+      { jobId, expectedVersion: 'current', actor: ACTOR },
+      (tx, state, step) => {
+        const op = { jobId, actor: ACTOR };
+        const evidence = this.recordVerification(tx, {
+          jobId,
+          taskId,
+          attemptId,
+          baseSha: ctx.baseSha,
+          inspection: input.inspection,
+          resultContent: input.resultContent,
+          verificationRuns: [],
+        });
+        const task = requireTask(tx, taskId, 'verifying');
+        const answerAttemptsUsed = tx
+          .select({ id: schema.attempts.id })
+          .from(schema.attempts)
+          .where(and(eq(schema.attempts.taskId, taskId), eq(schema.attempts.cause, 'answer')))
+          .all().length;
+        const route = questionRoute({ answerAttemptsUsed, maxQuestions: task.maxQuestions });
+        const itemId =
+          route.kind === 'ask'
+            ? openQuestionItem(tx, {
+                jobId,
+                taskId,
+                taskKey: task.key,
+                attemptId,
+                questions,
+                evidence,
+                requestedBy: `agent:${ctx.harness.id}/${attemptId}`,
+                actor: ACTOR,
+              })
+            : undefined;
+        stepAttempt(
+          tx,
+          op,
+          attemptId,
+          'verifying',
+          {
+            state: 'needs_decision',
+            exitReason: 'needs_decision',
+            exitDetail:
+              itemId === undefined
+                ? `the developer asked ${String(questions.length)} question(s) with no answer Attempt left (maxQuestions ${String(task.maxQuestions)})`
+                : `the developer asked ${String(questions.length)} question(s); Inbox Item ${itemId} waits for the answers`,
+            ...inspectionColumns(input.inspection, input.usage),
+            processJson: null,
+            finishedAt: new Date().toISOString(),
+          },
+          {
+            exitReason: 'needs_decision',
+            headSha: input.inspection.headSha,
+            baseSha: ctx.baseSha,
+            questions: questions.length,
+            ...(itemId === undefined ? {} : { approvalId: itemId }),
+          },
+        );
+        const blocker: Blocker = {
+          ...(route.kind === 'ask'
+            ? {
+                kind: 'human' as const,
+                reason: 'awaiting_human' as const,
+                detail: `the developer asked ${String(questions.length)} question(s) and waits for the answers`,
+                requiredAction: `answer Inbox Item ${String(itemId)} (factory inbox answer ${String(itemId)})`,
+              }
+            : route.blocker),
+          taskId,
+          attemptId,
+          createdAt: new Date().toISOString(),
+        };
+        stepTask(tx, op, task, 'blocked', {
+          reason: blocker.reason,
+          payload: {
+            attemptId,
+            headSha: input.inspection.headSha,
+            ...(itemId === undefined ? {} : { approvalId: itemId }),
+          },
+          blocker,
+        });
+        const worktree = requireWorktree(tx, ctx.worktreeId);
+        releaseAttemptTokens(tx, taskId, worktree.portBase);
+        stepWorktree(tx, op, worktree, 'active', 'preserved');
+        settleExecution(tx, state, step);
+      },
+    );
+    this.opts.onCommit();
+    this.dropSpools(attemptId);
+  }
+
   /** Removes an ended Attempt's spool directories (they hold raw process output). */
   private dropSpools(attemptId: string): void {
     rmSync(join(this.opts.spoolRoot, attemptId), { recursive: true, force: true });
@@ -1592,16 +1728,26 @@ export class TaskScheduler {
       resultContent: StoredContent | undefined;
       verificationRuns: VerificationRunRecord[];
     },
-  ): void {
+  ): string[] {
     const { jobId, taskId, attemptId } = input;
     const head = input.inspection.headSha;
     const base = input.baseSha;
+    const recorded: string[] = [];
     if (input.resultContent !== undefined) {
-      this.opts.artifacts.record(
-        tx,
-        { jobId, taskId, attemptId, kind: 'task_result', content: input.resultContent },
-        ACTOR,
+      recorded.push(
+        this.opts.artifacts.record(
+          tx,
+          { jobId, taskId, attemptId, kind: 'task_result', content: input.resultContent },
+          ACTOR,
+        ).id,
       );
+    }
+    // The questions the Task Result asked, kept on the Attempt (redacted on write, ADR-0011).
+    if (input.inspection.result.kind === 'valid') {
+      tx.update(schema.attempts)
+        .set({ questionsJson: JSON.stringify(inboxQuestionsOf(input.inspection.result.value)) })
+        .where(eq(schema.attempts.id, attemptId))
+        .run();
     }
     const definition = TaskDefinitionSchema.parse(
       JSON.parse(requireTask(tx, taskId, 'verifying').definitionJson),
@@ -1664,6 +1810,7 @@ export class TaskScheduler {
           .run();
       }
     }
+    return recorded;
   }
 
   /** Fails a Task the factory itself could not carry through (`factory_error`). */
@@ -1819,9 +1966,13 @@ function readTaskResult(worktree: string): Inspection['result'] {
     }
     if (result.kind === 'missing') {
       const parsed = TaskResultSchema.safeParse(json);
-      result = parsed.success
-        ? { kind: 'valid', value: parsed.data }
-        : { kind: 'invalid', content: json, issues: schemaIssues(parsed.error) };
+      // A result that contradicts the question protocol is invalid too (one re-prompt, ADR-0023).
+      const protocol = parsed.success ? questionProtocolIssues(parsed.data) : [];
+      result = !parsed.success
+        ? { kind: 'invalid', content: json, issues: schemaIssues(parsed.error) }
+        : protocol.length > 0
+          ? { kind: 'invalid', content: json, issues: protocol }
+          : { kind: 'valid', value: parsed.data };
     }
   }
   return result;

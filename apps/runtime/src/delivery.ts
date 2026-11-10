@@ -11,6 +11,7 @@ import {
   evidenceSource,
   isCurrent,
   EvidenceVerdictSchema,
+  InboxQuestionSchema,
   RuleIssueSchema,
   TaskDefinitionSchema,
   type DeliveryReport,
@@ -110,9 +111,6 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       .all();
 
     if (attempt.n > 1) {
-      limitations.push(
-        `Task ${task.key}: approved on Attempt ${String(attempt.n)}; the ${String(attempt.n - 1)} earlier Attempt(s) failed a Gate or their review, and their commits stay on the branch beneath the fixes (each Attempt's head is kept at refs/factory/attempts/<attempt-id> in the Factory Clone).`,
-      );
       const earlier = db
         .select()
         .from(schema.attempts)
@@ -120,6 +118,14 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
         .orderBy(asc(schema.attempts.n))
         .all()
         .filter((a) => a.n < attempt.n);
+      const asked = earlier.filter((a) => a.state === 'needs_decision').length;
+      limitations.push(
+        `Task ${task.key}: approved on Attempt ${String(attempt.n)}; ${
+          asked === 0
+            ? `the ${String(attempt.n - 1)} earlier Attempt(s) failed a Gate or their review`
+            : `of the ${String(attempt.n - 1)} earlier Attempt(s), ${String(asked)} ended asking a human Question that was answered, the rest failed a Gate, their review or were interrupted`
+        }, and their commits stay on the branch beneath the later work (each Attempt's head is kept at refs/factory/attempts/<attempt-id> in the Factory Clone).`,
+      );
       for (const a of earlier) {
         const paths = z
           .array(AttemptFindingSchema)
@@ -141,6 +147,17 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     for (const v of z.array(RuleIssueSchema).parse(JSON.parse(attempt.protocolViolationsJson))) {
       limitations.push(`Task ${task.key}: protocol violation [${v.rule}] ${v.message}`);
     }
+    // Non-blocking questions under `done` were never asked of a human: they stay open (ADR-0023).
+    const openQuestions = z
+      .array(InboxQuestionSchema)
+      .parse(JSON.parse(attempt.questionsJson))
+      .filter((q) => !q.blocking)
+      .map((q) => ({ id: q.id, text: q.text }));
+    for (const q of openQuestions) {
+      limitations.push(
+        `Task ${task.key}: open question from the developer (agent-proposed, not answered): ${q.text}`,
+      );
+    }
     const commits = await commitsBetween(repo.clonePath, attempt.baseSha, attempt.headSha);
     delivered.push({
       key: task.key,
@@ -153,6 +170,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       commits,
       changedFiles: await changedPaths(repo.clonePath, attempt.baseSha, attempt.headSha),
       wipCommit: attempt.wipCommit,
+      openQuestions,
       verification: runs.map((r) => ({
         key: r.commandKey,
         exitCode: r.exitCode,

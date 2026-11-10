@@ -1,6 +1,6 @@
 /**
  * The Inbox (PRODUCT_SPEC §10, ADR-0016): Inbox Items, their versioned
- * decisions, defer and undefer, and the plan operations `approvePlan`,
+ * decisions, defer and undefer, `answerQuestion` (ADR-0023), and the plan operations `approvePlan`,
  * `rejectPlan`, `requestPlanChanges` and `editPlan` (ADR-0019) with the plan
  * approval view. Every decision names the item's version and subject, and only
  * a human actor decides.
@@ -9,7 +9,10 @@ import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   ApprovalOptionSchema,
   ApprovalSchema,
+  BlockerSchema,
+  checkAnswers,
   checkInboxChange,
+  InboxQuestionSchema,
   checkPlanChangeRequest,
   EffectiveConfigSchema,
   humanDecisionPoints,
@@ -23,6 +26,8 @@ import {
   TriageProposalSchema,
   validatePlan,
   WorkflowSnapshotSchema,
+  type AnswerQuestionInput,
+  type AnswerRefusal,
   type Approval,
   type Billing,
   type DecideInput,
@@ -35,8 +40,9 @@ import {
   type RequestPlanChangesInput,
 } from '@factory/domain';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
-import { changeJob, type StageRunStepper } from './engine.js';
+import { changeJob, stepTask, type StageRunStepper } from './engine.js';
 import { ApiFailure } from './errors.js';
 import { latestArtifact, openPlanItem, queueNextStage, startReplan } from './plan-approval.js';
 import { cancelPlanTasks, persistPlanTasks, planContextOf, repositoriesOf } from './plans.js';
@@ -49,6 +55,12 @@ const REFUSAL_STATUS: Readonly<Record<InboxRefusal['code'], 400 | 403 | 409>> = 
   version_conflict: 409,
   subject_mismatch: 409,
   unknown_option: 400,
+};
+
+const ANSWER_STATUS: Readonly<Record<AnswerRefusal['code'], 400>> = {
+  answer_missing: 400,
+  unknown_question: 400,
+  invalid_answer: 400,
 };
 
 const PLAN_CHANGE_STATUS: Readonly<Record<PlanChangeRefusal['code'], 400 | 409>> = {
@@ -90,6 +102,13 @@ export class InboxService {
     const item = requireItem(this.db, id);
     changeJob(this.db, { jobId: item.jobId, expectedVersion: 'current', actor }, (tx, _s, step) => {
       const row = requireItem(tx, id);
+      if (row.kind === 'question') {
+        throw new ApiFailure(
+          409,
+          'answer_required',
+          'a question item is answered, not decided: POST /v1/inbox/:id/answer (factory inbox answer)',
+        );
+      }
       refuseUnless(row, { actor, ...input });
       if (row.kind === 'plan' && input.option === 'request_changes') {
         refuseReplanUnless(tx, row.jobId, input.comment);
@@ -116,6 +135,85 @@ export class InboxService {
       if (row.kind === 'plan') applyPlanDecision(tx, row, input.option, step, actor);
       else throw new ApiFailure(409, 'not_decidable', `no ${row.kind} items are decided yet`);
     });
+    this.onCommit();
+    return this.get(id);
+  }
+
+  /**
+   * `answerQuestion` (ARCHITECTURE §8 step 3): answers each question of an
+   * open `question` item (an offered option or free text) in one transaction.
+   * The item is decided, its Task goes `blocked → ready` and `execution`
+   * queued again, so a fresh Attempt (`cause: answer`) starts on the same Task
+   * Branch with the answers in its packet. The answers are guidance only:
+   * nothing here changes a scope, a cap or a policy.
+   */
+  answer(id: string, input: AnswerQuestionInput, actor: string): Approval {
+    const item = requireItem(this.db, id);
+    changeJob(
+      this.db,
+      { jobId: item.jobId, expectedVersion: 'current', actor },
+      (tx, state, step) => {
+        const row = requireItem(tx, id);
+        if (row.kind !== 'question') {
+          throw new ApiFailure(
+            409,
+            'not_a_question',
+            `the item is a ${row.kind} item; decide it instead (POST /v1/inbox/:id/decide)`,
+          );
+        }
+        refuseUnless(row, {
+          actor,
+          expectedVersion: input.expectedVersion,
+          subjectRef: input.subjectRef,
+          option: 'answer',
+        });
+        const questions = z.array(InboxQuestionSchema).parse(JSON.parse(row.questionsJson ?? '[]'));
+        const refusal = checkAnswers(questions, input.answers);
+        if (refusal !== undefined) {
+          throw new ApiFailure(ANSWER_STATUS[refusal.code], refusal.code, refusal.message);
+        }
+        const decision = InboxDecisionSchema.parse({
+          option: 'answer',
+          comment: null,
+          answers: input.answers,
+        });
+        bumpItem(tx, row, {
+          state: 'decided',
+          decidedBy: actor,
+          decidedAt: new Date().toISOString(),
+          decisionJson: JSON.stringify(decision),
+        });
+        appendEvent(tx, {
+          entityKind: 'approval',
+          entityId: id,
+          jobId: row.jobId,
+          type: 'approval.decided',
+          actor,
+          payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
+        });
+        const task =
+          row.taskId === null
+            ? undefined
+            : tx.select().from(schema.tasks).where(eq(schema.tasks.id, row.taskId)).get();
+        const blocker =
+          task?.blockerJson == null ? undefined : BlockerSchema.parse(JSON.parse(task.blockerJson));
+        if (
+          task?.state !== 'blocked' ||
+          blocker?.reason !== 'awaiting_human' ||
+          blocker.attemptId !== row.subjectRef
+        ) {
+          throw new Error(`question item ${id} holds no Task waiting for its answer`);
+        }
+        stepTask(tx, { jobId: row.jobId, actor }, task, 'ready', {
+          reason: 'answered',
+          payload: { approvalId: id, answeredAttemptId: row.subjectRef },
+        });
+        const execution = state.stageRuns.filter((r) => r.stageId === 'execution').at(-1);
+        if (execution?.state === 'waiting_human' || execution?.state === 'blocked') {
+          step(execution, 'queued', { reason: `Question ${id} answered by ${actor}` });
+        }
+      },
+    );
     this.onCommit();
     return this.get(id);
   }
@@ -376,6 +474,7 @@ export class InboxService {
       kind: row.kind,
       subjectRef: row.subjectRef,
       question: row.question,
+      questions: row.questionsJson === null ? null : (JSON.parse(row.questionsJson) as unknown),
       why: row.why,
       options: ApprovalOptionSchema.array().parse(JSON.parse(row.optionsJson)),
       recommended: row.recommended,
