@@ -68,6 +68,7 @@ pnpm test:real     # on demand only, never CI: [real] tests with the real Claude
 pnpm format        # Prettier --write
 pnpm --filter @factory/db db:generate   # write a migration after editing packages/db/src/schema.ts
 pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | repo add | job create|list|show|cancel | logs
+                   #   | plan show <job> | inbox [--all] | inbox show|defer|undefer <id> | inbox decide <id> <option> --expect-version <n>
 pnpm fixtures      # generate fixtures/repos/tiny-ts (gitignored; tests make their own)
 pnpm dev           # factory start + the dashboard (next dev) on http://127.0.0.1:7421 (FACTORY_DASHBOARD_PORT); needs `factory init`
 ```
