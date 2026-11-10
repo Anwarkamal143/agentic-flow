@@ -19,7 +19,28 @@ export interface RunningDashboard {
   html(path: string, status?: number): Promise<string>;
   /** A raw GET with this `Host` header (fetch can't set one). Resolves with the status. */
   getWithHost(path: string, host: string): Promise<number>;
+  /**
+   * A form POST as a browser sends one (`application/x-www-form-urlencoded`),
+   * with the dashboard's own `Origin` and `Host` unless overridden (`null`
+   * leaves the header out). Redirects are not followed.
+   */
+  postForm(
+    path: string,
+    fields: Record<string, string>,
+    headers?: FormHeaders,
+  ): Promise<FormResult>;
   output(): string;
+}
+
+export interface FormHeaders {
+  origin?: string | null;
+  host?: string;
+}
+
+export interface FormResult {
+  status: number;
+  location: string | undefined;
+  body: string;
 }
 
 async function freePort(): Promise<number> {
@@ -103,6 +124,35 @@ export async function startDashboard(home: TestHome): Promise<RunningDashboard> 
         });
         req.on('error', reject);
         req.end();
+      }),
+    postForm: (path, fields, headers = {}) =>
+      new Promise((resolve, reject) => {
+        const body = new URLSearchParams(fields).toString();
+        const origin = headers.origin === undefined ? url : headers.origin;
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            port,
+            path,
+            method: 'POST',
+            headers: {
+              host: headers.host ?? `127.0.0.1:${String(port)}`,
+              'content-type': 'application/x-www-form-urlencoded',
+              'content-length': Buffer.byteLength(body),
+              ...(origin === null ? {} : { origin }),
+            },
+          },
+          (res) => {
+            let text = '';
+            res.setEncoding('utf8');
+            res.on('data', (d: string) => (text += d));
+            res.on('end', () => {
+              resolve({ status: res.statusCode ?? 0, location: res.headers.location, body: text });
+            });
+          },
+        );
+        req.on('error', reject);
+        req.end(body);
       }),
     output: () => output,
   };
