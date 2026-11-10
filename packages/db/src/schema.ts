@@ -202,6 +202,8 @@ export const tasks = sqliteTable(
     maxAttempts: integer('max_attempts').notNull(),
     /** Retries after interrupted Attempts; they don't count toward `max_attempts`. */
     maxRetries: integer('max_retries').notNull().default(2),
+    /** Answer Attempts after Questions (ADR-0023); they count toward neither cap above. */
+    maxQuestions: integer('max_questions').notNull().default(3),
     /** Why a `blocked` Task can't go on (`Blocker`), while it is blocked. */
     blockerJson: text('blocker_json'),
     version: integer('version').notNull(),
@@ -240,7 +242,7 @@ export const attempts = sqliteTable(
       .notNull()
       .references(() => tasks.id),
     n: integer('n').notNull(),
-    /** `initial`, `rework` or `retry` (`AttemptCause`). */
+    /** `initial`, `rework`, `retry` or `answer` (`AttemptCause`). */
     cause: text('cause').notNull().default('initial'),
     state: text('state').notNull(),
     harnessId: text('harness_id').notNull(),
@@ -263,6 +265,11 @@ export const attempts = sqliteTable(
     protocolViolationsJson: text('protocol_violations_json').notNull(),
     /** JSON array of `AttemptFinding`: what the factory's Gates found (the review's are in `review_findings`). */
     gateFindingsJson: text('gate_findings_json').notNull().default('[]'),
+    /**
+     * JSON array of `InboxQuestion`: the questions its Task Result asked (agent
+     * output, redacted on write like every binding, ADR-0011).
+     */
+    questionsJson: text('questions_json').notNull().default('[]'),
     startedAt: text('started_at').notNull(),
     finishedAt: text('finished_at'),
     exitReason: text('exit_reason'),
@@ -451,6 +458,8 @@ export const approvals = sqliteTable(
     subjectRef: text('subject_ref').notNull(),
     question: text('question').notNull(),
     why: text('why').notNull(),
+    /** A `question` item's JSON array of `InboxQuestion` (agent-proposed, redacted); null otherwise. */
+    questionsJson: text('questions_json'),
     /** JSON array of `ApprovalOption`. */
     optionsJson: text('options_json').notNull(),
     recommended: text('recommended'),

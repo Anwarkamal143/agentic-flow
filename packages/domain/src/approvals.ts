@@ -3,6 +3,7 @@
  * (ARCHITECTURE §5, §8.1, §16; PRODUCT_SPEC §10; ADR-0016). No I/O.
  */
 import { z } from 'zod';
+import { InboxQuestionSchema, QuestionAnswerSchema, type InboxQuestion } from './questions.js';
 
 export const ApprovalKindSchema = z.enum(['question', 'plan', 'spec_change', 'blocker', 'cleanup']);
 export type ApprovalKind = z.infer<typeof ApprovalKindSchema>;
@@ -27,6 +28,8 @@ export type ApprovalOption = z.infer<typeof ApprovalOptionSchema>;
 export const InboxDecisionSchema = z.object({
   option: z.string(),
   comment: z.string().nullable(),
+  /** A `question` item's answers, one per answered question (ADR-0023). */
+  answers: z.array(QuestionAnswerSchema).optional(),
 });
 export type InboxDecision = z.infer<typeof InboxDecisionSchema>;
 
@@ -44,6 +47,8 @@ export const ApprovalSchema = z.object({
   /** What is decided on (for `plan`, the plan Artifact id). A decision naming another is refused. */
   subjectRef: z.string(),
   question: z.string(),
+  /** A `question` item's batched questions (agent-proposed, redacted); `null` for other kinds. */
+  questions: z.array(InboxQuestionSchema).nullable(),
   /** Why a human is needed. */
   why: z.string(),
   options: z.array(ApprovalOptionSchema).min(1),
@@ -76,6 +81,28 @@ export type DecideInput = z.infer<typeof DecideInputSchema>;
 /** `POST /v1/inbox/:id/defer` and `/undefer`. */
 export const DeferInputSchema = z.object({ expectedVersion: z.number().int().nonnegative() });
 export type DeferInput = z.infer<typeof DeferInputSchema>;
+
+/**
+ * The one option of a `question` item: answering it, through `answerQuestion`
+ * (each question by option or free text). The questions' own options are
+ * agent-proposed and are on the questions, not here.
+ */
+export const QUESTION_OPTIONS: readonly ApprovalOption[] = [
+  {
+    id: 'answer',
+    label: 'Answer',
+    description:
+      'Answer each question (an offered option or free text); a fresh Attempt continues on the same Task Branch with your answers. An answer never widens the scope or grants a permission.',
+    agentProposed: false,
+  },
+];
+
+/** The question an Inbox Question item shows in a list: how many it batches. */
+export function questionItemTitle(taskKey: string, questions: readonly InboxQuestion[]): string {
+  const blocking = questions.filter((q) => q.blocking).length;
+  const optional = questions.length - blocking;
+  return `Task ${taskKey} asks ${String(blocking)} question${blocking === 1 ? '' : 's'}${optional === 0 ? '' : ` (+${String(optional)} optional)`}`;
+}
 
 /**
  * `POST /v1/jobs/:id/plan/approve` and `/reject` (`approvePlan`, `rejectPlan`):

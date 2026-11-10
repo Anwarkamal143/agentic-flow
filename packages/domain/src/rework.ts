@@ -83,8 +83,13 @@ export type BlockerKind = z.infer<typeof BlockerKindSchema>;
  * `recovery_uncertain`: after a crash the factory can't safely go on (the
  * interrupted Attempt left uncommitted changes, or its Worktree's state is
  * unknown). `retry_cap_reached`: an interrupted Attempt has no Retry left.
+ * `awaiting_human`: the developer asked a Question; the Task waits for the
+ * answer in the Inbox (ADR-0023). `question_cap_reached`: it asked again with
+ * no answer Attempt left (`max_questions`).
  */
 export const BlockerReasonSchema = z.enum([
+  'awaiting_human',
+  'question_cap_reached',
   'rework_cap_reached',
   'fault_origin_plan',
   'fault_origin_spec',
