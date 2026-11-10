@@ -39,4 +39,26 @@ describe('resolveEffectiveConfig: Phase B caps and concurrency', () => {
     expect(config.concurrency.perRepository).toEqual({ value: 2, source: 'recipe' });
     expect(config.concurrency.perJob).toEqual({ value: 2, source: 'recipe' });
   });
+
+  it('lets a Job override raise or lower each limit at creation, with source job', () => {
+    const config = resolveEffectiveConfig({
+      project: { concurrency: { perRepository: 1, perJob: 4 } },
+      job: { concurrency: { perRepository: 3, perJob: 1 } },
+    });
+    expect(config.concurrency).toEqual({
+      perRepository: { value: 3, source: 'job' },
+      perJob: { value: 1, source: 'job' },
+    });
+  });
+
+  it('keeps the Project or recipe value for a limit the Job does not override', () => {
+    const config = resolveEffectiveConfig({
+      project: { concurrency: { perJob: 4 } },
+      job: { concurrency: { perRepository: 5 } },
+    });
+    expect(config.concurrency).toEqual({
+      perRepository: { value: 5, source: 'job' },
+      perJob: { value: 4, source: 'project' },
+    });
+  });
 });

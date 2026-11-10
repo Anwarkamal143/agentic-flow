@@ -33,6 +33,8 @@ export * from './recovery.js';
 export * from './tool-policy.js';
 export * from './approvals.js';
 export * from './plan-view.js';
+export * from './capacity.js';
+export * from './dependency-base.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -66,6 +68,15 @@ export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
 export const PlanApprovalPolicySchema = z.enum(['required', 'skip']);
 export type PlanApprovalPolicy = z.infer<typeof PlanApprovalPolicySchema>;
 
+/** Task concurrency limits set at a level (Project, or a Job at creation); unset inherits. */
+export const ConcurrencyOverrideSchema = z
+  .object({
+    perRepository: z.number().int().min(1).max(16).optional(),
+    perJob: z.number().int().min(1).max(16).optional(),
+  })
+  .strict();
+export type ConcurrencyOverride = z.infer<typeof ConcurrencyOverrideSchema>;
+
 /** Operator-set Project configuration. Every field is optional: unset means inherit. */
 export const ProjectConfigSchema = z
   .object({
@@ -80,13 +91,7 @@ export const ProjectConfigSchema = z
     /** Replans per Job; re-specification counts too, a Plan Edit doesn't (ARCHITECTURE §4.6, §4.7). */
     maxReplans: z.number().int().min(0).max(10).optional(),
     /** Task concurrency limits (ARCHITECTURE §12). A Job may override them at creation. */
-    concurrency: z
-      .object({
-        perRepository: z.number().int().min(1).max(16).optional(),
-        perJob: z.number().int().min(1).max(16).optional(),
-      })
-      .strict()
-      .optional(),
+    concurrency: ConcurrencyOverrideSchema.optional(),
   })
   .strict();
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -285,7 +290,7 @@ export function currentStageOf(stageRuns: readonly StageRunPosition[]): StageId 
 
 // ---- Configuration (ARCHITECTURE §15, Phase A minimal) ---------------------
 
-export const ConfigSourceSchema = z.enum(['recipe', 'project']);
+export const ConfigSourceSchema = z.enum(['recipe', 'project', 'job']);
 export type ConfigSource = z.infer<typeof ConfigSourceSchema>;
 
 const effectiveValue = <T extends z.ZodType>(value: T) =>
@@ -357,8 +362,20 @@ export function toolPolicyOf(configSnapshotJson: string, role: HarnessRole): Too
 }
 
 /** Resolves the Effective Configuration. Pure; frozen onto the Job at creation. */
-export function resolveEffectiveConfig(levels: { project: ProjectConfig }): EffectiveConfig {
+export function resolveEffectiveConfig(levels: {
+  project: ProjectConfig;
+  /** The Job's own overrides, given at creation (ARCHITECTURE §12: concurrency only). */
+  job?: { concurrency?: ConcurrencyOverride | undefined };
+}): EffectiveConfig {
   const { project } = levels;
+  const limit = (key: keyof ConcurrencyOverride) => {
+    const job = levels.job?.concurrency?.[key];
+    if (job !== undefined) return { value: job, source: 'job' as const };
+    const own = project.concurrency?.[key];
+    return own === undefined
+      ? { value: RECIPE_DEFAULTS.concurrency[key], source: 'recipe' as const }
+      : { value: own, source: 'project' as const };
+  };
   return {
     maxAttempts:
       project.maxAttempts === undefined
@@ -381,16 +398,7 @@ export function resolveEffectiveConfig(levels: { project: ProjectConfig }): Effe
       project.maxReplans === undefined
         ? { value: RECIPE_DEFAULTS.maxReplans, source: 'recipe' }
         : { value: project.maxReplans, source: 'project' },
-    concurrency: {
-      perRepository:
-        project.concurrency?.perRepository === undefined
-          ? { value: RECIPE_DEFAULTS.concurrency.perRepository, source: 'recipe' }
-          : { value: project.concurrency.perRepository, source: 'project' },
-      perJob:
-        project.concurrency?.perJob === undefined
-          ? { value: RECIPE_DEFAULTS.concurrency.perJob, source: 'recipe' }
-          : { value: project.concurrency.perJob, source: 'project' },
-    },
+    concurrency: { perRepository: limit('perRepository'), perJob: limit('perJob') },
   };
 }
 
@@ -451,6 +459,8 @@ export const CreateJobInputSchema = z.object({
   repositoryId: z.string().min(1),
   title: z.string().trim().min(1).max(200),
   description: z.string().max(20_000).default(''),
+  /** Overrides of the Effective Configuration's concurrency limits, up or down (ARCHITECTURE §12). */
+  concurrency: ConcurrencyOverrideSchema.optional(),
 });
 export type CreateJobInput = z.infer<typeof CreateJobInputSchema>;
 
