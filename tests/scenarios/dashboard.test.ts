@@ -1,9 +1,10 @@
 /**
- * The read-only dashboard (#15). The built dashboard runs against a real
+ * The dashboard's read views (#15). The built dashboard runs against a real
  * runtime and is read over HTTP like a browser that runs no scripts: the
  * server-rendered pages must show the persisted Job, Tasks, Attempts,
  * Evidence and review, label unknown usage and the Tier 0 guardrail honestly,
- * and offer no write action. Its event stream passes the runtime's through
+ * and offer no write action outside the Inbox (#37, `dashboard-inbox.test.ts`).
+ * Its event stream passes the runtime's through
  * and resumes without gaps or duplicates.
  */
 import { describe, expect, it } from 'vitest';
@@ -66,7 +67,7 @@ function text(html: string): string {
     .replace(/\s+/g, ' ');
 }
 
-describe('the read-only dashboard', () => {
+describe("the dashboard's read views", () => {
   it('renders the job detail of a Job persisted through the API: Tasks, Attempts, Evidence, review, timeline', async () => {
     const { rt, job } = await completedJob();
     const dash = await startDashboard(rt.home);
@@ -129,11 +130,19 @@ describe('the read-only dashboard', () => {
     expect(text(html)).toContain('Add sum() to math');
   });
 
-  it('offers no write action, and keeps the API token on the server', async () => {
+  // Narrowed by #37 (ADR-0022): the Inbox is the dashboard's only write path,
+  // so every page but the Inbox still has no write control.
+  it('offers no write action outside the Inbox, and keeps the API token on the server', async () => {
     const { rt, job } = await completedJob();
     const dash = await startDashboard(rt.home);
+    const artifacts = await json<{ id: string }[]>(rt.request(`/v1/jobs/${job.id}/artifacts`));
 
-    for (const path of ['/', `/jobs/${job.id}`]) {
+    for (const path of [
+      '/',
+      `/jobs/${job.id}`,
+      '/activity',
+      `/artifacts/${String(artifacts[0]?.id)}`,
+    ]) {
       const html = await dash.html(path);
       expect(html, path).not.toMatch(/<(form|button|input|textarea|select)\b/);
       expect(html, path).not.toContain(rt.home.token());

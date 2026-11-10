@@ -30,11 +30,11 @@ import {
   usageLabels,
 } from '@/lib/format';
 
-function State({ value }: { value: string }) {
+export function State({ value }: { value: string }) {
   return <Badge variant={stateVariant(value)}>{humanize(value)}</Badge>;
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
       <dt className="text-xs text-muted-foreground">{label}</dt>
