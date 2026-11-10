@@ -31,6 +31,7 @@ export * from './redaction.js';
 export * from './logs.js';
 export * from './recovery.js';
 export * from './tool-policy.js';
+export * from './activity.js';
 export * from './approvals.js';
 export * from './plan-view.js';
 

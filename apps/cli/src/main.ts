@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { activity, DEFAULT_TAIL_LINES } from './commands/activity.js';
 import { doctor } from './commands/doctor.js';
 import { inboxDecide, inboxDefer, inboxList, inboxShow, planShow } from './commands/inbox.js';
 import { init } from './commands/init.js';
@@ -43,6 +44,9 @@ Commands:
   inbox decide <id> <option> --expect-version <n> [--subject <ref>] [--comment <text>]
                                   Decide an item (a stale version or subject is refused)
   inbox defer <id> | undefer <id> Hide an item from the default view, or show it again
+  activity [--lines <n>] [--json] What is running now: each running Attempt with its
+                                  Harness, model, Repository, tier, heartbeat, ports and
+                                  the redacted tail of its output (default 20 lines)
 
 Environment:
   FACTORY_HOME   factory home directory (default ~/.factory)
@@ -120,6 +124,18 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       return logs(id, { json: values.json === true });
+    }
+    case 'activity': {
+      const { values } = parseArgs({
+        args: rest,
+        options: { json: { type: 'boolean' }, lines: { type: 'string' } },
+      });
+      const lines = values.lines === undefined ? DEFAULT_TAIL_LINES : Number(values.lines);
+      if (!Number.isInteger(lines) || lines < 0) {
+        process.stderr.write(`factory: --lines takes a whole number\n\n${USAGE}`);
+        return 2;
+      }
+      return activity({ json: values.json === true, lines });
     }
     case undefined:
     case 'help':
