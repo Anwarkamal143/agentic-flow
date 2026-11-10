@@ -102,6 +102,7 @@ export async function planShow(jobId: string, opts: { json: boolean }): Promise<
   } | null;
   const lines = [
     `Plan ${view.planArtifactId} for Job ${view.job.id}: ${view.job.title} (${view.job.status})`,
+    `  by ${view.planAuthoredBy}; Replans used: ${String(view.replans.used)} of ${String(view.replans.max)}`,
     'Specification:',
     ...(spec === null
       ? ['  (none)']
@@ -140,6 +141,8 @@ export async function planShow(jobId: string, opts: { json: boolean }): Promise<
     if (view.approval.state === 'open') {
       lines.push(
         `  decide:  factory inbox decide ${view.approval.id} approve|reject --expect-version ${String(view.approval.version)}`,
+        `  replan:  factory plan request-changes ${view.job.id} --feedback <text>`,
+        `  edit:    factory plan show ${view.job.id} --raw > plan.json; factory plan edit ${view.job.id} --file plan.json`,
       );
     }
   }
@@ -165,7 +168,7 @@ function writeItem(i: Approval): void {
     '  options:',
     ...i.options.map(
       (o) =>
-        `    ${o.id.padEnd(10)} ${o.description}${o.agentProposed ? ' [agent-proposed]' : ''}${i.recommended === o.id ? ' [recommended]' : ''}`,
+        `    ${o.id.padEnd(16)} ${o.description}${o.agentProposed ? ' [agent-proposed]' : ''}${i.recommended === o.id ? ' [recommended]' : ''}`,
     ),
   ];
   if (i.decision !== null) {
@@ -182,7 +185,7 @@ async function getItem(api: RuntimeClient, id: string): Promise<Approval | undef
 }
 
 /** Runs `call`; an API refusal is printed with its code and gives `undefined`. */
-async function refused<T>(call: () => Promise<T>): Promise<T | undefined> {
+export async function refused<T>(call: () => Promise<T>): Promise<T | undefined> {
   try {
     return await call();
   } catch (err) {

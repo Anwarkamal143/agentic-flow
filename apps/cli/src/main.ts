@@ -6,6 +6,7 @@ import { inboxDecide, inboxDefer, inboxList, inboxShow, planShow } from './comma
 import { init } from './commands/init.js';
 import { jobCancel, jobCreate, jobList, jobShow } from './commands/job.js';
 import { logs } from './commands/logs.js';
+import { planEdit, planRaw, planRequestChanges } from './commands/plan.js';
 import { repoAdd } from './commands/repo.js';
 import { start, status, stop } from './commands/lifecycle.js';
 
@@ -29,8 +30,15 @@ Commands:
                                   Cancel a Job, stopping its running work
   logs <job> [--json]             Show the (redacted) Harness and verification output
                                   of a Job's Attempts
-  plan show <job> [--json]        Show the Job's Plan for approval: Specification, DAG,
+  plan show <job> [--json|--raw]  Show the Job's Plan for approval: Specification, DAG,
                                   parallel waves, risks, decision points, estimate
+                                  (--raw: the Plan itself, as JSON for plan edit)
+  plan edit <job> --file <plan.json>
+                                  Replace the waiting Plan with yours (a Plan Edit:
+                                  validated, not a Replan)
+  plan request-changes <job> --feedback <text>
+                                  Send the waiting Plan back to the planner (a Replan,
+                                  capped by maxReplans)
   inbox [--all] [--json]          List open Inbox Items (--all: every item, deferred too)
   inbox show <id> [--json]        Show an Inbox Item, its version and options
   inbox decide <id> <option> --expect-version <n> [--subject <ref>] [--comment <text>]
@@ -102,20 +110,8 @@ async function main(argv: string[]): Promise<number> {
       return job(rest);
     case 'inbox':
       return inbox(rest);
-    case 'plan': {
-      const [sub, ...subArgs] = rest;
-      const { values, positionals } = parseArgs({
-        args: subArgs,
-        allowPositionals: true,
-        options: { json: { type: 'boolean' } },
-      });
-      const [id, ...extra] = positionals;
-      if (sub !== 'show' || id === undefined || extra.length > 0) {
-        process.stderr.write(`factory: plan show takes exactly one Job id\n\n${USAGE}`);
-        return 2;
-      }
-      return planShow(id, { json: values.json === true });
-    }
+    case 'plan':
+      return plan(rest);
     case 'logs': {
       const { values, positionals } = parseArgs({
         args: rest,
@@ -193,6 +189,44 @@ function job(argv: string[]): Promise<number> | number {
     }
     default:
       process.stderr.write(`factory: unknown job command '${sub ?? ''}'\n\n${USAGE}`);
+      return 2;
+  }
+}
+
+function plan(argv: string[]): Promise<number> | number {
+  const [sub, ...subArgs] = argv;
+  const { values, positionals } = parseArgs({
+    args: subArgs,
+    allowPositionals: true,
+    options: {
+      json: { type: 'boolean' },
+      raw: { type: 'boolean' },
+      file: { type: 'string' },
+      feedback: { type: 'string' },
+    },
+  });
+  const [id, ...extra] = positionals;
+  if (id === undefined || extra.length > 0) {
+    process.stderr.write(`factory: plan ${sub ?? ''} takes exactly one Job id\n\n${USAGE}`);
+    return 2;
+  }
+  switch (sub) {
+    case 'show':
+      return values.raw === true ? planRaw(id) : planShow(id, { json: values.json === true });
+    case 'edit':
+      if (values.file === undefined) {
+        process.stderr.write(`factory: plan edit needs --file <plan.json>\n`);
+        return 2;
+      }
+      return planEdit(id, { file: values.file });
+    case 'request-changes':
+      if (values.feedback === undefined || values.feedback.trim() === '') {
+        process.stderr.write(`factory: plan request-changes needs --feedback <text>\n`);
+        return 2;
+      }
+      return planRequestChanges(id, { feedback: values.feedback });
+    default:
+      process.stderr.write(`factory: unknown plan command '${sub ?? ''}'\n\n${USAGE}`);
       return 2;
   }
 }

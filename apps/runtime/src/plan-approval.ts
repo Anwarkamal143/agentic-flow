@@ -1,8 +1,10 @@
 /**
- * The `plan_approval` Stage (PRODUCT_SPEC §4, ADR-0016). It runs no Harness:
- * entering it either skips it (`planApproval: skip`) or opens a `plan` Inbox
- * Item and waits `waiting_human` on it, in the transaction that finished
- * `planning`. A human's decision ends it `succeeded` or `rejected`.
+ * The `plan_approval` Stage (PRODUCT_SPEC §4, ADR-0016, ADR-0019). It runs no
+ * Harness: entering it either skips it (`planApproval: skip`) or opens a
+ * `plan` Inbox Item and waits `waiting_human` on it, in the transaction that
+ * finished `planning`. A human's decision ends it `succeeded` or `rejected`,
+ * or, on "request changes", `superseded` by a Replan: new Stage Runs of
+ * `planning` and `plan_approval`.
  */
 import { appendEvent, schema, type Tx } from '@factory/db';
 import {
@@ -14,6 +16,7 @@ import {
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { readJobState, type JobState, type StageRunStepper } from './engine.js';
 import { newId } from './ids.js';
+import { cancelPlanTasks } from './plans.js';
 
 type StageRunRow = JobState['stageRuns'][number];
 
@@ -50,7 +53,8 @@ export function queueNextStage(
   openPlanItem(tx, jobId, next.id, actor);
 }
 
-function openPlanItem(tx: Tx, jobId: string, stageRunId: string, actor: string): void {
+/** Opens the `plan` Inbox Item for the Job's newest Plan, holding `stageRunId`. */
+export function openPlanItem(tx: Tx, jobId: string, stageRunId: string, actor: string): string {
   const plan = latestArtifact(tx, jobId, 'plan');
   if (plan === undefined) throw new Error(`Job ${jobId} reached plan_approval without a Plan`);
   const spec = latestArtifact(tx, jobId, 'spec');
@@ -85,6 +89,80 @@ function openPlanItem(tx: Tx, jobId: string, stageRunId: string, actor: string):
     actor,
     payload: { kind, subjectRef: plan.id, stageRunId },
   });
+  return id;
+}
+
+/**
+ * "Request changes" (a Replan before execution, ARCHITECTURE §4.7): the
+ * waiting `plan_approval` Stage Run is `superseded`, the replaced Plan's Tasks
+ * (none ran) are cancelled, one Replan is counted, and new Stage Runs of
+ * `planning` (queued) and `plan_approval` (pending) are added. The planner then
+ * re-plans from the current Plan and the item's feedback (`replanRequestOf`).
+ * The caller has checked the cap and the feedback.
+ */
+export function startReplan(
+  tx: Tx,
+  input: { jobId: string; run: StageRunRow; planArtifactId: string; approvalId: string },
+  step: StageRunStepper,
+  actor: string,
+): void {
+  const { jobId, run } = input;
+  step(run, 'superseded', {
+    reason: `${actor} requested changes to Plan ${input.planArtifactId}; the planner re-plans`,
+  });
+  cancelPlanTasks(tx, { jobId, actor }, input.planArtifactId, 'plan_replanned');
+  const { job, stageRuns } = readJobState(tx, jobId);
+  const config = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson));
+  const replansUsed = job.replansUsed + 1;
+  tx.update(schema.jobs).set({ replansUsed }).where(eq(schema.jobs.id, jobId)).run();
+  appendEvent(tx, {
+    entityKind: 'job',
+    entityId: jobId,
+    jobId,
+    type: 'job.replanned',
+    actor,
+    payload: {
+      replansUsed,
+      maxReplans: config.maxReplans.value,
+      planArtifactId: input.planArtifactId,
+      approvalId: input.approvalId,
+    },
+  });
+  const planning = latestRunOf(stageRuns, 'planning');
+  const nextPlanning = addStageRun(tx, jobId, planning, actor);
+  addStageRun(tx, jobId, run, actor);
+  step(nextPlanning, 'queued');
+}
+
+/** Adds the next Stage Run (`attempt + 1`, `pending`) of `of`'s Stage, with its event. */
+function addStageRun(tx: Tx, jobId: string, of: StageRunRow, actor: string): StageRunRow {
+  const id = newId('stg');
+  tx.insert(schema.stageRuns)
+    .values({
+      id,
+      jobId,
+      stageId: of.stageId,
+      position: of.position,
+      state: 'pending',
+      attempt: of.attempt + 1,
+      version: 0,
+    })
+    .run();
+  appendEvent(tx, {
+    entityKind: 'stage_run',
+    entityId: id,
+    jobId,
+    type: 'stage_run.created',
+    actor,
+    payload: { stageId: of.stageId, attempt: of.attempt + 1, replaces: of.id, reason: 'replan' },
+  });
+  return reread(tx, id);
+}
+
+function latestRunOf(runs: readonly StageRunRow[], stageId: string): StageRunRow {
+  const run = runs.filter((r) => r.stageId === stageId).at(-1);
+  if (run === undefined) throw new Error(`the Job has no ${stageId} Stage Run`);
+  return run;
 }
 
 /** The newest Artifact of `kind` of the Job. */

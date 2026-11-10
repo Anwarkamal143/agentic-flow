@@ -88,7 +88,10 @@ export const PlanDecisionInputSchema = z.object({
 });
 export type PlanDecisionInput = z.infer<typeof PlanDecisionInputSchema>;
 
-/** The fixed options of a `plan` item in this cut (edit and replan come in later tickets). */
+/**
+ * The fixed options of a `plan` item. A Plan Edit is not an option: it is a
+ * whole replacement Plan (`editPlan`), which supersedes the item instead.
+ */
 export const PLAN_APPROVAL_OPTIONS: readonly ApprovalOption[] = [
   {
     id: 'approve',
@@ -102,7 +105,62 @@ export const PLAN_APPROVAL_OPTIONS: readonly ApprovalOption[] = [
     description: 'Reject this Plan: the Job ends rejected; every Artifact is kept.',
     agentProposed: false,
   },
+  {
+    id: 'request_changes',
+    label: 'Request changes',
+    description:
+      'Send the Plan back to the planner with your comment as feedback (a Replan; counts against maxReplans).',
+    agentProposed: false,
+  },
 ];
+
+/**
+ * `POST /v1/jobs/:id/plan/edit` (`editPlan`): a whole replacement Plan, checked
+ * by the same validator as the planner's. Not a Replan.
+ */
+export const EditPlanInputSchema = z.object({
+  expectedVersion: z.number().int().nonnegative(),
+  planArtifactId: z.string().min(1),
+  /** The replacement Plan; validated like a planner's (schema, then the Plan rules). */
+  plan: z.unknown(),
+});
+export type EditPlanInput = z.infer<typeof EditPlanInputSchema>;
+
+/** `POST /v1/jobs/:id/plan/request-changes` (`requestPlanChanges`): a Replan with feedback. */
+export const RequestPlanChangesInputSchema = z.object({
+  expectedVersion: z.number().int().nonnegative(),
+  planArtifactId: z.string().min(1),
+  feedback: z.string().trim().min(1).max(5000),
+});
+export type RequestPlanChangesInput = z.infer<typeof RequestPlanChangesInputSchema>;
+
+export interface PlanChangeRefusal {
+  code: 'feedback_required' | 'replan_limit_reached';
+  message: string;
+}
+
+/**
+ * Why "request changes" is refused, or `undefined` when the Replan may start.
+ * It needs feedback, and a Replan left under `maxReplans`. Pure.
+ */
+export function checkPlanChangeRequest(
+  replans: { replansUsed: number; maxReplans: number },
+  feedback: string | null | undefined,
+): PlanChangeRefusal | undefined {
+  if (feedback == null || feedback.trim() === '') {
+    return {
+      code: 'feedback_required',
+      message: 'request changes needs feedback for the planner (the comment)',
+    };
+  }
+  if (replans.replansUsed >= replans.maxReplans) {
+    return {
+      code: 'replan_limit_reached',
+      message: `this Job has used ${String(replans.replansUsed)} of ${String(replans.maxReplans)} Replans (maxReplans); edit, approve, reject or cancel remain`,
+    };
+  }
+  return undefined;
+}
 
 /** Only a human decides (ARCHITECTURE §16): `user:<name>`, never `agent:` or `system:`. */
 export function isHumanActor(actor: string): boolean {

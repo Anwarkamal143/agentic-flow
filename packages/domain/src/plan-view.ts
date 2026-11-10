@@ -128,6 +128,10 @@ export const PlanViewSchema = z.object({
     version: z.number().int(),
   }),
   planArtifactId: z.string(),
+  /** Who wrote the Plan: the planner (`system:scheduler`) or a human's Plan Edit (`user:<name>`). */
+  planAuthoredBy: z.string(),
+  /** Replans this Job has used, of `maxReplans`. A Plan Edit is not one. */
+  replans: z.object({ used: z.number().int().nonnegative(), max: z.number().int().nonnegative() }),
   /** The Specification Artifact's content (agent output, validated when stored). */
   specification: z.unknown(),
   specificationArtifactId: z.string().nullable(),
