@@ -14,19 +14,14 @@ import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
-  EffectiveConfigSchema,
-  initialTaskState,
   PlanProposalSchema,
   schemaIssues,
   SpecificationProposalSchema,
-  TASK_PRIORITY_WEIGHT,
-  TaskDefinitionSchema,
   type ArtifactKind,
   type PlanContext,
   type RuleIssue,
   type StageFailure,
   type StageRunState,
-  type TaskDefinition,
   toolPolicyOf,
   type ToolPolicy,
 } from '@factory/domain';
@@ -37,13 +32,20 @@ import {
   type HarnessRawResult,
   type HarnessRun,
 } from '@factory/harness';
-import { git, resolveCommit } from '@factory/git';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
 import { changeJob, readJobState, type JobState } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
 import { queueNextStage } from './plan-approval.js';
+import {
+  persistPlanTasks,
+  planContextOf,
+  replanRequestOf,
+  repositoriesOf,
+  type JobRepository,
+  type ReplanRequest,
+} from './plans.js';
 import {
   PROMPT_TEMPLATE_HASH,
   PROMPT_TEMPLATE_ID,
@@ -219,6 +221,13 @@ export class StageScheduler {
       .listForJob(job.id)
       .map((a) => ({ kind: a.kind, content: this.opts.artifacts.readJson(a.id) }));
 
+    // A Replan (ADR-0019): the planner re-plans from the current Plan and the human's feedback.
+    const replan = stage.stageId === 'planning' ? replanRequestOf(this.opts.db, job.id) : undefined;
+    const replanInput =
+      replan === undefined
+        ? undefined
+        : { ...replan, plan: this.opts.artifacts.readJson(replan.planArtifactId) };
+
     let rejected: RuleIssue[] | undefined;
     for (let n = 1; n <= MAX_RUNS; n++) {
       const prompt = renderPrompt(stage, {
@@ -226,6 +235,7 @@ export class StageScheduler {
         repositories,
         inputs,
         ...(rejected === undefined ? {} : { rejected }),
+        ...(replanInput === undefined ? {} : { replan: replanInput }),
       });
       const outcome = await this.harnessRun(harness, stage, run, {
         n,
@@ -234,6 +244,7 @@ export class StageScheduler {
         policy: toolPolicyOf(job.configSnapshotJson, stage.role),
         repositories,
         rejected,
+        replan,
       });
       if (this.closed) return; // shutdown: left running, resumed at the next start
       if (this.stageRun(stageRunId).state !== 'running') return; // the Job was cancelled
@@ -264,8 +275,9 @@ export class StageScheduler {
       prompt: string;
       cwd: string;
       policy: ToolPolicy;
-      repositories: readonly RepositoryRow[];
+      repositories: readonly JobRepository[];
       rejected: RuleIssue[] | undefined;
+      replan: ReplanRequest | undefined;
     },
   ): Promise<Outcome> {
     // A proposal Run is never re-attached: a Stage Run left running starts again.
@@ -299,6 +311,7 @@ export class StageScheduler {
       template: { id: PROMPT_TEMPLATE_ID, hash: PROMPT_TEMPLATE_HASH },
       ...(started.sessionRef === undefined ? {} : { sessionRef: started.sessionRef }),
       ...(input.rejected === undefined ? {} : { reprompt: { issues: input.rejected } }),
+      ...(input.replan === undefined ? {} : { replan: input.replan }),
     });
     // Progress isn't stored yet, only counted; draining keeps the stream from backing up.
     const drained = (async () => {
@@ -335,27 +348,14 @@ export class StageScheduler {
    * Specification's criteria, the Effective Configuration's `maxAttempts`,
    * and, for planning only, the tracked files at the planning base.
    */
-  private async planContext(
+  private planContext(
     stage: ProposalStage,
     run: StageRunRow,
-    repositories: readonly RepositoryRow[],
+    repositories: readonly JobRepository[],
   ): Promise<PlanContext> {
-    const { job } = readJobState(this.opts.db, run.jobId);
-    const config = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson));
-    const trackedFiles = new Map<string, readonly string[]>();
-    if (stage.stageId === 'planning') {
-      for (const repo of repositories) trackedFiles.set(repo.id, await planningBaseFiles(repo));
-    }
-    return {
-      repositories,
-      criteria: this.opts.db
-        .select()
-        .from(schema.acceptanceCriteria)
-        .where(eq(schema.acceptanceCriteria.jobId, run.jobId))
-        .all(),
-      maxAttempts: config.maxAttempts.value,
-      trackedFiles,
-    };
+    return planContextOf(this.opts.db, run.jobId, repositories, {
+      trackedFiles: stage.stageId === 'planning',
+    });
   }
 
   /** Decides what a Harness Run's output is worth. The exit code alone proves nothing. */
@@ -408,11 +408,7 @@ export class StageScheduler {
           { jobId: run.jobId, stageRunId: run.id, kind: stage.kind, content },
           ACTOR,
         );
-        this.persist(tx, stage.kind, value, {
-          jobId: run.jobId,
-          artifactId: artifact.id,
-          config: state.job.configSnapshotJson,
-        });
+        this.persist(tx, stage.kind, value, { jobId: run.jobId, artifactId: artifact.id });
         step(current, 'succeeded');
         queueNextStage(tx, run.jobId, step, current.position, ACTOR);
       },
@@ -425,7 +421,7 @@ export class StageScheduler {
     tx: Tx,
     kind: ArtifactKind,
     value: unknown,
-    ctx: { jobId: string; artifactId: string; config: string },
+    ctx: { jobId: string; artifactId: string },
   ): void {
     if (kind === 'spec') {
       const spec = SpecificationProposalSchema.parse(value);
@@ -444,59 +440,7 @@ export class StageScheduler {
         .run();
     }
     if (kind === 'plan') {
-      const plan = PlanProposalSchema.parse(value);
-      const config = EffectiveConfigSchema.parse(JSON.parse(ctx.config));
-      const repositories = this.repositoriesOf(ctx.jobId, tx);
-      const ids = new Map(plan.tasks.map((t) => [t.key, newId('tsk')]));
-      for (const task of plan.tasks) {
-        const repo = repositories.find(
-          (r) => r.id === task.repository || r.name === task.repository,
-        );
-        if (repo === undefined) throw new Error(`validated Task ${task.key} has no Repository`);
-        const id = taskId(ids, task.key);
-        const state = initialTaskState(task.dependsOn);
-        tx.insert(schema.tasks)
-          .values({
-            id,
-            jobId: ctx.jobId,
-            repositoryId: repo.id,
-            planArtifactId: ctx.artifactId,
-            key: task.key,
-            title: task.title,
-            definitionJson: JSON.stringify(
-              TaskDefinitionSchema.parse({
-                objective: task.objective,
-                role: task.role,
-                risk: task.risk,
-                scope: task.scope,
-                dependsOn: task.dependsOn,
-                acceptance: task.acceptance,
-                verification: task.verification,
-              } satisfies TaskDefinition),
-            ),
-            state,
-            priority: TASK_PRIORITY_WEIGHT[task.priority],
-            maxAttempts: task.maxAttempts ?? config.maxAttempts.value,
-            maxRetries: config.maxRetries.value,
-            version: 0,
-          })
-          .run();
-        appendEvent(tx, {
-          entityKind: 'task',
-          entityId: id,
-          jobId: ctx.jobId,
-          type: 'task.created',
-          actor: ACTOR,
-          payload: { key: task.key, state, repositoryId: repo.id, planArtifactId: ctx.artifactId },
-        });
-      }
-      for (const task of plan.tasks) {
-        for (const dep of task.dependsOn) {
-          tx.insert(schema.taskDependencies)
-            .values({ taskId: taskId(ids, task.key), dependsOnTaskId: taskId(ids, dep) })
-            .run();
-        }
-      }
+      persistPlanTasks(tx, PlanProposalSchema.parse(value), { ...ctx, actor: ACTOR });
     }
   }
 
@@ -540,43 +484,9 @@ export class StageScheduler {
     return run;
   }
 
-  private repositoriesOf(jobId: string, db: FactoryDb | Tx = this.opts.db) {
-    return db
-      .select({
-        id: schema.repositories.id,
-        name: schema.repositories.name,
-        clonePath: schema.repositories.clonePath,
-        defaultBranch: schema.repositories.defaultBranch,
-      })
-      .from(schema.jobRepositories)
-      .innerJoin(
-        schema.repositories,
-        eq(schema.repositories.id, schema.jobRepositories.repositoryId),
-      )
-      .where(eq(schema.jobRepositories.jobId, jobId))
-      .all();
+  private repositoriesOf(jobId: string): JobRepository[] {
+    return repositoriesOf(this.opts.db, jobId);
   }
-}
-
-interface RepositoryRow {
-  id: string;
-  name: string;
-  clonePath: string;
-  defaultBranch: string;
-}
-
-/**
- * The tracked files at the planning base: the commit a Task's Worktree would
- * start from (the default branch, as fetched, in the Factory Clone; never the
- * user's checkout). Empty when the clone has no such branch.
- */
-async function planningBaseFiles(repo: RepositoryRow): Promise<string[]> {
-  const base =
-    (await resolveCommit(repo.clonePath, `refs/remotes/origin/${repo.defaultBranch}`)) ??
-    (await resolveCommit(repo.clonePath, `refs/heads/${repo.defaultBranch}`));
-  if (base === undefined) return [];
-  const out = await git(['ls-tree', '-r', '-z', '--name-only', base], { cwd: repo.clonePath });
-  return out.split('\0').filter((p) => p !== '');
 }
 
 /** The Stage Run `id` of the Job being changed, which must be in state `expected`. */
@@ -586,11 +496,4 @@ function requireStageRun(state: JobState, id: string, expected: StageRunState): 
     throw new Error(`Stage Run ${id} is ${String(run?.state)}, not ${expected}`);
   }
   return run;
-}
-
-/** The id given to a validated Plan's Task key (the validator guarantees it exists). */
-function taskId(ids: ReadonlyMap<string, string>, key: string): string {
-  const id = ids.get(key);
-  if (id === undefined) throw new Error(`the validated Plan has no Task ${key}`);
-  return id;
 }

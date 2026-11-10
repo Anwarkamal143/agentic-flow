@@ -188,6 +188,7 @@ export const StageRunStateSchema = z.enum([
   'skipped',
   'cancelled',
   'rejected',
+  'superseded',
 ]);
 export type StageRunState = z.infer<typeof StageRunStateSchema>;
 
@@ -198,13 +199,16 @@ export const STAGE_RUN_TRANSITIONS: Readonly<Record<StageRunState, readonly Stag
   running: ['succeeded', 'failed', 'blocked', 'waiting_human', 'cancelled'],
   blocked: ['queued', 'cancelled'],
   // `→ succeeded | rejected`: a human decided a Stage that waits only on that decision (plan_approval).
-  waiting_human: ['queued', 'succeeded', 'rejected', 'cancelled'],
+  // `→ superseded`: a human requested changes to the Plan; a new Stage Run of it waits on the new Plan (ADR-0019).
+  waiting_human: ['queued', 'succeeded', 'rejected', 'cancelled', 'superseded'],
   succeeded: [],
   failed: [],
   skipped: [],
   cancelled: [],
   // A correct "no", never `failed` (ARCHITECTURE §4.3).
   rejected: [],
+  // Replaced by a later Stage Run of the same Stage; it no longer counts for the Job.
+  superseded: [],
 };
 
 /** States a Stage Run never leaves. */
@@ -212,8 +216,8 @@ export const FINISHED_STAGE_RUN_STATES: readonly StageRunState[] = (
   Object.keys(STAGE_RUN_TRANSITIONS) as StageRunState[]
 ).filter((s) => STAGE_RUN_TRANSITIONS[s].length === 0);
 
-/** Finished without a problem: the Job can move past it. */
-const PASSED: readonly StageRunState[] = ['succeeded', 'skipped'];
+/** Finished without a problem (or replaced by a later run): the Job can move past it. */
+const PASSED: readonly StageRunState[] = ['succeeded', 'skipped', 'superseded'];
 
 export function canTransitionStageRun(from: StageRunState, to: StageRunState): boolean {
   return STAGE_RUN_TRANSITIONS[from].includes(to);

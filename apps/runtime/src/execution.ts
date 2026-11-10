@@ -95,6 +95,7 @@ import {
 } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
+import { latestArtifact } from './plan-approval.js';
 import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
@@ -2064,14 +2065,19 @@ const IN_PROGRESS = ['ready', 'claimed', 'running', 'verifying', 'in_review', 'c
  * (with no Rework route); `waiting_human` or `blocked` if a Task is blocked
  * (the Stage Run carries the first Blocker, human ones first, so the Job
  * shows why); `succeeded` (and `closure` queued) when every Task is approved.
+ * Only the Tasks of the Job's newest Plan count: a Plan replaced at
+ * `plan_approval` left its Tasks cancelled, never run (ADR-0019).
  */
 export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper): void {
   const execution = state.stageRuns.find((r) => r.stageId === 'execution');
   if (execution?.state !== 'running') return;
+  const plan = latestArtifact(tx, state.job.id, 'plan');
   const tasks = tx
     .select()
     .from(schema.tasks)
-    .where(eq(schema.tasks.jobId, state.job.id))
+    .where(
+      and(eq(schema.tasks.jobId, state.job.id), eq(schema.tasks.planArtifactId, plan?.id ?? '')),
+    )
     .orderBy(asc(sql`rowid`))
     .all();
   const failed = tasks.find((t) => t.state === 'failed');
