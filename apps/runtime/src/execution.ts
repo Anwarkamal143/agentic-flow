@@ -1,8 +1,11 @@
 /**
- * The Task scheduler, Phase A: one concurrency slot. It runs the `execution`
- * Stage (claim a ready Task, give it a Worktree, run the developer Harness,
- * verify the result itself, then hand it to the review flow in `review.ts`)
- * and the `closure` Stage (`closure.ts`). ARCHITECTURE §7, §10, §12.
+ * The Task scheduler, multi-slot (ADR-0020): every Task it can claim under
+ * the global, per-Repository and per-Job limits (`claim.ts`) runs at once.
+ * It runs the `execution` Stage (claim a ready Task, give it a Worktree from
+ * its Dependency Base, run the developer Harness, verify the result itself,
+ * then hand it to the review flow in `review.ts`) and the `closure` Stage
+ * (`closure.ts`). ARCHITECTURE §7, §10, §12. The proposal scheduler keeps
+ * its one slot.
  *
  * After a Harness Run the factory trusts nothing it said: the head commit and
  * the commits come from git, leftovers become a flagged WIP commit, and every
@@ -71,8 +74,9 @@ import {
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore, StoredContent } from './artifacts.js';
+import { claimNextTask, leaseExpiry } from './claim.js';
 import { criteriaCoveredBy } from './criteria.js';
-import { READY_TASK_ORDER } from './dispatch.js';
+import { makeDependencyBase } from './dependency-base.js';
 import {
   failClosure,
   nextClosure,
@@ -112,23 +116,20 @@ const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_REVIEW_WALL_CLOCK_MS = 10 * 60_000;
 /** Developer Harness Runs per Attempt: the first, plus one re-prompt for an invalid Task Result. */
 const DEVELOPER_RUNS = 2;
-/** How often the runtime renews the leases it holds (ARCHITECTURE §12 step 4). */
 /** The security tier every Harness Run runs under in Phase A: Tier 0, the local guardrail. */
 const TIER: SecurityTier = 'local';
 
+/** How often the runtime renews the leases it holds (ARCHITECTURE §12 step 4). */
 export const LEASE_HEARTBEAT_MS = 15_000;
-/** A lease expires this long after its last heartbeat. */
-export const LEASE_TTL_MS = 90_000;
-
-/** When a lease renewed now expires. */
-export function leaseExpiry(now = Date.now()): string {
-  return new Date(now + LEASE_TTL_MS).toISOString();
-}
+export { LEASE_TTL_MS, leaseExpiry } from './claim.js';
+export { claimNextTask, type Claim, type ClaimOptions } from './claim.js';
 
 export interface TaskSchedulerOptions {
   db: FactoryDb;
   /** `undefined`: no Harness is configured, so ready Tasks wait. */
   harness: AgentHarness | undefined;
+  /** `config.json` `concurrency.global`: Tasks in flight at once, over every Job. */
+  globalConcurrency: number;
   harnessVersion: string | null;
   artifacts: ArtifactStore;
   workspaceRoot: string;
@@ -165,9 +166,21 @@ export type Resumption =
 /** See {@link AttemptProcessSchema}. */
 export type AttemptProcess = z.infer<typeof AttemptProcessSchema>;
 
+/**
+ * One unit of work in flight (an Attempt or a closure), and the process it
+ * waits on now, so a cancel or a shutdown can stop it.
+ */
+interface Slot {
+  jobId: string;
+  done: Promise<void>;
+  run: HarnessRun | undefined;
+  proc: GuardedProcess | undefined;
+}
+
 /** Everything an Attempt's steps need, rebuilt from the database when it is resumed. */
 interface AttemptContext {
   harness: AgentHarness;
+  slot: Slot;
   job: typeof schema.jobs.$inferSelect;
   task: TaskRow;
   definition: TaskDefinition;
@@ -256,10 +269,10 @@ export function attemptRef(attemptId: string): string {
 
 export class TaskScheduler {
   private readonly loop = new PassLoop(() => this.pass(), POLL_MS);
-  private currentRun: HarnessRun | undefined;
-  private currentProc: GuardedProcess | undefined;
-  /** The Job whose work the slot holds, and when that work ends. */
-  private inflight: { jobId: string; done: Promise<void> } | undefined;
+  /** The work in flight, by Task id (an Attempt) or `closure:<Stage Run id>`. */
+  private readonly slots = new Map<string, Slot>();
+  /** Serializes the git setup of new Worktrees per Factory Clone (fetch, Dependency Base, `worktree add`). */
+  private readonly cloneLocks = new Map<string, Promise<void>>();
   private closed = false;
   private readonly holder = `runtime:${String(process.pid)}`;
   private readonly wallClockMs: number;
@@ -301,23 +314,26 @@ export class TaskScheduler {
   }
 
   /**
-   * Stops scheduling and stops the process in flight (Harness Run or
-   * verification command). Its Attempt is left as it is, for recovery at the
-   * next start (ADR-0012). The leases stop being renewed.
+   * Stops scheduling and stops every process in flight (Harness Runs and
+   * verification commands). Their Attempts are left as they are, for
+   * recovery at the next start (ADR-0012). The leases stop being renewed.
    */
   async close(): Promise<void> {
     this.closed = true;
     clearInterval(this.heartbeat);
     this.loop.halt();
-    await Promise.all([this.currentRun?.cancel(), this.currentProc?.cancel()]);
+    const slots = [...this.slots.values()];
+    await Promise.all(slots.map((s) => Promise.all([s.run?.cancel(), s.proc?.cancel()])));
+    await Promise.all(slots.map((s) => s.done));
     await this.loop.idle();
   }
 
   /**
-   * Stops a cancelled Job's work in flight (#12): its process group gets
-   * SIGTERM, then SIGKILL after the grace period; the Attempt and the Task are
-   * then recorded `cancelled`, the Worktree preserved and the leases released.
-   * Settles once that is recorded. The Job's own cancellation is already committed.
+   * Stops a cancelled Job's work in flight (#12): each process group gets
+   * SIGTERM, then SIGKILL after the grace period; each Attempt and its Task
+   * are then recorded `cancelled`, the Worktree preserved and the leases
+   * released. Settles once all of that is recorded. The Job's own
+   * cancellation is already committed.
    */
   async cancelJob(jobId: string): Promise<void> {
     for (const r of this.resumptions.filter((r) => this.jobOf(r) === jobId)) {
@@ -325,10 +341,9 @@ export class TaskScheduler {
       // A closure the cancellation already ended has nothing left to stop.
       if (r.kind !== 'closure') await this.cancelLeftAttempt(r.attemptId);
     }
-    const inflight = this.inflight;
-    if (inflight?.jobId !== jobId) return;
-    await Promise.all([this.currentRun?.cancel(), this.currentProc?.cancel()]);
-    await inflight.done;
+    const slots = [...this.slots.values()].filter((s) => s.jobId === jobId);
+    await Promise.all(slots.map((s) => Promise.all([s.run?.cancel(), s.proc?.cancel()])));
+    await Promise.all(slots.map((s) => s.done));
   }
 
   /** Renews every lease this runtime holds (ARCHITECTURE §12 step 4). */
@@ -355,51 +370,94 @@ export class TaskScheduler {
     return attempt?.jobId;
   }
 
-  /** Runs at most one closure or one Attempt. `true` when it did some work. */
-  private async pass(): Promise<boolean> {
+  /**
+   * Starts all the work that can start now, without waiting for it: what a
+   * previous runtime left in progress, every queued closure, then every
+   * ready Task the concurrency limits let it claim. `true` when it started some.
+   */
+  private pass(): Promise<boolean> {
+    try {
+      return Promise.resolve(this.startWork());
+    } catch (err) {
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+
+  private startWork(): boolean {
     const harness = this.opts.harness;
     if (harness === undefined) return false;
-    const resumption = this.resumptions.shift();
-    if (resumption !== undefined) {
+    let started = false;
+    for (let r = this.resumptions.shift(); r !== undefined; r = this.resumptions.shift()) {
+      const resumption = r;
       const jobId = this.jobOf(resumption);
-      if (jobId === undefined) return true;
+      if (jobId === undefined) continue;
+      started = true;
       if (resumption.kind === 'closure') {
-        await this.hold(jobId, () =>
+        this.launch(`closure:${resumption.stageRunId}`, jobId, () =>
           this.guard(jobId, () => runClosure(this.opts, resumption.stageRunId, jobId, 'running'), {
             closureId: resumption.stageRunId,
           }),
         );
-        return true;
+        continue;
       }
-      const attempt = requireAttempt(this.opts.db, resumption.attemptId);
-      await this.hold(jobId, () =>
-        this.guard(jobId, () => this.resumeAttempt(harness, resumption), {
-          taskId: attempt.taskId,
-        }),
+      const { taskId } = requireAttempt(this.opts.db, resumption.attemptId);
+      this.launch(taskId, jobId, (slot) =>
+        this.guard(jobId, () => this.resumeAttempt(harness, resumption, slot), { taskId }),
       );
-      return true;
     }
-    const closure = nextClosure(this.opts.db);
-    if (closure !== undefined) {
-      await this.hold(closure.jobId, () =>
-        this.guard(
-          closure.jobId,
-          () => runClosure(this.opts, closure.id, closure.jobId, 'queued'),
-          {
-            closureId: closure.id,
-          },
-        ),
+    // A closure moves to `running` before its first await, so the next lookup finds the next one.
+    for (
+      let closure = nextClosure(this.opts.db);
+      closure !== undefined && !this.slots.has(`closure:${closure.id}`);
+      closure = nextClosure(this.opts.db)
+    ) {
+      const { id, jobId } = closure;
+      started = true;
+      this.launch(`closure:${id}`, jobId, () =>
+        this.guard(jobId, () => runClosure(this.opts, id, jobId, 'queued'), { closureId: id }),
       );
-      return true;
     }
-    const claimed = this.claimNext();
-    if (claimed === undefined) return false;
-    await this.hold(claimed.jobId, () =>
-      this.guard(claimed.jobId, () => this.runAttempt(harness, claimed.taskId), {
-        taskId: claimed.taskId,
-      }),
+    for (;;) {
+      const claimed = claimNextTask(this.opts.db, {
+        holder: this.holder,
+        globalLimit: this.opts.globalConcurrency,
+        actor: ACTOR,
+      });
+      if (claimed === undefined) break;
+      this.opts.onCommit();
+      started = true;
+      const { jobId, taskId } = claimed;
+      this.launch(taskId, jobId, (slot) =>
+        this.guard(jobId, () => this.runAttempt(harness, taskId, slot), { taskId }),
+      );
+    }
+    return started;
+  }
+
+  /** Runs `body` in a new slot, without waiting for it; the slot goes once it ends. */
+  private launch(key: string, jobId: string, body: (slot: Slot) => Promise<void>): void {
+    const slot: Slot = { jobId, done: Promise.resolve(), run: undefined, proc: undefined };
+    this.slots.set(key, slot);
+    slot.done = body(slot).finally(() => {
+      this.slots.delete(key);
+      this.wake();
+    });
+  }
+
+  /** Runs `body` while holding the clone's setup lock (one Worktree setup at a time per clone). */
+  private async withClone<T>(clone: string, body: () => Promise<T>): Promise<T> {
+    const before = this.cloneLocks.get(clone) ?? Promise.resolve();
+    const run = before.then(body);
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
     );
-    return true;
+    this.cloneLocks.set(clone, settled);
+    try {
+      return await run;
+    } finally {
+      if (this.cloneLocks.get(clone) === settled) this.cloneLocks.delete(clone);
+    }
   }
 
   /** Runs `body`; an unexpected error fails the work where it can be seen, never silently. */
@@ -421,17 +479,6 @@ export class TaskScheduler {
       } catch (failErr) {
         this.opts.log(`task scheduler: could not record the failure: ${String(failErr)}`);
       }
-    }
-  }
-
-  /** Marks the slot as holding `jobId`'s work while `body` runs (for {@link cancelJob}). */
-  private async hold(jobId: string, body: () => Promise<void>): Promise<void> {
-    const done = body();
-    this.inflight = { jobId, done };
-    try {
-      await done;
-    } finally {
-      this.inflight = undefined;
     }
   }
 
@@ -460,69 +507,9 @@ export class TaskScheduler {
     return true;
   }
 
-  // ---- claim ------------------------------------------------------------------
-
-  /**
-   * Claims the next ready Task (by priority, then time ready; ADR-0017): inserts
-   * its lease and moves it `ready → claimed` in one versioned transaction (and
-   * starts `execution`).
-   */
-  private claimNext(): { jobId: string; taskId: string } | undefined {
-    const next = this.opts.db
-      .select({ task: schema.tasks })
-      .from(schema.tasks)
-      .innerJoin(schema.jobs, eq(schema.jobs.id, schema.tasks.jobId))
-      .innerJoin(
-        schema.stageRuns,
-        and(
-          eq(schema.stageRuns.jobId, schema.tasks.jobId),
-          eq(schema.stageRuns.stageId, 'execution'),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.tasks.state, 'ready'),
-          inArray(schema.stageRuns.state, ['queued', 'running']),
-        ),
-      )
-      .orderBy(...READY_TASK_ORDER)
-      .limit(1)
-      .get();
-    if (next === undefined) return undefined;
-    const { jobId, id: taskId } = next.task;
-    const now = new Date();
-    changeJob(
-      this.opts.db,
-      { jobId, expectedVersion: 'current', actor: ACTOR },
-      (tx, state, step) => {
-        const task = requireTask(tx, taskId, 'ready');
-        const leaseId = newId('lse');
-        const inserted = tx
-          .insert(schema.leases)
-          .values({
-            resourceKind: 'task',
-            resourceId: taskId,
-            holder: this.holder,
-            leaseId,
-            acquiredAt: now.toISOString(),
-            heartbeatAt: now.toISOString(),
-            expiresAt: leaseExpiry(),
-          })
-          .onConflictDoNothing()
-          .run();
-        if (inserted.changes !== 1) throw new Error(`Task ${taskId} is already leased`);
-        stepTask(tx, { jobId, actor: ACTOR }, task, 'claimed', { payload: { leaseId } });
-        const execution = state.stageRuns.find((r) => r.stageId === 'execution');
-        if (execution?.state === 'queued') step(execution, 'running');
-      },
-    );
-    this.opts.onCommit();
-    return { jobId, taskId };
-  }
-
   // ---- an Attempt ----------------------------------------------------------------
 
-  private async runAttempt(harness: AgentHarness, taskId: string): Promise<void> {
+  private async runAttempt(harness: AgentHarness, taskId: string, slot: Slot): Promise<void> {
     const { db } = this.opts;
     const task = requireTask(db, taskId, 'claimed');
     const definition = TaskDefinitionSchema.parse(JSON.parse(task.definitionJson));
@@ -555,15 +542,35 @@ export class TaskScheduler {
           ? TaskPacketSchema.parse(JSON.parse(previous.packetJson)).context.priorFindings
           : attemptFindings(db, previous);
     const { wallClockMs } = this;
-    let worktree: { id: string; path: string; branch: string; baseSha: string; reused: boolean };
+    let worktree: {
+      id: string;
+      path: string;
+      branch: string;
+      baseSha: string;
+      reused: boolean;
+      /** The Tasks whose approved heads the base holds (the Dependency Base). */
+      dependencies?: string[];
+    };
     if (previous === undefined) {
-      // A new Worktree, from a freshly fetched base, in the Factory Clone only.
-      await fetchRemote(clone);
-      const baseSha =
-        (await resolveCommit(clone, `refs/remotes/origin/${repo.defaultBranch}`)) ??
-        (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
-      if (baseSha === undefined)
-        throw new Error(`the Factory Clone has no ${repo.defaultBranch} to start from`);
+      // A new Worktree in the Factory Clone only: from its Dependency Base, or else
+      // from the freshly fetched default branch. One setup per clone at a time.
+      const base = await this.withClone(clone, async () => {
+        await fetchRemote(clone);
+        const dependencyBase = await makeDependencyBase(db, clone, task);
+        if (dependencyBase.kind === 'conflict') {
+          // Until the `base_merge_conflict` Blocker (#44), a conflict fails the Task, visibly.
+          throw new Error(
+            `the Dependency Base of ${task.key} can't be made: merging ${dependencyBase.dependencies.join(', ')} conflicts in ${dependencyBase.paths.join(', ') || 'the merge'}`,
+          );
+        }
+        if (dependencyBase.kind === 'base') return dependencyBase;
+        const sha =
+          (await resolveCommit(clone, `refs/remotes/origin/${repo.defaultBranch}`)) ??
+          (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
+        if (sha === undefined)
+          throw new Error(`the Factory Clone has no ${repo.defaultBranch} to start from`);
+        return { sha, dependencies: [] };
+      });
       const at = taskWorktree({
         workspaceRoot: this.opts.workspaceRoot,
         repositoryId: repo.id,
@@ -571,7 +578,13 @@ export class TaskScheduler {
         taskId: task.id,
         taskKey: task.key,
       });
-      worktree = { id: newId('wt'), ...at, baseSha, reused: false };
+      worktree = {
+        id: newId('wt'),
+        ...at,
+        baseSha: base.sha,
+        reused: false,
+        dependencies: base.dependencies,
+      };
     } else {
       // Rework continues on the Task Branch, from the same base: the earlier work is kept.
       const row = requireWorktree(db, previous.worktreeId);
@@ -599,14 +612,16 @@ export class TaskScheduler {
       wallClockMs,
       priorFindings,
     });
-    await excludeResultFile(clone);
-    if (worktree.reused) {
-      // A Task Result left by the Attempt before must never be read as this one's.
-      rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
-    } else {
-      mkdirSync(dirname(path), { recursive: true });
-      await addWorktree({ repo: clone, path, branch, startSha: baseSha });
-    }
+    await this.withClone(clone, async () => {
+      await excludeResultFile(clone);
+      if (worktree.reused) {
+        // A Task Result left by the Attempt before must never be read as this one's.
+        rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
+      } else {
+        mkdirSync(dirname(path), { recursive: true });
+        await addWorktree({ repo: clone, path, branch, startSha: baseSha });
+      }
+    });
 
     const portBase = changeJob(
       db,
@@ -651,7 +666,16 @@ export class TaskScheduler {
             jobId: job.id,
             type: 'worktree.created',
             actor: ACTOR,
-            payload: { taskId, to: 'active', path, branch, baseSha, portBase: base },
+            payload: {
+              taskId,
+              to: 'active',
+              path,
+              branch,
+              baseSha,
+              portBase: base,
+              // The Dependency Base: the Tasks whose approved heads `baseSha` holds (ADR-0021).
+              dependencyBase: worktree.dependencies ?? [],
+            },
           });
         }
         tx.insert(schema.attempts)
@@ -718,6 +742,7 @@ export class TaskScheduler {
     });
     const ctx: AttemptContext = {
       harness,
+      slot,
       job,
       task,
       definition,
@@ -742,8 +767,9 @@ export class TaskScheduler {
   private async resumeAttempt(
     harness: AgentHarness,
     r: Extract<Resumption, { kind: 'reattach' | 'resume' }>,
+    slot: Slot,
   ): Promise<void> {
-    const ctx = this.contextOf(harness, r.attemptId);
+    const ctx = this.contextOf(harness, r.attemptId, slot);
     const attempt = requireAttempt(this.opts.db, r.attemptId);
     if (await this.stopped(ctx)) return;
     const recorded = attempt.processJson === null ? undefined : parseProcess(attempt.processJson);
@@ -766,7 +792,7 @@ export class TaskScheduler {
   }
 
   /** The Attempt's context, rebuilt from its rows and its Task Packet. */
-  private contextOf(harness: AgentHarness, attemptId: string): AttemptContext {
+  private contextOf(harness: AgentHarness, attemptId: string, slot: Slot): AttemptContext {
     const { db } = this.opts;
     const attempt = requireAttempt(db, attemptId);
     const task = db.select().from(schema.tasks).where(eq(schema.tasks.id, attempt.taskId)).get();
@@ -783,6 +809,7 @@ export class TaskScheduler {
     const packet = TaskPacketSchema.parse(JSON.parse(attempt.packetJson));
     return {
       harness,
+      slot,
       job,
       task,
       definition: TaskDefinitionSchema.parse(JSON.parse(task.definitionJson)),
@@ -1263,7 +1290,7 @@ export class TaskScheduler {
       if (spool !== undefined) rmSync(spool, { recursive: true, force: true });
       return { result: undefined, sessionRef: undefined };
     }
-    this.currentRun = started;
+    ctx.slot.run = started;
     // Progress events are counted; the Run's output is stored as its log (below).
     const drained = (async () => {
       let count = 0;
@@ -1272,7 +1299,7 @@ export class TaskScheduler {
     })();
     const result = await started.result;
     const events = await drained;
-    this.currentRun = undefined;
+    ctx.slot.run = undefined;
     const judged = evaluate?.(result);
     // The Run's output, redacted on write like every Artifact (ADR-0011), for `factory logs`.
     const content = this.opts.artifacts.writeContent({
@@ -1380,9 +1407,9 @@ export class TaskScheduler {
         timeoutMs: this.verifyTimeoutMs,
         spool,
       });
-      this.currentProc = proc;
+      ctx.slot.proc = proc;
       const exit = await proc.exit;
-      this.currentProc = undefined;
+      ctx.slot.proc = undefined;
       this.recordProcess(this.opts.db, ctx.attemptId, undefined);
       rmSync(spool, { recursive: true, force: true });
       if (await this.stopped(ctx)) return undefined;
@@ -1926,6 +1953,7 @@ function endAttempt(
   const reason = outcome.exitReason;
   if (outcome.state === 'passed') {
     stepTask(tx, op, task, 'approved', { reason, payload });
+    readyDependents(tx, op, taskId);
   } else {
     const attempt = requireAttempt(tx, attemptId);
     const route = routeFailedAttempt({
@@ -1969,6 +1997,37 @@ function endAttempt(
   releaseAttemptTokens(tx, taskId, worktree.portBase);
   stepWorktree(tx, op, worktree, 'active', 'preserved');
   settleExecution(tx, state, step);
+}
+
+/**
+ * Moves each `pending` Task that depends on the just-approved `taskId` to
+ * `ready` once every Task it depends on is approved (ARCHITECTURE §4.4). In
+ * the transaction that approves `taskId`, so a dependent is never claimed
+ * before its last dependency's `approved` event.
+ */
+function readyDependents(tx: Tx, op: { jobId: string; actor: string }, taskId: string): void {
+  const dependents = tx
+    .select({ task: schema.tasks })
+    .from(schema.taskDependencies)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskDependencies.taskId))
+    .where(
+      and(eq(schema.taskDependencies.dependsOnTaskId, taskId), eq(schema.tasks.state, 'pending')),
+    )
+    .orderBy(asc(sql`"tasks"."rowid"`))
+    .all();
+  for (const { task } of dependents) {
+    const deps = tx
+      .select({ key: schema.tasks.key, state: schema.tasks.state })
+      .from(schema.taskDependencies)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskDependencies.dependsOnTaskId))
+      .where(eq(schema.taskDependencies.taskId, task.id))
+      .all();
+    if (!deps.every((d) => d.state === 'approved' || d.state === 'integrated')) continue;
+    stepTask(tx, op, task, 'ready', {
+      reason: 'dependencies_approved',
+      payload: { dependsOn: deps.map((d) => d.key) },
+    });
+  }
 }
 
 const MAX_RESULT_BYTES = 1024 * 1024;

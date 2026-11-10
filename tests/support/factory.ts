@@ -261,6 +261,13 @@ export function git(cwd: string, args: string[]): string {
   });
 }
 
+/** Merges `extra` into the home's `config.json` (for example `concurrency`). Call before `startRuntime`. */
+export function patchFactoryConfig(home: TestHome, extra: Record<string, unknown>): void {
+  const configPath = join(home.dir, 'config.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+  writeFileSync(configPath, JSON.stringify({ ...config, ...extra }, null, 2) + '\n');
+}
+
 /**
  * Selects the Fake Harness for this home through runtime configuration: writes
  * `script` (YAML) next to the home and points `config.json` at it. Call before

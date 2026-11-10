@@ -12,6 +12,7 @@ import { appendEvent, openDatabase } from '@factory/db';
 import {
   RUNTIME_HOST,
   ensureHomeDirs,
+  globalConcurrency,
   isProcessAlive,
   readConfig,
   readRuntimeRecord,
@@ -210,6 +211,7 @@ const tasks = new TaskScheduler({
   db: database.db,
   harness,
   harnessVersion: detection?.version ?? null,
+  globalConcurrency: globalConcurrency(config),
   artifacts,
   workspaceRoot: config.workspaceRoot,
   runtimeEnv: process.env,

@@ -25,6 +25,7 @@ import {
 import { resolveCommit, uncommittedPaths } from '@factory/git';
 import { attachGuarded, inspectSpool } from '@factory/harness';
 import { and, eq, inArray } from 'drizzle-orm';
+import { takeOverClaim } from './claim.js';
 import { changeJob, stepAttempt, stepTask, stepWorktree } from './engine.js';
 import { leaseExpiry, parseProcess, settleExecution, type Resumption } from './execution.js';
 import { releaseAttemptTokens, requireWorktree } from './worktree.js';
@@ -208,7 +209,7 @@ async function worktreeStatus(path: string): Promise<RecoveredWorktree> {
   }
 }
 
-/** Hands the Attempt's leases (its Task, its port block) to this runtime, renewed. */
+/** Hands the Attempt's leases (its Task with its capacity tokens, its port block) to this runtime, renewed. */
 function takeOverLeases(
   db: FactoryDb,
   holder: string,
@@ -218,10 +219,7 @@ function takeOverLeases(
 ): void {
   const now = new Date().toISOString();
   db.transaction((tx) => {
-    tx.update(schema.leases)
-      .set({ holder, heartbeatAt: now, expiresAt: leaseExpiry() })
-      .where(and(eq(schema.leases.resourceKind, 'task'), eq(schema.leases.resourceId, taskId)))
-      .run();
+    takeOverClaim(tx, taskId, holder);
     tx.update(schema.leases)
       .set({ holder: `${holder}/${attemptId}`, heartbeatAt: now, expiresAt: leaseExpiry() })
       .where(

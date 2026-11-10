@@ -4,7 +4,7 @@
  * owned by the runtime, which is its single writer.
  *
  *   token          API bearer token, mode 0600
- *   config.json    operator config (workspace root, port)
+ *   config.json    operator config (workspace root, port, Harness, concurrency)
  *   runtime.json   pid record of the running runtime (pidfile)
  *   factory.db     SQLite database (runtime only)
  *   artifacts/     immutable Artifact contents, named by content hash (runtime only)
@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import { BillingSchema, PriceTableSchema } from '@factory/domain';
+import { BillingSchema, DEFAULT_GLOBAL_CONCURRENCY, PriceTableSchema } from '@factory/domain';
 import { z } from 'zod';
 
 export const DEFAULT_PORT = 7420;
@@ -104,8 +104,21 @@ export const FactoryConfigSchema = z.object({
   workspaceRoot: z.string().min(1),
   port: z.number().int().min(0).max(65535),
   harness: HarnessConfigSchema.optional(),
+  /**
+   * Task concurrency across the whole factory (ARCHITECTURE §12, ADR-0020).
+   * `global`: Tasks in flight at once, over every Job and Repository; 3 when unset.
+   */
+  concurrency: z
+    .object({ global: z.number().int().min(1).max(64).optional() })
+    .strict()
+    .optional(),
 });
 export type FactoryConfig = z.infer<typeof FactoryConfigSchema>;
+
+/** The global Task concurrency limit `config` sets, or the default. */
+export function globalConcurrency(config: FactoryConfig): number {
+  return config.concurrency?.global ?? DEFAULT_GLOBAL_CONCURRENCY;
+}
 
 export function readConfig(home: FactoryHome): FactoryConfig | undefined {
   const raw = readIfExists(home.configPath);

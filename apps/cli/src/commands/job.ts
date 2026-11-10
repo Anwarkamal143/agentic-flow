@@ -31,6 +31,8 @@ export interface JobCreateOptions {
   repo: string;
   title: string;
   description: string | undefined;
+  /** Overrides of the Job's concurrency limits (the runtime checks the range). */
+  concurrency?: CreateJobInput['concurrency'];
 }
 
 /** `factory job create`: records a Job for a registered Repository. */
@@ -52,6 +54,9 @@ export async function jobCreate(opts: JobCreateOptions): Promise<number> {
     repositoryId: repo.id,
     title: opts.title,
     description: opts.description ?? '',
+    ...(opts.concurrency === undefined || Object.keys(opts.concurrency).length === 0
+      ? {}
+      : { concurrency: opts.concurrency }),
   };
   const job = await api.json<Job>('POST', '/v1/jobs', { body: input });
   process.stdout.write(`Created Job ${job.id} for ${repo.name}\n`);
