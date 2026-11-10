@@ -23,7 +23,9 @@ Commands:
                                   Register a Repository: make its Factory Clone and save
                                   its confirmed commands (your checkout is never modified)
   job create --repo <id|name> --title <text> [--description <text>]
-                                  Create a Job for a registered Repository
+             [--per-repository <n>] [--per-job <n>]
+                                  Create a Job for a registered Repository; the
+                                  concurrency flags override its Task limits
   job list [--json]               List Jobs, newest first
   job show <id> [--json]          Show a Job: status, Stages, Workflow Snapshot, config
   job cancel <id> [--reason <text>]
@@ -159,13 +161,26 @@ function job(argv: string[]): Promise<number> | number {
           repo: { type: 'string' },
           title: { type: 'string' },
           description: { type: 'string' },
+          'per-repository': { type: 'string' },
+          'per-job': { type: 'string' },
         },
       });
       if (values.repo === undefined || values.title === undefined) {
         process.stderr.write(`factory: job create needs --repo and --title\n\n${USAGE}`);
         return 2;
       }
-      return jobCreate({ repo: values.repo, title: values.title, description: values.description });
+      const perRepository = limitFlag('--per-repository', values['per-repository']);
+      const perJob = limitFlag('--per-job', values['per-job']);
+      if (perRepository === null || perJob === null) return 2;
+      return jobCreate({
+        repo: values.repo,
+        title: values.title,
+        description: values.description,
+        concurrency: {
+          ...(perRepository === undefined ? {} : { perRepository }),
+          ...(perJob === undefined ? {} : { perJob }),
+        },
+      });
     }
     case 'list': {
       const { values } = parseArgs({ args, options: { json: { type: 'boolean' } } });
@@ -290,3 +305,13 @@ main(process.argv.slice(2)).then(
     process.exitCode = 1;
   },
 );
+
+/** A concurrency limit flag: `undefined` when absent, `null` (reported) when not a whole number. */
+function limitFlag(flag: string, raw: string | undefined): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw)) {
+    process.stderr.write(`factory: ${flag} needs a whole number, not '${raw}'\n`);
+    return null;
+  }
+  return Number(raw);
+}

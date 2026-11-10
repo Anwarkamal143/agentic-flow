@@ -9,6 +9,7 @@ import { schema, type FactoryDb, type Tx } from '@factory/db';
 import { RESULT_FILE } from '@factory/domain';
 import { infoExcludePath } from '@factory/git';
 import { and, eq } from 'drizzle-orm';
+import { releaseClaim } from './claim.js';
 import { newId } from './ids.js';
 
 const PORT_BLOCK_START = 42_000;
@@ -73,13 +74,12 @@ export function allocatePortBlock(tx: Tx, lease: { holder: string; expiresAt: st
 }
 
 /**
- * Releases an Attempt's tokens: its Task lease and, when it got one, its port
- * block (ARCHITECTURE §12 step 5). Call in the transaction that ends the Attempt.
+ * Releases an Attempt's tokens: its Task lease with the capacity tokens
+ * claimed with it (ADR-0020) and, when it got one, its port block
+ * (ARCHITECTURE §12 step 5). Call in the transaction that ends the Attempt.
  */
 export function releaseAttemptTokens(tx: Tx, taskId: string, portBase: number | undefined): void {
-  tx.delete(schema.leases)
-    .where(and(eq(schema.leases.resourceKind, 'task'), eq(schema.leases.resourceId, taskId)))
-    .run();
+  releaseClaim(tx, taskId);
   if (portBase !== undefined) {
     tx.delete(schema.leases)
       .where(

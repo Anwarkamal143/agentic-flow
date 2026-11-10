@@ -85,6 +85,7 @@ export class JobService {
         );
         const effectiveConfig = resolveEffectiveConfig({
           project: ProjectConfigSchema.parse(JSON.parse(project.configJson)),
+          job: { concurrency: input.concurrency },
         });
         const jobId = newId('job');
         const now = new Date().toISOString();
