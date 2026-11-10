@@ -31,6 +31,8 @@ export * from './redaction.js';
 export * from './logs.js';
 export * from './recovery.js';
 export * from './tool-policy.js';
+export * from './approvals.js';
+export * from './plan-view.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -57,6 +59,13 @@ export const RepositoryProfileSchema = z.object({
 });
 export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
 
+/**
+ * `required`: every new Plan waits at `plan_approval` for a human. `skip`: the
+ * Stage Run ends `skipped`, with the reason in its event (PRODUCT_SPEC §4).
+ */
+export const PlanApprovalPolicySchema = z.enum(['required', 'skip']);
+export type PlanApprovalPolicy = z.infer<typeof PlanApprovalPolicySchema>;
+
 /** Operator-set Project configuration. Every field is optional: unset means inherit. */
 export const ProjectConfigSchema = z
   .object({
@@ -64,6 +73,10 @@ export const ProjectConfigSchema = z
     maxAttempts: z.number().int().min(1).max(10).optional(),
     /** Retries per Task: new Attempts after an interrupted one. They don't count toward `maxAttempts`. */
     maxRetries: z.number().int().min(0).max(10).optional(),
+    /** Answered Questions per Task, each a new Attempt (ARCHITECTURE §8). */
+    maxQuestions: z.number().int().min(0).max(10).optional(),
+    /** Whether a new Plan waits for a human at `plan_approval` (ADR-0016). */
+    planApproval: PlanApprovalPolicySchema.optional(),
   })
   .strict();
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -135,13 +148,14 @@ export type ApiError = z.infer<typeof ApiErrorSchema>;
 
 // ---- Jobs, Stage Runs, Recipes (ARCHITECTURE §4.2, §4.3) -------------------
 
-/** The Stage IDs of the Phase A `feature` Recipe (PRODUCT_SPEC §4). */
+/** The Stage IDs of the `feature` Recipe built so far (PRODUCT_SPEC §4). */
 export const StageIdSchema = z.enum([
   'intake',
   'triage',
   'discovery',
   'specification',
   'planning',
+  'plan_approval',
   'execution',
   'closure',
 ]);
@@ -157,6 +171,7 @@ export const StageRunStateSchema = z.enum([
   'waiting_human',
   'skipped',
   'cancelled',
+  'rejected',
 ]);
 export type StageRunState = z.infer<typeof StageRunStateSchema>;
 
@@ -166,11 +181,14 @@ export const STAGE_RUN_TRANSITIONS: Readonly<Record<StageRunState, readonly Stag
   queued: ['running', 'cancelled'],
   running: ['succeeded', 'failed', 'blocked', 'waiting_human', 'cancelled'],
   blocked: ['queued', 'cancelled'],
-  waiting_human: ['queued', 'cancelled'],
+  // `→ succeeded | rejected`: a human decided a Stage that waits only on that decision (plan_approval).
+  waiting_human: ['queued', 'succeeded', 'rejected', 'cancelled'],
   succeeded: [],
   failed: [],
   skipped: [],
   cancelled: [],
+  // A correct "no", never `failed` (ARCHITECTURE §4.3).
+  rejected: [],
 };
 
 /** States a Stage Run never leaves. */
@@ -216,12 +234,13 @@ export const WorkflowSnapshotSchema = z.object({
 export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
 
 /**
- * The built-in `feature` Recipe, Phase A cut: without `plan_approval`,
- * `integration`, `integration_review` and the delivery Stages (ROADMAP Phase A).
+ * The built-in `feature` Recipe, Phase B cut: without `integration`,
+ * `integration_review` and the delivery Stages (ROADMAP). Version 2 added
+ * `plan_approval` (ADR-0016); Jobs created at version 1 keep their snapshot.
  */
 export const FEATURE_RECIPE: WorkflowSnapshot = {
   recipeId: 'feature',
-  recipeVersion: 1,
+  recipeVersion: 2,
   stages: StageIdSchema.options.map((id) => ({ id })),
 };
 
@@ -235,6 +254,7 @@ type StageRunPosition = Pick<StageRun, 'stageId' | 'state'>;
 export function deriveJobStatus(stageRuns: readonly StageRunPosition[]): JobStatus {
   const states = new Set(stageRuns.map((s) => s.state));
   if (states.has('running') || states.has('queued')) return 'active';
+  if (states.has('rejected')) return 'rejected';
   if (states.has('blocked')) return 'blocked';
   if (states.has('waiting_human')) return 'waiting_human';
   if (states.has('failed')) return 'failed';
@@ -277,12 +297,29 @@ export const EffectiveConfigSchema = z.object({
     value: DEFAULT_TOOL_POLICIES,
     source: 'recipe',
   }),
+  /** Jobs created before #35 get the recipe default. */
+  maxQuestions: effectiveValue(z.number().int().nonnegative()).default({
+    value: 3,
+    source: 'recipe',
+  }),
+  /** Jobs created before #35 have no `plan_approval` Stage; the value is unused there. */
+  planApproval: effectiveValue(PlanApprovalPolicySchema).default({
+    value: 'required',
+    source: 'recipe',
+  }),
 });
 export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
 
-export const RECIPE_DEFAULTS: { readonly maxAttempts: number; readonly maxRetries: number } = {
+export const RECIPE_DEFAULTS: {
+  readonly maxAttempts: number;
+  readonly maxRetries: number;
+  readonly maxQuestions: number;
+  readonly planApproval: PlanApprovalPolicy;
+} = {
   maxAttempts: 3,
   maxRetries: 2,
+  maxQuestions: 3,
+  planApproval: 'required',
 };
 
 /** The Tier 0 tool policy of `role` in a Job's frozen Effective Configuration (its JSON). Pure. */
@@ -303,6 +340,14 @@ export function resolveEffectiveConfig(levels: { project: ProjectConfig }): Effe
         ? { value: RECIPE_DEFAULTS.maxRetries, source: 'recipe' }
         : { value: project.maxRetries, source: 'project' },
     toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
+    maxQuestions:
+      project.maxQuestions === undefined
+        ? { value: RECIPE_DEFAULTS.maxQuestions, source: 'recipe' }
+        : { value: project.maxQuestions, source: 'project' },
+    planApproval:
+      project.planApproval === undefined
+        ? { value: RECIPE_DEFAULTS.planApproval, source: 'recipe' }
+        : { value: project.planApproval, source: 'project' },
   };
 }
 
