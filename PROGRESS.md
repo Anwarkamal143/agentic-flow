@@ -86,8 +86,6 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 Phase B (#33) on integration branch `phase-b/integration`, one worktree per ticket. Shared contracts: `packages/db/**` (schema + migrations) has exactly one owner at a time; other tickets wait for it.
 
-- #39 (parallel DAG) → `apps/runtime/src/{scheduler,dispatch,execution,worktree}.ts`, Job creation in `apps/runtime/src/jobs.ts`, `packages/home/**` (`concurrency.global`), `packages/git/**`, new Dependency Base and capacity modules in runtime and domain, ADR-0020 + ADR-0021; no schema change
-- Effective Configuration in `packages/domain/src/index.ts`: `maxReplans` and `concurrency.perRepository/perJob` already added on the integration branch (b89e58f); #39 adds only the Job-level override
 
 ## Human decisions (outside CLAUDE.md §7)
 
