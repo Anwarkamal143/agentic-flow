@@ -16,7 +16,11 @@ import { changeInboxItem, RuntimeUnavailable, type InboxAction } from '@/lib/run
 export const dynamic = 'force-dynamic';
 
 const ID = /^[A-Za-z0-9_-]{1,100}$/;
-const ACTIONS: readonly InboxAction[] = ['decide', 'defer', 'undefer'];
+const ACTIONS: readonly InboxAction[] = ['decide', 'answer', 'defer', 'undefer'];
+/** A question id (`q1`…, `scope`) in an answer form's field names. */
+const QUESTION_ID = /^(?:q\d{1,3}|scope)$/;
+/** The radio value that means "my own answer, in the text box". */
+const OWN_ANSWER = '__text';
 /** Where a change may send the browser back to: the Inbox or one of its items. */
 const RETURN = /^\/inbox(\/[A-Za-z0-9_-]{1,100}|\?all=true)?$/;
 
@@ -36,9 +40,42 @@ const FORMS = {
     option: z.string().min(1).max(40),
     comment,
   }),
+  answer: z.object({
+    expectedVersion: version,
+    subjectRef: z.string().min(1).max(200),
+  }),
   defer: z.object({ expectedVersion: version }),
   undefer: z.object({ expectedVersion: version }),
 } as const;
+
+/**
+ * An answer form's answers: per question, `choice.<id>` (an offered option,
+ * or {@link OWN_ANSWER}) and `text.<id>` (free text). An option and text both
+ * given are both sent, so the runtime refuses the answer instead of the
+ * dashboard dropping one. A question with neither is left unanswered.
+ */
+function answersOf(fields: Record<string, string>) {
+  const ids = new Set(
+    Object.keys(fields)
+      .map((k) => /^(?:choice|text)\.(.+)$/.exec(k)?.[1])
+      .filter((id): id is string => id !== undefined && QUESTION_ID.test(id)),
+  );
+  return [...ids].sort().flatMap((questionId) => {
+    const choice = fields[`choice.${questionId}`];
+    const text = fields[`text.${questionId}`]?.trim();
+    const option =
+      choice !== undefined && choice !== OWN_ANSWER && choice !== '' ? choice : undefined;
+    const own = text === undefined || text === '' ? undefined : text;
+    if (option === undefined && own === undefined) return [];
+    return [
+      {
+        questionId,
+        ...(option === undefined ? {} : { option: option.slice(0, 5000) }),
+        ...(own === undefined ? {} : { text: own.slice(0, 5000) }),
+      },
+    ];
+  });
+}
 
 export async function POST(
   request: Request,
@@ -69,7 +106,11 @@ export async function POST(
       : `/inbox/${id}`;
 
   try {
-    const result = await changeInboxItem(id, action, form.data);
+    const result = await changeInboxItem(
+      id,
+      action,
+      action === 'answer' ? { ...form.data, answers: answersOf(fields) } : form.data,
+    );
     if (result.ok) return new Response(null, { status: 303, headers: { location: back } });
     return refusal(result.status, `The ${action} was refused`, result.message, id);
   } catch (err) {
