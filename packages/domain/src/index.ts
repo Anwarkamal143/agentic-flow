@@ -31,6 +31,7 @@ export * from './redaction.js';
 export * from './logs.js';
 export * from './recovery.js';
 export * from './tool-policy.js';
+export * from './activity.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 

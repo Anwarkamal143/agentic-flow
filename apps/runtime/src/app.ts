@@ -13,6 +13,7 @@ import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import type { HarnessCredentials } from '@factory/harness';
+import type { ActivityService } from './activity.js';
 import type { ArtifactStore } from './artifacts.js';
 import type { DoctorReport } from './doctor.js';
 import type { Outbox } from './outbox.js';
@@ -53,6 +54,8 @@ export interface AppDeps {
   artifacts: ArtifactStore;
   /** The (redacted) Harness and verification output of a Job's Attempts. */
   logs(jobId: string): JobLogEntry[];
+  /** The running Attempts and their redacted tails (ADR-0018). */
+  activity: ActivityService;
   outbox: Outbox;
   /** Begins a graceful shutdown after the response is sent. */
   requestShutdown(): void;
@@ -116,6 +119,8 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(deps.logs(id));
   });
   app.get('/v1/jobs/:id/worktrees', (c) => c.json(deps.jobs.worktrees(c.req.param('id'))));
+  app.get('/v1/activity', (c) => c.json(deps.activity.list()));
+  app.get('/v1/attempts/:id/tail', (c) => c.json(deps.activity.tail(c.req.param('id'))));
   app.get('/v1/artifacts/:id', (c) => c.json(deps.artifacts.get(c.req.param('id'))));
   /** The exact bytes the content hash was computed over. */
   app.get('/v1/artifacts/:id/content', (c) => {
