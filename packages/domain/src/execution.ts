@@ -8,6 +8,7 @@ import { BillingSchema, CostTagSchema, type CostTag } from './billing.js';
 import { AttemptFindingSchema } from './findings.js';
 import { RiskSchema, RuleIssueSchema, TaskRoleSchema } from './proposals.js';
 import { AnsweredQuestionSchema, InboxQuestionSchema } from './questions.js';
+import { GrantGuidanceSchema } from './blocker-approvals.js';
 
 // ---- Task states (ARCHITECTURE §4.4) ---------------------------------------
 
@@ -227,6 +228,11 @@ export const TaskPacketSchema = z.object({
      * answer (ADR-0023). Guidance only: an answer never changes the scope.
      */
     answers: z.array(AnsweredQuestionSchema).default([]),
+    /**
+     * Guidance a human gave with a grant of more Attempts (ADR-0026), every
+     * grant so far on the Task. Guidance only: it never changes the scope.
+     */
+    guidance: z.array(GrantGuidanceSchema).default([]),
   }),
   limits: z.object({ maxTurns: z.number().int().positive(), wallClockS: z.number().positive() }),
   protocol: z.object({ resultFile: z.literal(RESULT_FILE), mayAskQuestions: z.boolean() }),

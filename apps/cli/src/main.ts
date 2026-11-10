@@ -50,7 +50,7 @@ Commands:
                                   capped by maxReplans)
   inbox [--all] [--json]          List open Inbox Items (--all: every item, deferred too)
   inbox show <id> [--json]        Show an Inbox Item, its version and options
-  inbox decide <id> <option> --expect-version <n> [--subject <ref>] [--comment <text>]
+  inbox decide <id> <option> --expect-version <n> [--subject <ref>] [--comment <text>] [--grant <n>]
                                   Decide an item (a stale version or subject is refused)
   inbox answer <id> (--answer [<q>=]<text>... | --file <answers.json>) [--expect-version <n>]
                                   Answer a Question (an option or free text per question);
@@ -266,6 +266,7 @@ function inbox(argv: string[]): Promise<number> | number {
       'expect-version': { type: 'string' },
       subject: { type: 'string' },
       comment: { type: 'string' },
+      grant: { type: 'string' },
       answer: { type: 'string', multiple: true },
       file: { type: 'string' },
     },
@@ -320,10 +321,18 @@ function inbox(argv: string[]): Promise<number> | number {
         );
         return 2;
       }
+      const grant = values.grant === undefined ? undefined : Number(values.grant);
+      if (grant !== undefined && !Number.isInteger(grant)) {
+        process.stderr.write(
+          `factory: --grant needs a whole number, not '${String(values.grant)}'\n`,
+        );
+        return 2;
+      }
       return inboxDecide(id, option, {
         expectVersion: version,
         subject: values.subject,
         comment: values.comment,
+        grant,
       });
     }
     default:

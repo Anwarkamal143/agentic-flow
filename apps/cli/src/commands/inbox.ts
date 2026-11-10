@@ -53,11 +53,17 @@ export async function inboxShow(id: string, opts: { json: boolean }): Promise<nu
   return 0;
 }
 
-/** `factory inbox decide <id> <option> --expect-version <n>`. */
+/** `factory inbox decide <id> <option> --expect-version <n> [--grant <n>]`. */
 export async function inboxDecide(
   id: string,
   option: string,
-  opts: { expectVersion: number; subject: string | undefined; comment: string | undefined },
+  opts: {
+    expectVersion: number;
+    subject: string | undefined;
+    comment: string | undefined;
+    /** A Blocker Approval's grant size (+1 to +5; the runtime's default is +1). */
+    grant?: number | undefined;
+  },
 ): Promise<number> {
   const api = client();
   if (api === undefined) return EXIT_NOT_RUNNING;
@@ -68,6 +74,7 @@ export async function inboxDecide(
     subjectRef: opts.subject ?? item.subjectRef,
     option,
     ...(opts.comment === undefined ? {} : { comment: opts.comment }),
+    ...(opts.grant === undefined ? {} : { grant: opts.grant }),
   };
   const decided = await refused(() =>
     api.json<Approval>('POST', `/v1/inbox/${encodeURIComponent(id)}/decide`, { body: input }),
@@ -280,7 +287,7 @@ function writeItem(i: Approval): void {
   ];
   if (i.decision !== null) {
     lines.push(
-      `  decided:    ${i.decision.option} by ${i.decidedBy ?? '?'} at ${i.decidedAt ?? '?'}` +
+      `  decided:    ${i.decision.option}${i.decision.grant === undefined ? '' : ` +${String(i.decision.grant)}`} by ${i.decidedBy ?? '?'} at ${i.decidedAt ?? '?'}` +
         (i.decision.comment === null ? '' : `: ${i.decision.comment}`),
       ...(i.decision.answers ?? []).map(
         (a) =>

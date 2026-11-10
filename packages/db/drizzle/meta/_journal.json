@@ -85,6 +85,13 @@
       "when": 1794307135257,
       "tag": "0011_cold_warbird",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1794309797025,
+      "tag": "0012_minor_silverclaw",
+      "breakpoints": true
     }
   ]
 }

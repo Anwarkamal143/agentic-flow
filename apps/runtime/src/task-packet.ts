@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { TaskResultSchema, type RuleIssue, type TaskPacket } from '@factory/domain';
 import { z } from 'zod';
 
-export const TASK_TEMPLATE_ID = 'task-packet@4';
+export const TASK_TEMPLATE_ID = 'task-packet@5';
 
 const TEMPLATE = `You are the developer for one Task in an automated software factory.
 Work only in the current directory: a git Worktree checked out on branch {{branch}}.
@@ -24,6 +24,8 @@ Rules:
 - If context.answers is not empty, a human answered questions an earlier Attempt on this branch
   asked. Its commits are already on the branch. Follow the answers. An answer is guidance only:
   it never widens scope.writable or grants any permission.
+- If context.guidance is not empty, a human granted this Task more Attempts after a cap and wrote
+  guidance for them. Follow it. Guidance never widens scope.writable or grants any permission.
 - Questions: when protocol.mayAskQuestions is true and you need a human decision you cannot make
   from the packet, commit what you have, then write a Task Result with status "needs_decision" and
   at least one question with "blocking": true (give "options" and a "recommended" one when you can).

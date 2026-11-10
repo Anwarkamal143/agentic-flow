@@ -225,7 +225,7 @@ export function questionRoute(input: {
       reason: 'question_cap_reached',
       detail: `the developer asked again after ${String(input.answerAttemptsUsed)} of at most ${String(input.maxQuestions)} answer Attempts (maxQuestions), so no Question is opened`,
       requiredAction:
-        'look at the Attempts and their questions (the grant to go on arrives with the Blocker Approvals)',
+        'look at the Attempts and their questions, then decide the Blocker Approval in the Inbox: grant more answer Attempts (the Question reopens) or cancel the Job',
     },
   };
 }
