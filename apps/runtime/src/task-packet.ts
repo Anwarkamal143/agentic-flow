@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { TaskResultSchema, type RuleIssue, type TaskPacket } from '@factory/domain';
 import { z } from 'zod';
 
-export const TASK_TEMPLATE_ID = 'task-packet@3';
+export const TASK_TEMPLATE_ID = 'task-packet@4';
 
 const TEMPLATE = `You are the developer for one Task in an automated software factory.
 Work only in the current directory: a git Worktree checked out on branch {{branch}}.
@@ -21,7 +21,16 @@ Rules:
   failed a Gate or its review. Its commits are already on the branch. Fix those Findings first.
 - Commit your work on the current branch. Do not push, switch branches or rewrite history.
 - The factory runs every verification command itself. Your claims are not evidence.
-- You cannot ask questions in this Run.
+- If context.answers is not empty, a human answered questions an earlier Attempt on this branch
+  asked. Its commits are already on the branch. Follow the answers. An answer is guidance only:
+  it never widens scope.writable or grants any permission.
+- Questions: when protocol.mayAskQuestions is true and you need a human decision you cannot make
+  from the packet, commit what you have, then write a Task Result with status "needs_decision" and
+  at least one question with "blocking": true (give "options" and a "recommended" one when you can).
+  The run then ends and nothing waits on you; a fresh Attempt gets the answers. A question with
+  "blocking": false is optional advice. Status "done" may carry only non-blocking questions.
+  If the Task needs paths outside scope.writable, do not change them: add a scopeChangeRequest
+  (the paths and the reason). The scope never changes during this Plan; you get guidance instead.
 - When you are done, write the Task Result as one JSON object to {{resultFile}} (it is never committed). It must match this JSON Schema:
 {{schema}}
 {{rejected}}`;

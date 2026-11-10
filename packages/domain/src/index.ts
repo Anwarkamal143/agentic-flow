@@ -36,6 +36,7 @@ export * from './approvals.js';
 export * from './plan-view.js';
 export * from './capacity.js';
 export * from './dependency-base.js';
+export * from './questions.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -546,6 +547,8 @@ export const TaskSchema = TaskDefinitionSchema.extend({
   maxAttempts: z.number().int().positive(),
   /** Retries allowed after interrupted Attempts (not counted toward `maxAttempts`). */
   maxRetries: z.number().int().nonnegative(),
+  /** Answer Attempts allowed after Questions (not counted toward `maxAttempts` or `maxRetries`). */
+  maxQuestions: z.number().int().nonnegative(),
   /** Why a `blocked` Task can't go on, and what would clear it. */
   blocker: BlockerSchema.nullable(),
   /** The Plan Artifact it was taken from. */

@@ -124,6 +124,7 @@ export function persistPlanTasks(
         priority: TASK_PRIORITY_WEIGHT[task.priority],
         maxAttempts: task.maxAttempts ?? config.maxAttempts.value,
         maxRetries: config.maxRetries.value,
+        maxQuestions: config.maxQuestions.value,
         version: 0,
       })
       .run();

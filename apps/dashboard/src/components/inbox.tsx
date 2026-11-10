@@ -71,6 +71,7 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
           <p className="text-xs text-muted-foreground">Why it needs you</p>
           <p>{item.why}</p>
         </div>
+        {item.questions !== null && <Questions item={item} />}
         <div className="text-sm">
           <p className="text-xs text-muted-foreground">Options</p>
           <ul className="space-y-1">
@@ -131,7 +132,11 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
           {EXPIRY[item.expiresPolicy]} Version {item.version}.
         </p>
         {item.state === 'open' ? (
-          <ItemActions item={item} returnTo={context.returnTo} />
+          item.kind === 'question' ? (
+            <AnswerForm item={item} returnTo={context.returnTo} />
+          ) : (
+            <ItemActions item={item} returnTo={context.returnTo} />
+          )
         ) : (
           <p className="text-sm">
             {item.decision === null
@@ -144,6 +149,134 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/** A `question` item's questions, each labelled as the agent's, with the answers once given. */
+function Questions({ item }: { item: Approval }) {
+  const answers = item.decision?.answers ?? [];
+  return (
+    <div className="text-sm">
+      <p className="text-xs text-muted-foreground">
+        Questions{' '}
+        <Badge variant="warning" className="ml-1">
+          proposed by an agent
+        </Badge>
+      </p>
+      <ol className="space-y-2" data-testid="questions">
+        {(item.questions ?? []).map((q) => {
+          const a = answers.find((x) => x.questionId === q.id);
+          return (
+            <li key={q.id}>
+              <span className="font-mono text-xs">{q.id}</span>{' '}
+              <Badge variant={q.blocking ? 'outline' : 'secondary'}>
+                {q.blocking ? 'blocking' : 'optional'}
+              </Badge>
+              {q.source === 'scope_change_request' && (
+                <Badge variant="outline" className="ml-1">
+                  scope change request
+                </Badge>
+              )}{' '}
+              {q.text}
+              {q.paths.length > 0 && (
+                <span className="block text-muted-foreground">
+                  Paths asked for (never granted): {q.paths.join(', ')}
+                </span>
+              )}
+              {q.options.length > 0 && (
+                <span className="block text-muted-foreground">
+                  Options: {q.options.join(' · ')}
+                  {q.recommended !== null && ` (recommended by the agent: ${q.recommended})`}
+                </span>
+              )}
+              {item.decision !== null && (
+                <span className="block">
+                  Answer:{' '}
+                  {a === undefined
+                    ? 'not answered'
+                    : a.option !== undefined
+                      ? `option ${a.option}`
+                      : a.text}
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+/**
+ * A `question` item's answer form: per question, its offered options (the
+ * agent's) or your own words, then one submit (`answerQuestion`). It carries
+ * the version the page was rendered with and the asking Attempt.
+ */
+function AnswerForm({ item, returnTo }: { item: Approval; returnTo: string }) {
+  const version = String(item.version);
+  return (
+    <div className="flex flex-wrap items-end gap-4 border-t pt-4">
+      <form
+        method="post"
+        action={`/api/inbox/${item.id}/answer`}
+        className="w-full space-y-4"
+        data-testid="answer-form"
+      >
+        <input type="hidden" name="expectedVersion" value={version} />
+        <input type="hidden" name="subjectRef" value={item.subjectRef} />
+        <input type="hidden" name="return" value={returnTo} />
+        {(item.questions ?? []).map((q) => (
+          <fieldset key={q.id} className="space-y-1 text-sm">
+            <legend className="font-medium">
+              {q.id}: {q.text} {q.blocking ? '(required)' : '(optional)'}
+            </legend>
+            {q.options.map((o) => (
+              <label key={o} className="mr-4 inline-flex items-center gap-1">
+                <input type="radio" name={`choice.${q.id}`} value={o} required={q.blocking} />
+                {o}
+                {q.recommended === o && (
+                  <span className="text-xs text-muted-foreground">(agent recommends)</span>
+                )}
+              </label>
+            ))}
+            {q.options.length > 0 && (
+              <label className="mr-4 inline-flex items-center gap-1">
+                <input type="radio" name={`choice.${q.id}`} value="__text" />
+                My own answer
+              </label>
+            )}
+            <label
+              htmlFor={`text-${item.id}-${q.id}`}
+              className="block text-xs text-muted-foreground"
+            >
+              {q.options.length > 0 ? 'Your own answer (with “My own answer”)' : 'Your answer'}
+            </label>
+            <textarea
+              id={`text-${item.id}-${q.id}`}
+              name={`text.${q.id}`}
+              rows={2}
+              maxLength={5000}
+              required={q.blocking && q.options.length === 0}
+              className="block w-full min-w-72 rounded-md border bg-background p-2 text-sm"
+            />
+          </fieldset>
+        ))}
+        <p className="text-xs text-muted-foreground">
+          Your answers are guidance for a fresh Attempt on the same Task Branch. They never widen
+          the Task’s scope or grant a permission.
+        </p>
+        <button type="submit" className={`${button} bg-primary text-primary-foreground`}>
+          Send answers
+        </button>
+      </form>
+      <form method="post" action={`/api/inbox/${item.id}/${item.deferred ? 'undefer' : 'defer'}`}>
+        <input type="hidden" name="expectedVersion" value={version} />
+        <input type="hidden" name="return" value={returnTo} />
+        <button type="submit" className={button}>
+          {item.deferred ? 'Undefer' : 'Defer'}
+        </button>
+      </form>
+    </div>
   );
 }
 

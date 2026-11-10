@@ -202,21 +202,28 @@ export async function artifact(id: string): Promise<{ artifact: Artifact; conten
   return { artifact: meta, content };
 }
 
-export type InboxAction = 'decide' | 'defer' | 'undefer';
+export type InboxAction = 'decide' | 'answer' | 'defer' | 'undefer';
 
 /** What the runtime said to a change: the item as it now is, or its refusal. */
 export type InboxChangeResult =
   { ok: true; item: Approval } | { ok: false; status: number; error: string; message: string };
 
 /**
- * Decides, defers or undefers an Inbox Item through the runtime API, as
+ * Decides, answers, defers or undefers an Inbox Item through the runtime API, as
  * `user:local`. The body names the version (and, to decide, the subject and
  * option) the operator saw; the runtime refuses a stale one (ADR-0016).
  */
 export async function changeInboxItem(
   id: string,
   action: InboxAction,
-  body: { expectedVersion: number; subjectRef?: string; option?: string; comment?: string },
+  body: {
+    expectedVersion: number;
+    subjectRef?: string;
+    option?: string;
+    comment?: string;
+    /** `answer` only: one per answered question (ADR-0023). */
+    answers?: { questionId: string; option?: string; text?: string }[];
+  },
 ): Promise<InboxChangeResult> {
   const res = await call(`/v1/inbox/${encodeURIComponent(id)}/${action}`, {
     method: 'POST',

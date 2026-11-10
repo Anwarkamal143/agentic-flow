@@ -135,7 +135,7 @@ describe('the Claude Code Harness adapter', () => {
     const [attempt] = await json<AttemptBody[]>(rt.request(`/v1/jobs/${job.id}/attempts`));
     expect(attempt?.harness).toEqual({ id: 'claude-code', version: '9.8.7' });
     expect(attempt?.sessionRef).toBe(flagValues(byRole('developer'), '--session-id')[0]);
-    expect(attempt?.promptTemplate.id).toBe('task-packet@3');
+    expect(attempt?.promptTemplate.id).toBe('task-packet@4');
     expect(attempt?.promptTemplate.hash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(attempt?.usage).toMatchObject({
       tag: 'actual',

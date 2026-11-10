@@ -3,7 +3,16 @@
  * through the runtime API, which refuses one that names a stale version or
  * subject.
  */
-import type { Approval, DecideInput, DeferInput, PlanView } from '@factory/domain';
+import { readFileSync } from 'node:fs';
+import {
+  QuestionAnswerSchema,
+  type AnswerQuestionInput,
+  type Approval,
+  type DecideInput,
+  type DeferInput,
+  type PlanView,
+  type QuestionAnswer,
+} from '@factory/domain';
 import { ApiRequestError, type RuntimeClient } from '../client.js';
 import { client } from './job.js';
 import { EXIT_NOT_RUNNING } from './lifecycle.js';
@@ -67,6 +76,91 @@ export async function inboxDecide(
   process.stdout.write(`Decided ${decided.id}: ${option}\n`);
   writeItem(decided);
   return 0;
+}
+
+/**
+ * `factory inbox answer <id> (--answer <text>... | --file <path>) [--expect-version <n>]`
+ * (`answerQuestion`). Each `--answer` is `<question-id>=<answer>`, or a plain
+ * answer for the next question in order; an answer equal to one of the
+ * question's options is sent as that option, anything else as free text.
+ * `--file` holds the answers as JSON (`[{questionId, option | text}]`, or
+ * `{answers: […]}`). Without `--expect-version` the version just read is used.
+ */
+export async function inboxAnswer(
+  id: string,
+  opts: { answers: string[]; file: string | undefined; expectVersion: number | undefined },
+): Promise<number> {
+  const api = client();
+  if (api === undefined) return EXIT_NOT_RUNNING;
+  const item = await getItem(api, id);
+  if (item === undefined) return 1;
+  if (item.kind !== 'question' || item.questions === null) {
+    process.stderr.write(`factory: ${id} is a ${item.kind} item; decide it with 'inbox decide'\n`);
+    return 2;
+  }
+  let answers: QuestionAnswer[];
+  if (opts.file !== undefined) {
+    const content = JSON.parse(readFileSync(opts.file, 'utf8')) as unknown;
+    const list =
+      typeof content === 'object' && content !== null && !Array.isArray(content)
+        ? (content as { answers?: unknown }).answers
+        : content;
+    const parsed = AnswersFileSchema.safeParse(list);
+    if (!parsed.success) {
+      process.stderr.write(
+        `factory: ${opts.file} must hold [{questionId, option | text}] or {answers: [...]}: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}\n`,
+      );
+      return 2;
+    }
+    answers = parsed.data;
+  } else {
+    const built = answersFromFlags(item, opts.answers);
+    if (typeof built === 'string') {
+      process.stderr.write(`factory: ${built}\n`);
+      return 2;
+    }
+    answers = built;
+  }
+  const input: AnswerQuestionInput = {
+    expectedVersion: opts.expectVersion ?? item.version,
+    subjectRef: item.subjectRef,
+    answers,
+  };
+  const answered = await refused(() =>
+    api.json<Approval>('POST', `/v1/inbox/${encodeURIComponent(id)}/answer`, { body: input }),
+  );
+  if (answered === undefined) return 1;
+  process.stdout.write(
+    `Answered ${answered.id}: a fresh Attempt of Task ${answered.taskId ?? '?'} starts with your answers\n`,
+  );
+  writeItem(answered);
+  return 0;
+}
+
+const AnswersFileSchema = QuestionAnswerSchema.array();
+
+/** The `--answer` flags as answers, or what is wrong with them. */
+function answersFromFlags(item: Approval, flags: readonly string[]): QuestionAnswer[] | string {
+  const questions = item.questions ?? [];
+  if (flags.length === 0)
+    return 'inbox answer needs --answer <text> (one per question) or --file <path>';
+  const answers: QuestionAnswer[] = [];
+  let next = 0;
+  for (const flag of flags) {
+    const eq = flag.indexOf('=');
+    const named = eq > 0 ? questions.find((q) => q.id === flag.slice(0, eq)) : undefined;
+    const question = named ?? questions[next];
+    if (question === undefined)
+      return `more answers than the ${String(questions.length)} question(s)`;
+    if (named === undefined) next++;
+    const value = named === undefined ? flag : flag.slice(eq + 1);
+    answers.push(
+      question.options.includes(value)
+        ? { questionId: question.id, option: value }
+        : { questionId: question.id, text: value },
+    );
+  }
+  return answers;
 }
 
 /** `factory inbox defer|undefer <id>`: hides the item from the default view, or shows it again. */
@@ -162,6 +256,19 @@ function writeItem(i: Approval): void {
     `  subject:    ${i.subjectRef}`,
     `  requested:  by ${i.requestedBy} at ${i.createdAt}`,
     `  question:   ${i.question}`,
+    ...(i.questions === null
+      ? []
+      : [
+          '  questions (asked by an agent):',
+          ...i.questions.flatMap((q) => [
+            `    ${q.id.padEnd(6)} ${q.blocking ? 'blocking' : 'optional'}  ${q.text}`,
+            ...(q.options.length === 0
+              ? ['           answer in free text']
+              : [
+                  `           options: ${q.options.map((o) => (o === q.recommended ? `${o} [recommended]` : o)).join(' | ')} (or free text)`,
+                ]),
+          ]),
+        ]),
     `  why:        ${i.why}`,
     `  evidence:   ${i.evidence.join(', ') || '(none)'}`,
     `  expiry:     ${i.expiresPolicy} (stays pending; never auto-approves)`,
@@ -175,6 +282,14 @@ function writeItem(i: Approval): void {
     lines.push(
       `  decided:    ${i.decision.option} by ${i.decidedBy ?? '?'} at ${i.decidedAt ?? '?'}` +
         (i.decision.comment === null ? '' : `: ${i.decision.comment}`),
+      ...(i.decision.answers ?? []).map(
+        (a) =>
+          `    ${a.questionId.padEnd(6)} ${a.option !== undefined ? `option ${a.option}` : `text ${a.text ?? ''}`}`,
+      ),
+    );
+  } else if (i.state === 'open' && i.kind === 'question') {
+    lines.push(
+      `  answer:     factory inbox answer ${i.id} --answer <text> ... --expect-version ${String(i.version)}`,
     );
   }
   process.stdout.write(lines.join('\n') + '\n');
