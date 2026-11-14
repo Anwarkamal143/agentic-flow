@@ -7,7 +7,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { schema, type FactoryDb, type Tx } from '@factory/db';
 import { RESULT_FILE } from '@factory/domain';
-import { infoExcludePath } from '@factory/git';
+import { commitAll, infoExcludePath, uncommittedPaths } from '@factory/git';
 import { and, eq } from 'drizzle-orm';
 import { releaseClaim } from './claim.js';
 import { newId } from './ids.js';
@@ -98,6 +98,27 @@ export function releaseAttemptTokens(tx: Tx, taskId: string, portBase: number | 
       )
       .run();
   }
+}
+
+/**
+ * Commits whatever is uncommitted in a Worktree as one flagged WIP commit on
+ * its Task Branch (`Factory-WIP: true`, one `Factory-WIP-Path` per path), so
+ * nothing is ever discarded. `undefined` when there is nothing to commit. The
+ * Task Result file is excluded (`excludeResultFile`), so it never lands here.
+ */
+export async function commitLeftovers(
+  worktree: string,
+): Promise<{ sha: string; paths: string[] } | undefined> {
+  const paths = await uncommittedPaths(worktree);
+  if (paths.length === 0) return undefined;
+  const sha = await commitAll(
+    worktree,
+    `wip: uncommitted changes left by the Harness\n\n` +
+      `The factory committed these so nothing is lost. Review them.\n\n` +
+      `Factory-WIP: true\n` +
+      paths.map((p) => `Factory-WIP-Path: ${p}`).join('\n'),
+  );
+  return { sha, paths };
 }
 
 /** Keeps the Task Result file out of every commit, via the Factory Clone's `info/exclude`. */

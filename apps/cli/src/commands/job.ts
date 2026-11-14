@@ -1,5 +1,6 @@
 import type {
   AcceptanceCriterion,
+  Approval,
   Artifact,
   Attempt,
   DeliveryReport,
@@ -144,6 +145,7 @@ export async function jobCancel(id: string, opts: { reason: string | undefined }
       });
       process.stdout.write(`Cancelled Job ${cancelled.id}\n`);
       writeJob(cancelled);
+      await writeCleanupItem(api, cancelled.id);
       return 0;
     } catch (err) {
       const conflict = err instanceof ApiRequestError && err.body?.error === 'version_conflict';
@@ -188,6 +190,26 @@ export async function jobReplan(id: string, opts: { feedback: string }): Promise
       return 1;
     }
   }
+}
+
+/**
+ * The Job's `cleanup` Inbox Item, opened once the cancel stopped everything
+ * (ADR-0027): its id and how to decide it, or why there is none.
+ */
+async function writeCleanupItem(api: RuntimeClient, jobId: string): Promise<void> {
+  const items = await api.json<Approval[]>('GET', '/v1/inbox?all=true');
+  const item = items.find((i) => i.jobId === jobId && i.kind === 'cleanup');
+  if (item === undefined) {
+    process.stdout.write('No cleanup Approval: the cancel left no preserved Worktree.\n');
+    return;
+  }
+  process.stdout.write(
+    [
+      `Cleanup Approval ${item.id}: ${item.question} (default: ${item.recommended ?? 'keep'}; Task Branches are always kept)`,
+      `  decide: factory inbox decide ${item.id} keep|discard --expect-version ${String(item.version)}`,
+      '',
+    ].join('\n'),
+  );
 }
 
 async function getJob(api: RuntimeClient, id: string): Promise<Job | undefined> {
