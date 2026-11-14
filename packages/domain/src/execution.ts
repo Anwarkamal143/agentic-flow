@@ -439,10 +439,14 @@ export const AttemptSchema = z.object({
 });
 export type Attempt = z.infer<typeof AttemptSchema>;
 
-// ---- Delivery Report (Phase A: a local branch) --------------------------------
+// ---- Delivery Report (v3, ADR-0028: local branches in the Factory Clone) -------
 
 export const DeliveryReportSchema = z.object({
-  reportVersion: z.literal(2),
+  reportVersion: z.literal(3),
+  /** How the Job ended: a `failed` Job's approved branches are partial results. */
+  outcome: z.enum(['completed', 'failed']),
+  /** One plain sentence on the outcome, saying so when the Job failed. */
+  statement: z.string(),
   job: z.object({ id: z.string(), title: z.string() }),
   repository: z.object({
     id: z.string(),
@@ -451,6 +455,28 @@ export const DeliveryReportSchema = z.object({
     clonePath: z.string(),
     source: z.string(),
   }),
+  /**
+   * Every Task, in Plan order, with its Task Branch (`null` when it never got
+   * a Worktree). `leaf`: no Task depends on it. `fetchCommand` (run from the
+   * source checkout) is offered only for an approved Task no approved Task
+   * depends on: its branch holds every approved Task beneath it. A failed or
+   * cancelled leaf is listed, never offered.
+   */
+  branches: z.array(
+    z.object({
+      key: z.string(),
+      title: z.string(),
+      state: TaskStateSchema,
+      cancelReason: TaskCancelReasonSchema.nullable(),
+      branch: z.string().nullable(),
+      headSha: z.string().nullable(),
+      leaf: z.boolean(),
+      fetchCommand: z.string().nullable(),
+    }),
+  ),
+  /** Where the branches are, and that the offered ones are not combined (before Phase C). */
+  notes: z.array(z.string()),
+  /** The approved Tasks, in detail. */
   tasks: z.array(
     z.object({
       key: z.string(),
@@ -459,8 +485,6 @@ export const DeliveryReportSchema = z.object({
       branch: z.string(),
       baseSha: z.string(),
       headSha: z.string(),
-      /** Run from the source checkout: brings the Task Branch into it. */
-      fetchCommand: z.string(),
       commits: z.array(z.object({ sha: z.string(), subject: z.string() })),
       changedFiles: z.array(z.string()),
       wipCommit: z.string().nullable(),

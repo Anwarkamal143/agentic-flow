@@ -4,7 +4,7 @@
  */
 import { appendEvent, schema, type FactoryDb } from '@factory/db';
 import { removeWorktree } from '@factory/git';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
 import { buildDeliveryReport } from './delivery.js';
 import { changeJob, stepWorktree, type JobState } from './engine.js';
@@ -51,9 +51,11 @@ export function nextClosure(db: FactoryDb): { id: string; jobId: string } | unde
 }
 
 /**
- * Writes the Delivery Report, then removes the Job's Worktrees (their
- * branches stay in the Factory Clone), then completes `closure`. A Worktree
- * that git refuses to remove stays `preserved`.
+ * Writes the Delivery Report, then removes the Worktrees of the Job's
+ * approved Tasks (their branches stay in the Factory Clone), then completes
+ * `closure`. A Worktree that git refuses to remove stays `preserved`. After a
+ * failed execution (ADR-0028), the failed Tasks' Worktrees hold unreviewed
+ * work and stay `preserved`.
  */
 export async function runClosure(
   deps: ClosureDeps,
@@ -86,10 +88,18 @@ export async function runClosure(
 
   // Removal only after delivery: the branches hold the work, the report says where.
   const preserved = db
-    .select()
+    .select({ worktree: schema.worktrees })
     .from(schema.worktrees)
-    .where(and(eq(schema.worktrees.jobId, jobId), eq(schema.worktrees.state, 'preserved')))
-    .all();
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.worktrees.taskId))
+    .where(
+      and(
+        eq(schema.worktrees.jobId, jobId),
+        eq(schema.worktrees.state, 'preserved'),
+        inArray(schema.tasks.state, ['approved', 'integrated']),
+      ),
+    )
+    .all()
+    .map((r) => r.worktree);
   for (const worktree of preserved) {
     const repo = db
       .select()

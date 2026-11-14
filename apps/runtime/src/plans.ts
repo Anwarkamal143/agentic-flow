@@ -156,6 +156,7 @@ export function persistPlanTasks(
   for (const c of decision.cancelled) {
     stepTask(tx, op, rowOf(c.taskId), 'cancelled', {
       reason: 'replan',
+      cancelReason: 'replan',
       payload: { why: c.why, planArtifactId: ctx.artifactId },
     });
     cancelTaskItems(tx, op, c.taskId);
@@ -352,7 +353,8 @@ export function cancelPlanTasks(
     )
     .all();
   for (const task of open) {
-    stepTask(tx, op, task, 'cancelled', { reason });
+    // The human rejected the Plan its Tasks belong to.
+    stepTask(tx, op, task, 'cancelled', { reason, cancelReason: 'human' });
     cancelTaskItems(tx, op, task.id);
   }
 }

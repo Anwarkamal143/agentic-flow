@@ -61,6 +61,7 @@ const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   replan_cap_reached: [GRANT_REPLAN, CANCEL_JOB],
   recovery_uncertain: [RETRY_NOW, CANCEL_JOB],
   retry_cap_reached: [RETRY_NOW, CANCEL_JOB],
+  base_merge_conflict: [REPLAN, CANCEL_JOB],
 };
 
 /**
@@ -81,6 +82,7 @@ const TITLES: Partial<Record<BlockerReason, string>> = {
   recovery_uncertain: 'stopped: recovery is uncertain',
   retry_cap_reached: 'reached its Retry cap',
   replan_cap_reached: 'reached its Replan cap',
+  base_merge_conflict: "can't start: its Dependency Base conflicts",
 };
 
 /** The option that starts a Replan from an Inbox Item (a Blocker Approval or a scope change Question). */

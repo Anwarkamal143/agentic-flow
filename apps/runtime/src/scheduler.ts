@@ -524,7 +524,10 @@ function cancelUnfinishedTasks(tx: Tx, jobId: string, actor: string): void {
     )
     .all();
   for (const task of open) {
-    stepTask(tx, { jobId, actor }, task, 'cancelled', { reason: 'planning_failed' });
+    stepTask(tx, { jobId, actor }, task, 'cancelled', {
+      reason: 'planning_failed',
+      cancelReason: 'replan',
+    });
     cancelTaskItems(tx, { jobId, actor }, task.id);
   }
 }

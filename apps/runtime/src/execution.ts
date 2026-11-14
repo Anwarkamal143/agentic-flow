@@ -18,7 +18,6 @@ import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   AttemptCauseSchema,
   AttemptStateSchema,
-  BlockerSchema,
   checkPathScope,
   criterionVerdict,
   addUsage,
@@ -82,7 +81,8 @@ import type { ArtifactStore, StoredContent } from './artifacts.js';
 import { claimNextTask, heartbeatIntervalMs, leaseExpiry } from './claim.js';
 import { heartbeatTick, sweptAttempt } from './sweeper.js';
 import { criteriaCoveredBy } from './criteria.js';
-import { makeDependencyBase } from './dependency-base.js';
+import { blockOnBaseConflict, makeDependencyBase } from './dependency-base.js';
+import { settleExecution } from './keep-going.js';
 import {
   failClosure,
   nextClosure,
@@ -90,7 +90,6 @@ import {
   runningClosures,
   type CrashPoint,
 } from './closure.js';
-import { latestStageRun, startRequestedReplan } from './replan.js';
 import { attemptFindings, gateFinding, scopeFinding } from './findings.js';
 import {
   changeJob,
@@ -104,7 +103,6 @@ import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
 import { answersAfter, openQuestionItem } from './questions.js';
 import { guidanceAfter } from './blocker-approvals.js';
-import { latestArtifact } from './plan-approval.js';
 import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
@@ -583,13 +581,7 @@ export class TaskScheduler {
       const base = await this.withClone(clone, async () => {
         await fetchRemote(clone);
         const dependencyBase = await makeDependencyBase(db, clone, task);
-        if (dependencyBase.kind === 'conflict') {
-          // Until the `base_merge_conflict` Blocker (#44), a conflict fails the Task, visibly.
-          throw new Error(
-            `the Dependency Base of ${task.key} can't be made: merging ${dependencyBase.dependencies.join(', ')} conflicts in ${dependencyBase.paths.join(', ') || 'the merge'}`,
-          );
-        }
-        if (dependencyBase.kind === 'base') return dependencyBase;
+        if (dependencyBase.kind !== 'none') return dependencyBase;
         const sha =
           (await resolveCommit(clone, `refs/remotes/origin/${repo.defaultBranch}`)) ??
           (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
@@ -597,6 +589,12 @@ export class TaskScheduler {
           throw new Error(`the Factory Clone has no ${repo.defaultBranch} to start from`);
         return { sha, dependencies: [] };
       });
+      if ('paths' in base) {
+        // A human Blocker, never a replan (ADR-0028): no Attempt or Worktree is made.
+        blockOnBaseConflict(db, { jobId: job.id, actor: ACTOR }, taskId, base);
+        this.opts.onCommit();
+        return;
+      }
       const at = taskWorktree({
         workspaceRoot: this.opts.workspaceRoot,
         repositoryId: repo.id,
@@ -2211,54 +2209,5 @@ function requireAttempt(db: FactoryDb | Tx, id: string) {
   return attempt;
 }
 
-/** Task states in which the Task is still being worked on, or is about to be. */
-const IN_PROGRESS = ['ready', 'claimed', 'running', 'verifying', 'in_review', 'changes_requested'];
-
-/**
- * Ends `execution` once no Task is in progress: `failed` if a Task failed
- * (with no Rework route); `waiting_human` or `blocked` if a Task is blocked
- * (the Stage Run carries the first Blocker, human ones first, so the Job
- * shows why); `succeeded` (and `closure` queued) when every Task is approved.
- * Only the Tasks of the Job's newest Plan count: a Plan replaced at
- * `plan_approval` left its Tasks cancelled, never run (ADR-0019).
- */
-export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper): void {
-  // A requested Replan starts planning once the last Attempt in flight settles (ADR-0029).
-  if (startRequestedReplan(tx, state.job.id, step, ACTOR)) return;
-  const execution = latestStageRun(state, 'execution');
-  if (execution?.state !== 'running') return;
-  const plan = latestArtifact(tx, state.job.id, 'plan');
-  const tasks = tx
-    .select()
-    .from(schema.tasks)
-    .where(
-      and(eq(schema.tasks.jobId, state.job.id), eq(schema.tasks.planArtifactId, plan?.id ?? '')),
-    )
-    .orderBy(asc(sql`rowid`))
-    .all();
-  const failed = tasks.find((t) => t.state === 'failed');
-  if (failed !== undefined) {
-    step(execution, 'failed', {
-      failure: {
-        reason: 'task_failed',
-        message: `Task ${failed.key} failed, with no Rework route`,
-        issues: [],
-      },
-    });
-    return;
-  }
-  if (tasks.some((t) => IN_PROGRESS.includes(t.state))) return;
-  const blockers = tasks
-    .filter((t) => t.state === 'blocked' && t.blockerJson !== null)
-    .map((t) => BlockerSchema.parse(JSON.parse(t.blockerJson ?? 'null')));
-  const blocker = blockers.find((b) => b.kind === 'human') ?? blockers[0];
-  if (blocker !== undefined) {
-    step(execution, blocker.kind === 'human' ? 'waiting_human' : 'blocked', { blocker });
-    return;
-  }
-  if (tasks.length > 0 && tasks.every((t) => t.state === 'approved')) {
-    step(execution, 'succeeded');
-    const closure = state.stageRuns.find((r) => r.stageId === 'closure' && r.state === 'pending');
-    if (closure !== undefined) step(closure, 'queued');
-  }
-}
+// Ending `execution` lives with the keep-going rules (ADR-0028).
+export { settleExecution } from './keep-going.js';
