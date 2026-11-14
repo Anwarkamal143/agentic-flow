@@ -98,7 +98,7 @@ describe('API-key billing for Claude Code', () => {
     expect(attempt?.evidence.find((e) => e.verificationKey === 'no-api-key')?.verdict).toBe('pass');
   });
 
-  it('records an estimated cost billed to the API key: the list price, or the configured price table', async () => {
+  it('records an estimated cost billed to the API key at the list price', async () => {
     const { rt } = await runtimeWith({ billing: 'api_key' });
     const job = await completedJob(rt);
     const [attempt] = await json<AttemptBody[]>(rt.request(`/v1/jobs/${job.id}/attempts`));
@@ -111,7 +111,9 @@ describe('API-key billing for Claude Code', () => {
       costTag: 'estimated',
       billing: 'api_key',
     });
+  });
 
+  it('records an estimated cost billed to the API key from the configured price table', async () => {
     const priced = await runtimeWith({
       billing: 'api_key',
       prices: {

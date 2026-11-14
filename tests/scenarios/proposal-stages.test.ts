@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { initializedHome, startRuntime, useFakeHarness } from '../support/factory.js';
+import {
+  initializedHome,
+  patchFactoryConfig,
+  startRuntime,
+  useFakeHarness,
+} from '../support/factory.js';
 import {
   createJob,
   json,
@@ -40,9 +45,10 @@ interface TaskBody {
   maxAttempts: number;
 }
 
-async function proposalRuntime(script: string) {
+async function proposalRuntime(script: string, config: Record<string, unknown> = {}) {
   const home = await initializedHome();
   useFakeHarness(home, script);
+  patchFactoryConfig(home, config);
   const rt = await startRuntime(home);
   const repo = await registeredRepo(rt);
   return { rt, repo };
@@ -61,6 +67,7 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       ['discovery', 'succeeded'],
       ['specification', 'succeeded'],
       ['planning', 'succeeded'],
+      ['plan_approval', 'skipped'],
       ['execution', 'succeeded'],
       ['closure', 'succeeded'],
     ]);
@@ -319,9 +326,12 @@ describe('proposal Stages, driven by the Fake Harness', () => {
   });
 
   it('cancels the ready Task with its Job', async () => {
-    // The first Job's Task holds the single execution slot, so the second Job's Task stays ready.
+    // With `concurrency.global: 1`, the first Job's Task holds the only Task slot, so the
+    // second Job's Task stays ready.
     const busy = { ...validTaskResponse(), delayMs: 60_000 };
-    const { rt, repo } = await proposalRuntime(scriptWith({}, { 'add-sum': [busy, busy] }));
+    const { rt, repo } = await proposalRuntime(scriptWith({}, { 'add-sum': [busy, busy] }), {
+      concurrency: { global: 1 },
+    });
     const first = await createJob(rt, repo.id);
     await waitForJob(rt, first.id, (j) =>
       j.stageRuns.some((s) => s.stageId === 'execution' && s.state === 'running'),

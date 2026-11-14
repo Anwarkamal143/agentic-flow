@@ -51,7 +51,7 @@ Choices made while making a Job cancellable mid-Attempt and making a runtime cra
 
 - Between a crash and the next start, a spool holds the process's raw, unredacted output in the factory home.
 - A Harness process that leaves its process group (`setsid`) is not found or stopped. Neither is a child that outlived a dead group leader (see above). Tier 0 is a guardrail, not isolation.
-- Lease expiry is recorded and renewed but not yet read by anything: in a single-runtime home the runtime record and the process check decide. No scenario exercises the heartbeat, or a crash in the window between a Harness start and its token being recorded.
+- ~~Lease expiry is recorded and renewed but not yet read by anything.~~ Resolved by #41 (ADR-0024): the heartbeat tick sweeps expired leases. No scenario exercises a crash in the window between a Harness start and its token being recorded.
 - A crash between `addWorktree` and the transaction that records the Worktree leaves a directory with no row; the next claim of that Task then fails with `factory_error` (the directory is never deleted).
 - A crash after a developer Run's end is recorded but before the Attempt moves to `verifying` gives a Retry (the Run's outcome is known only from events), not a resume.
 - Proposal Harness Runs are not re-attached (the Fake's are in-process); the Stage starts again.

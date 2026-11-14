@@ -4,7 +4,7 @@
  */
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
-import { TaskStateSchema } from './execution.js';
+import { TaskCancelReasonSchema, TaskStateSchema } from './execution.js';
 import { BlockerSchema } from './rework.js';
 import {
   DEFAULT_TOOL_POLICIES,
@@ -31,6 +31,18 @@ export * from './redaction.js';
 export * from './logs.js';
 export * from './recovery.js';
 export * from './tool-policy.js';
+export * from './activity.js';
+export * from './approvals.js';
+export * from './plan-view.js';
+export * from './capacity.js';
+export * from './dependency-base.js';
+export * from './questions.js';
+export * from './blocker-approvals.js';
+export * from './carry-over.js';
+export * from './keep-going.js';
+export * from './delivery.js';
+export * from './cleanup.js';
+export * from './respecification.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -57,6 +69,22 @@ export const RepositoryProfileSchema = z.object({
 });
 export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
 
+/**
+ * `required`: every new Plan waits at `plan_approval` for a human. `skip`: the
+ * Stage Run ends `skipped`, with the reason in its event (PRODUCT_SPEC §4).
+ */
+export const PlanApprovalPolicySchema = z.enum(['required', 'skip']);
+export type PlanApprovalPolicy = z.infer<typeof PlanApprovalPolicySchema>;
+
+/** Task concurrency limits set at a level (Project, or a Job at creation); unset inherits. */
+export const ConcurrencyOverrideSchema = z
+  .object({
+    perRepository: z.number().int().min(1).max(16).optional(),
+    perJob: z.number().int().min(1).max(16).optional(),
+  })
+  .strict();
+export type ConcurrencyOverride = z.infer<typeof ConcurrencyOverrideSchema>;
+
 /** Operator-set Project configuration. Every field is optional: unset means inherit. */
 export const ProjectConfigSchema = z
   .object({
@@ -64,6 +92,14 @@ export const ProjectConfigSchema = z
     maxAttempts: z.number().int().min(1).max(10).optional(),
     /** Retries per Task: new Attempts after an interrupted one. They don't count toward `maxAttempts`. */
     maxRetries: z.number().int().min(0).max(10).optional(),
+    /** Answered Questions per Task, each a new Attempt (ARCHITECTURE §8). */
+    maxQuestions: z.number().int().min(0).max(10).optional(),
+    /** Whether a new Plan waits for a human at `plan_approval` (ADR-0016). */
+    planApproval: PlanApprovalPolicySchema.optional(),
+    /** Replans per Job; re-specification counts too, a Plan Edit doesn't (ARCHITECTURE §4.6, §4.7). */
+    maxReplans: z.number().int().min(0).max(10).optional(),
+    /** Task concurrency limits (ARCHITECTURE §12). A Job may override them at creation. */
+    concurrency: ConcurrencyOverrideSchema.optional(),
   })
   .strict();
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -135,13 +171,14 @@ export type ApiError = z.infer<typeof ApiErrorSchema>;
 
 // ---- Jobs, Stage Runs, Recipes (ARCHITECTURE §4.2, §4.3) -------------------
 
-/** The Stage IDs of the Phase A `feature` Recipe (PRODUCT_SPEC §4). */
+/** The Stage IDs of the `feature` Recipe built so far (PRODUCT_SPEC §4). */
 export const StageIdSchema = z.enum([
   'intake',
   'triage',
   'discovery',
   'specification',
   'planning',
+  'plan_approval',
   'execution',
   'closure',
 ]);
@@ -157,20 +194,30 @@ export const StageRunStateSchema = z.enum([
   'waiting_human',
   'skipped',
   'cancelled',
+  'rejected',
+  'superseded',
 ]);
 export type StageRunState = z.infer<typeof StageRunStateSchema>;
 
 /** Allowed Stage Run transitions. Everything else is refused by the engine. */
 export const STAGE_RUN_TRANSITIONS: Readonly<Record<StageRunState, readonly StageRunState[]>> = {
   pending: ['queued', 'skipped', 'cancelled'],
-  queued: ['running', 'cancelled'],
-  running: ['succeeded', 'failed', 'blocked', 'waiting_human', 'cancelled'],
-  blocked: ['queued', 'cancelled'],
-  waiting_human: ['queued', 'cancelled'],
+  // `→ superseded` from queued, running or blocked: a requested Replan replaces `execution` once
+  // no Attempt is in flight; a new Stage Run of it waits on the new Plan (ADR-0029).
+  queued: ['running', 'cancelled', 'superseded'],
+  running: ['succeeded', 'failed', 'blocked', 'waiting_human', 'cancelled', 'superseded'],
+  blocked: ['queued', 'cancelled', 'superseded'],
+  // `→ succeeded | rejected`: a human decided a Stage that waits only on that decision (plan_approval).
+  // `→ superseded`: a human requested changes to the Plan; a new Stage Run of it waits on the new Plan (ADR-0019).
+  waiting_human: ['queued', 'succeeded', 'rejected', 'cancelled', 'superseded'],
   succeeded: [],
   failed: [],
   skipped: [],
   cancelled: [],
+  // A correct "no", never `failed` (ARCHITECTURE §4.3).
+  rejected: [],
+  // Replaced by a later Stage Run of the same Stage; it no longer counts for the Job.
+  superseded: [],
 };
 
 /** States a Stage Run never leaves. */
@@ -178,8 +225,8 @@ export const FINISHED_STAGE_RUN_STATES: readonly StageRunState[] = (
   Object.keys(STAGE_RUN_TRANSITIONS) as StageRunState[]
 ).filter((s) => STAGE_RUN_TRANSITIONS[s].length === 0);
 
-/** Finished without a problem: the Job can move past it. */
-const PASSED: readonly StageRunState[] = ['succeeded', 'skipped'];
+/** Finished without a problem (or replaced by a later run): the Job can move past it. */
+const PASSED: readonly StageRunState[] = ['succeeded', 'skipped', 'superseded'];
 
 export function canTransitionStageRun(from: StageRunState, to: StageRunState): boolean {
   return STAGE_RUN_TRANSITIONS[from].includes(to);
@@ -216,12 +263,13 @@ export const WorkflowSnapshotSchema = z.object({
 export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
 
 /**
- * The built-in `feature` Recipe, Phase A cut: without `plan_approval`,
- * `integration`, `integration_review` and the delivery Stages (ROADMAP Phase A).
+ * The built-in `feature` Recipe, Phase B cut: without `integration`,
+ * `integration_review` and the delivery Stages (ROADMAP). Version 2 added
+ * `plan_approval` (ADR-0016); Jobs created at version 1 keep their snapshot.
  */
 export const FEATURE_RECIPE: WorkflowSnapshot = {
   recipeId: 'feature',
-  recipeVersion: 1,
+  recipeVersion: 2,
   stages: StageIdSchema.options.map((id) => ({ id })),
 };
 
@@ -235,6 +283,7 @@ type StageRunPosition = Pick<StageRun, 'stageId' | 'state'>;
 export function deriveJobStatus(stageRuns: readonly StageRunPosition[]): JobStatus {
   const states = new Set(stageRuns.map((s) => s.state));
   if (states.has('running') || states.has('queued')) return 'active';
+  if (states.has('rejected')) return 'rejected';
   if (states.has('blocked')) return 'blocked';
   if (states.has('waiting_human')) return 'waiting_human';
   if (states.has('failed')) return 'failed';
@@ -255,7 +304,7 @@ export function currentStageOf(stageRuns: readonly StageRunPosition[]): StageId 
 
 // ---- Configuration (ARCHITECTURE §15, Phase A minimal) ---------------------
 
-export const ConfigSourceSchema = z.enum(['recipe', 'project']);
+export const ConfigSourceSchema = z.enum(['recipe', 'project', 'job']);
 export type ConfigSource = z.infer<typeof ConfigSourceSchema>;
 
 const effectiveValue = <T extends z.ZodType>(value: T) =>
@@ -277,12 +326,48 @@ export const EffectiveConfigSchema = z.object({
     value: DEFAULT_TOOL_POLICIES,
     source: 'recipe',
   }),
+  /** Jobs created before #35 get the recipe default. */
+  maxQuestions: effectiveValue(z.number().int().nonnegative()).default({
+    value: 3,
+    source: 'recipe',
+  }),
+  /** Jobs created before #35 have no `plan_approval` Stage; the value is unused there. */
+  planApproval: effectiveValue(PlanApprovalPolicySchema).default({
+    value: 'required',
+    source: 'recipe',
+  }),
+  /** Jobs created before Phase B get the recipe default. */
+  maxReplans: effectiveValue(z.number().int().nonnegative()).default({
+    value: 2,
+    source: 'recipe',
+  }),
+  /** Jobs created before Phase B get the recipe defaults. */
+  concurrency: z
+    .object({
+      perRepository: effectiveValue(z.number().int().positive()),
+      perJob: effectiveValue(z.number().int().positive()),
+    })
+    .default({
+      perRepository: { value: 2, source: 'recipe' },
+      perJob: { value: 2, source: 'recipe' },
+    }),
 });
 export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
 
-export const RECIPE_DEFAULTS: { readonly maxAttempts: number; readonly maxRetries: number } = {
+export const RECIPE_DEFAULTS: {
+  readonly maxAttempts: number;
+  readonly maxRetries: number;
+  readonly maxQuestions: number;
+  readonly planApproval: PlanApprovalPolicy;
+  readonly maxReplans: number;
+  readonly concurrency: { readonly perRepository: number; readonly perJob: number };
+} = {
   maxAttempts: 3,
   maxRetries: 2,
+  maxQuestions: 3,
+  planApproval: 'required',
+  maxReplans: 2,
+  concurrency: { perRepository: 2, perJob: 2 },
 };
 
 /** The Tier 0 tool policy of `role` in a Job's frozen Effective Configuration (its JSON). Pure. */
@@ -291,8 +376,20 @@ export function toolPolicyOf(configSnapshotJson: string, role: HarnessRole): Too
 }
 
 /** Resolves the Effective Configuration. Pure; frozen onto the Job at creation. */
-export function resolveEffectiveConfig(levels: { project: ProjectConfig }): EffectiveConfig {
+export function resolveEffectiveConfig(levels: {
+  project: ProjectConfig;
+  /** The Job's own overrides, given at creation (ARCHITECTURE §12: concurrency only). */
+  job?: { concurrency?: ConcurrencyOverride | undefined };
+}): EffectiveConfig {
   const { project } = levels;
+  const limit = (key: keyof ConcurrencyOverride) => {
+    const job = levels.job?.concurrency?.[key];
+    if (job !== undefined) return { value: job, source: 'job' as const };
+    const own = project.concurrency?.[key];
+    return own === undefined
+      ? { value: RECIPE_DEFAULTS.concurrency[key], source: 'recipe' as const }
+      : { value: own, source: 'project' as const };
+  };
   return {
     maxAttempts:
       project.maxAttempts === undefined
@@ -303,6 +400,19 @@ export function resolveEffectiveConfig(levels: { project: ProjectConfig }): Effe
         ? { value: RECIPE_DEFAULTS.maxRetries, source: 'recipe' }
         : { value: project.maxRetries, source: 'project' },
     toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
+    maxQuestions:
+      project.maxQuestions === undefined
+        ? { value: RECIPE_DEFAULTS.maxQuestions, source: 'recipe' }
+        : { value: project.maxQuestions, source: 'project' },
+    planApproval:
+      project.planApproval === undefined
+        ? { value: RECIPE_DEFAULTS.planApproval, source: 'recipe' }
+        : { value: project.planApproval, source: 'project' },
+    maxReplans:
+      project.maxReplans === undefined
+        ? { value: RECIPE_DEFAULTS.maxReplans, source: 'recipe' }
+        : { value: project.maxReplans, source: 'project' },
+    concurrency: { perRepository: limit('perRepository'), perJob: limit('perJob') },
   };
 }
 
@@ -355,14 +465,30 @@ export const JobSchema = JobSummarySchema.extend({
   workflowSnapshot: WorkflowSnapshotSchema,
   effectiveConfig: EffectiveConfigSchema,
   stageRuns: z.array(StageRunSchema),
+  /**
+   * A Replan was requested during execution and waits for every Attempt in flight to settle
+   * (ARCHITECTURE §4.7, ADR-0029). Persisted state; cleared when planning starts.
+   */
+  replanRequested: z.boolean(),
+  /** Replans used, against `maxReplans`. */
+  replans: z.object({ used: z.number().int(), max: z.number().int() }),
 });
 export type Job = z.infer<typeof JobSchema>;
+
+/** `POST /v1/jobs/:id/replan` (`requestReplan`, ADR-0029). */
+export const RequestReplanInputSchema = z.object({
+  expectedVersion: z.number().int().nonnegative(),
+  feedback: z.string().trim().min(1).max(5000),
+});
+export type RequestReplanInput = z.infer<typeof RequestReplanInputSchema>;
 
 /** `POST /v1/jobs`. */
 export const CreateJobInputSchema = z.object({
   repositoryId: z.string().min(1),
   title: z.string().trim().min(1).max(200),
   description: z.string().max(20_000).default(''),
+  /** Overrides of the Effective Configuration's concurrency limits, up or down (ARCHITECTURE §12). */
+  concurrency: ConcurrencyOverrideSchema.optional(),
 });
 export type CreateJobInput = z.infer<typeof CreateJobInputSchema>;
 
@@ -389,6 +515,10 @@ export const ArtifactKindSchema = z.enum([
   'log',
   'report',
   'review',
+  /** A Replan asked for during execution (ADR-0029): the feedback and who asked, never regenerated. */
+  'replan_request',
+  /** A re-specification asked for by a `spec` Finding or a human (ADR-0031), never regenerated. */
+  'respec_request',
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 
@@ -440,9 +570,13 @@ export const TaskSchema = TaskDefinitionSchema.extend({
   title: z.string(),
   repositoryId: z.string(),
   state: TaskStateSchema,
+  /** Why a `cancelled` Task was cancelled; `null` otherwise. */
+  cancelReason: TaskCancelReasonSchema.nullable(),
   maxAttempts: z.number().int().positive(),
   /** Retries allowed after interrupted Attempts (not counted toward `maxAttempts`). */
   maxRetries: z.number().int().nonnegative(),
+  /** Answer Attempts allowed after Questions (not counted toward `maxAttempts` or `maxRetries`). */
+  maxQuestions: z.number().int().nonnegative(),
   /** Why a `blocked` Task can't go on, and what would clear it. */
   blocker: BlockerSchema.nullable(),
   /** The Plan Artifact it was taken from. */

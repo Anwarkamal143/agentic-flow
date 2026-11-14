@@ -24,6 +24,7 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
+  skipPlanApproval,
 } from '../support/api.js';
 import { scriptWith, SUM_SOURCE, validTaskResponse } from '../support/scripts.js';
 
@@ -60,6 +61,7 @@ async function runtimeWith(script: string) {
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await skipPlanApproval(rt, repo.projectId);
   return { rt, repo };
 }
 

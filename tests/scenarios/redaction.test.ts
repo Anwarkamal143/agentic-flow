@@ -9,7 +9,14 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { initializedHome, startRuntime, tinyTsRepo, useFakeHarness } from '../support/factory.js';
-import { json, post, waitForJob, type EventBody, type JobBody } from '../support/api.js';
+import {
+  json,
+  post,
+  waitForJob,
+  type EventBody,
+  type JobBody,
+  skipPlanApproval,
+} from '../support/api.js';
 import { filesUnder } from '../support/files.js';
 import { openStream } from '../support/sse.js';
 import {
@@ -66,7 +73,8 @@ describe('redaction', () => {
     const rt = await startRuntime(home, { env: { GH_TOKEN: secret } });
     const added = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
     expect(added.code, added.stderr).toBe(0);
-    const [repo] = await json<[{ id: string }]>(rt.request('/v1/repositories'));
+    const [repo] = await json<[{ id: string; projectId: string }]>(rt.request('/v1/repositories'));
+    await skipPlanApproval(rt, repo.projectId);
     const res = await post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add sum()' });
     expect(res.status).toBe(201);
     const created = (await res.json()) as JobBody;

@@ -21,6 +21,7 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
+  skipPlanApproval,
 } from '../support/api.js';
 import { scriptWith, SUM_SOURCE, validTaskResponse, VALID_SCRIPT } from '../support/scripts.js';
 
@@ -90,12 +91,22 @@ interface DeliveryReport {
     branch: string;
     baseSha: string;
     headSha: string;
-    fetchCommand: string;
     commits: { sha: string; subject: string }[];
     changedFiles: string[];
     wipCommit: string | null;
     criteria: { code: string; mandatory: boolean; verdict: string }[];
     review: { id: string; outcome: string; headSha: string; baseSha: string };
+  }[];
+  reportVersion: number;
+  outcome: string;
+  statement: string;
+  branches: {
+    key: string;
+    state: string;
+    branch: string | null;
+    headSha: string | null;
+    leaf: boolean;
+    fetchCommand: string | null;
   }[];
   knownLimitations: string[];
 }
@@ -114,6 +125,7 @@ async function executionRuntime(script: string, env?: NodeJS.ProcessEnv) {
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await skipPlanApproval(rt, repo.projectId);
   return { rt, repo, source };
 }
 
@@ -145,6 +157,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       ['discovery', 'succeeded'],
       ['specification', 'succeeded'],
       ['planning', 'succeeded'],
+      ['plan_approval', 'skipped'],
       ['execution', 'succeeded'],
       ['closure', 'succeeded'],
     ]);
@@ -176,7 +189,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       usage: { tag: 'unknown' },
       worktreeId: worktree.id,
     });
-    expect(attempt.promptTemplate.id).toBe('task-packet@3');
+    expect(attempt.promptTemplate.id).toBe('task-packet@5');
     expect(attempt.promptTemplate.hash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(git(repo.clonePath, ['show', `${head}:src/math.ts`])).toBe(SUM_SOURCE);
 
@@ -220,6 +233,13 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       rt.request(`/v1/artifacts/${String(reportArtifact?.id)}/content`),
     );
     expect(report.repository).toMatchObject({ name: 'tiny-ts', clonePath: repo.clonePath });
+    expect(report).toMatchObject({ reportVersion: 3, outcome: 'completed' });
+    expect(report.statement).toMatch(/^The Job completed/);
+    // The one Task is the one leaf, offered with one fetch command.
+    expect(report.branches).toMatchObject([
+      { key: 'add-sum', state: 'approved', branch: worktree.branch, headSha: head, leaf: true },
+    ]);
+    const [offered] = report.branches;
     const [delivered] = report.tasks;
     expect(delivered).toMatchObject({
       key: 'add-sum',
@@ -261,7 +281,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
     expect(after.config, '.git/config').toBe(before.config);
 
     // Then the fetch command, run from the source repo, brings the result in.
-    execFileSync('sh', ['-c', delivered?.fetchCommand ?? 'false'], { cwd: source, stdio: 'pipe' });
+    execFileSync('sh', ['-c', offered?.fetchCommand ?? 'false'], { cwd: source, stdio: 'pipe' });
     expect(git(source, ['rev-parse', worktree.branch]).trim()).toBe(head);
   });
 

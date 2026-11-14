@@ -1,9 +1,19 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { activity, DEFAULT_TAIL_LINES } from './commands/activity.js';
 import { doctor } from './commands/doctor.js';
+import {
+  inboxAnswer,
+  inboxDecide,
+  inboxDefer,
+  inboxList,
+  inboxShow,
+  planShow,
+} from './commands/inbox.js';
 import { init } from './commands/init.js';
-import { jobCancel, jobCreate, jobList, jobShow } from './commands/job.js';
+import { jobCancel, jobCreate, jobList, jobReplan, jobShow } from './commands/job.js';
 import { logs } from './commands/logs.js';
+import { planEdit, planRaw, planRequestChanges } from './commands/plan.js';
 import { repoAdd } from './commands/repo.js';
 import { start, status, stop } from './commands/lifecycle.js';
 
@@ -20,13 +30,39 @@ Commands:
                                   Register a Repository: make its Factory Clone and save
                                   its confirmed commands (your checkout is never modified)
   job create --repo <id|name> --title <text> [--description <text>]
-                                  Create a Job for a registered Repository
+             [--per-repository <n>] [--per-job <n>]
+                                  Create a Job for a registered Repository; the
+                                  concurrency flags override its Task limits
   job list [--json]               List Jobs, newest first
   job show <id> [--json]          Show a Job: status, Stages, Workflow Snapshot, config
   job cancel <id> [--reason <text>]
                                   Cancel a Job, stopping its running work
+  job replan <id> --feedback <text>
+                                  Ask for a Replan during execution: nothing new is
+                                  dispatched, planning starts once no Attempt is in
+                                  flight, and unaffected Tasks keep their work
   logs <job> [--json]             Show the (redacted) Harness and verification output
                                   of a Job's Attempts
+  plan show <job> [--json|--raw]  Show the Job's Plan for approval: Specification, DAG,
+                                  parallel waves, risks, decision points, estimate
+                                  (--raw: the Plan itself, as JSON for plan edit)
+  plan edit <job> --file <plan.json>
+                                  Replace the waiting Plan with yours (a Plan Edit:
+                                  validated, not a Replan)
+  plan request-changes <job> --feedback <text>
+                                  Send the waiting Plan back to the planner (a Replan,
+                                  capped by maxReplans)
+  inbox [--all] [--json]          List open Inbox Items (--all: every item, deferred too)
+  inbox show <id> [--json]        Show an Inbox Item, its version and options
+  inbox decide <id> <option> --expect-version <n> [--subject <ref>] [--comment <text>] [--grant <n>]
+                                  Decide an item (a stale version or subject is refused)
+  inbox answer <id> (--answer [<q>=]<text>... | --file <answers.json>) [--expect-version <n>]
+                                  Answer a Question (an option or free text per question);
+                                  a fresh Attempt continues the Task with the answers
+  inbox defer <id> | undefer <id> Hide an item from the default view, or show it again
+  activity [--lines <n>] [--json] What is running now: each running Attempt with its
+                                  Harness, model, Repository, tier, heartbeat, ports and
+                                  the redacted tail of its output (default 20 lines)
 
 Environment:
   FACTORY_HOME   factory home directory (default ~/.factory)
@@ -88,6 +124,10 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'job':
       return job(rest);
+    case 'inbox':
+      return inbox(rest);
+    case 'plan':
+      return plan(rest);
     case 'logs': {
       const { values, positionals } = parseArgs({
         args: rest,
@@ -100,6 +140,18 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       return logs(id, { json: values.json === true });
+    }
+    case 'activity': {
+      const { values } = parseArgs({
+        args: rest,
+        options: { json: { type: 'boolean' }, lines: { type: 'string' } },
+      });
+      const lines = values.lines === undefined ? DEFAULT_TAIL_LINES : Number(values.lines);
+      if (!Number.isInteger(lines) || lines < 0) {
+        process.stderr.write(`factory: --lines takes a whole number\n\n${USAGE}`);
+        return 2;
+      }
+      return activity({ json: values.json === true, lines });
     }
     case undefined:
     case 'help':
@@ -123,17 +175,47 @@ function job(argv: string[]): Promise<number> | number {
           repo: { type: 'string' },
           title: { type: 'string' },
           description: { type: 'string' },
+          'per-repository': { type: 'string' },
+          'per-job': { type: 'string' },
         },
       });
       if (values.repo === undefined || values.title === undefined) {
         process.stderr.write(`factory: job create needs --repo and --title\n\n${USAGE}`);
         return 2;
       }
-      return jobCreate({ repo: values.repo, title: values.title, description: values.description });
+      const perRepository = limitFlag('--per-repository', values['per-repository']);
+      const perJob = limitFlag('--per-job', values['per-job']);
+      if (perRepository === null || perJob === null) return 2;
+      return jobCreate({
+        repo: values.repo,
+        title: values.title,
+        description: values.description,
+        concurrency: {
+          ...(perRepository === undefined ? {} : { perRepository }),
+          ...(perJob === undefined ? {} : { perJob }),
+        },
+      });
     }
     case 'list': {
       const { values } = parseArgs({ args, options: { json: { type: 'boolean' } } });
       return jobList({ json: values.json === true });
+    }
+    case 'replan': {
+      const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: { feedback: { type: 'string' } },
+      });
+      const [id, ...extra] = positionals;
+      if (id === undefined || extra.length > 0) {
+        process.stderr.write(`factory: job replan takes exactly one Job id\n\n${USAGE}`);
+        return 2;
+      }
+      if (values.feedback === undefined || values.feedback.trim() === '') {
+        process.stderr.write(`factory: job replan needs --feedback <text>\n`);
+        return 2;
+      }
+      return jobReplan(id, { feedback: values.feedback });
     }
     case 'show':
     case 'cancel': {
@@ -157,6 +239,129 @@ function job(argv: string[]): Promise<number> | number {
   }
 }
 
+function plan(argv: string[]): Promise<number> | number {
+  const [sub, ...subArgs] = argv;
+  const { values, positionals } = parseArgs({
+    args: subArgs,
+    allowPositionals: true,
+    options: {
+      json: { type: 'boolean' },
+      raw: { type: 'boolean' },
+      file: { type: 'string' },
+      feedback: { type: 'string' },
+    },
+  });
+  const [id, ...extra] = positionals;
+  if (id === undefined || extra.length > 0) {
+    process.stderr.write(`factory: plan ${sub ?? ''} takes exactly one Job id\n\n${USAGE}`);
+    return 2;
+  }
+  switch (sub) {
+    case 'show':
+      return values.raw === true ? planRaw(id) : planShow(id, { json: values.json === true });
+    case 'edit':
+      if (values.file === undefined) {
+        process.stderr.write(`factory: plan edit needs --file <plan.json>\n`);
+        return 2;
+      }
+      return planEdit(id, { file: values.file });
+    case 'request-changes':
+      if (values.feedback === undefined || values.feedback.trim() === '') {
+        process.stderr.write(`factory: plan request-changes needs --feedback <text>\n`);
+        return 2;
+      }
+      return planRequestChanges(id, { feedback: values.feedback });
+    default:
+      process.stderr.write(`factory: unknown plan command '${sub ?? ''}'\n\n${USAGE}`);
+      return 2;
+  }
+}
+
+function inbox(argv: string[]): Promise<number> | number {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      all: { type: 'boolean' },
+      json: { type: 'boolean' },
+      'expect-version': { type: 'string' },
+      subject: { type: 'string' },
+      comment: { type: 'string' },
+      grant: { type: 'string' },
+      answer: { type: 'string', multiple: true },
+      file: { type: 'string' },
+    },
+  });
+  const [sub, id, ...extra] = positionals;
+  const json = values.json === true;
+  switch (sub) {
+    case undefined:
+      return inboxList({ all: values.all === true, json });
+    case 'show':
+    case 'defer':
+    case 'undefer':
+      if (id === undefined || extra.length > 0) {
+        process.stderr.write(`factory: inbox ${sub} takes exactly one item id\n\n${USAGE}`);
+        return 2;
+      }
+      return sub === 'show' ? inboxShow(id, { json }) : inboxDefer(id, sub === 'defer');
+    case 'answer': {
+      if (id === undefined || extra.length > 0) {
+        process.stderr.write(`factory: inbox answer takes exactly one item id\n\n${USAGE}`);
+        return 2;
+      }
+      const answers = values.answer ?? [];
+      if (answers.length > 0 === (values.file !== undefined)) {
+        process.stderr.write(
+          `factory: inbox answer needs --answer <text>... or --file <path>, not both\n`,
+        );
+        return 2;
+      }
+      const raw = values['expect-version'];
+      const version = Number(raw);
+      if (raw !== undefined && (!Number.isInteger(version) || version < 0)) {
+        process.stderr.write(`factory: --expect-version needs a whole number, not '${raw}'\n`);
+        return 2;
+      }
+      return inboxAnswer(id, {
+        answers,
+        file: values.file,
+        expectVersion: raw === undefined ? undefined : version,
+      });
+    }
+    case 'decide': {
+      const [option, ...more] = extra;
+      const version = Number(values['expect-version']);
+      if (id === undefined || option === undefined || more.length > 0) {
+        process.stderr.write(`factory: inbox decide takes an item id and an option\n\n${USAGE}`);
+        return 2;
+      }
+      if (values['expect-version'] === undefined || !Number.isInteger(version) || version < 0) {
+        process.stderr.write(
+          `factory: inbox decide needs --expect-version <n> (the version 'inbox show' printed)\n`,
+        );
+        return 2;
+      }
+      const grant = values.grant === undefined ? undefined : Number(values.grant);
+      if (grant !== undefined && !Number.isInteger(grant)) {
+        process.stderr.write(
+          `factory: --grant needs a whole number, not '${String(values.grant)}'\n`,
+        );
+        return 2;
+      }
+      return inboxDecide(id, option, {
+        expectVersion: version,
+        subject: values.subject,
+        comment: values.comment,
+        grant,
+      });
+    }
+    default:
+      process.stderr.write(`factory: unknown inbox command '${sub}'\n\n${USAGE}`);
+      return 2;
+  }
+}
+
 main(process.argv.slice(2)).then(
   (code) => {
     process.exitCode = code;
@@ -166,3 +371,13 @@ main(process.argv.slice(2)).then(
     process.exitCode = 1;
   },
 );
+
+/** A concurrency limit flag: `undefined` when absent, `null` (reported) when not a whole number. */
+function limitFlag(flag: string, raw: string | undefined): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw)) {
+    process.stderr.write(`factory: ${flag} needs a whole number, not '${raw}'\n`);
+    return null;
+  }
+  return Number(raw);
+}

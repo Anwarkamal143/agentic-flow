@@ -11,6 +11,8 @@ export class GitError extends Error {
     readonly args: readonly string[],
     readonly exitCode: number | null,
     readonly stderr: string,
+    /** What git printed before it failed (some commands, like `merge-tree`, report through it). */
+    readonly stdout = '',
   ) {
     super(message);
     this.name = 'GitError';
@@ -69,6 +71,7 @@ export function git(
             args.map(redactUrlCredentials),
             code,
             redactUrlCredentials(stderr),
+            redactUrlCredentials(stdout),
           ),
         );
       },
@@ -299,6 +302,61 @@ export async function changedPathKinds(
     changes.push({ path, kind });
   }
   return changes;
+}
+
+/**
+ * Merges two commits without a Worktree or an index (`git merge-tree
+ * --write-tree`): the merged tree, or the conflicting paths. Only objects are
+ * written; no ref, index or working tree changes.
+ */
+export async function mergeCommits(
+  repo: string,
+  ours: string,
+  theirs: string,
+): Promise<{ kind: 'merged'; tree: string } | { kind: 'conflict'; paths: string[] }> {
+  const args = ['merge-tree', '--write-tree', '--no-messages', '--name-only', '-z', ours, theirs];
+  try {
+    const out = await worktreeGit(repo, args);
+    return { kind: 'merged', tree: (out.split('\0')[0] ?? '').trim() };
+  } catch (err) {
+    // Exit 1 is a conflict: stdout is the tree, then the conflicting paths.
+    if (err instanceof GitError && err.exitCode === 1) {
+      const paths = err.stdout.split('\0').slice(1);
+      return { kind: 'conflict', paths: [...new Set(paths.filter((p) => p !== ''))] };
+    }
+    throw err;
+  }
+}
+
+/** Makes a commit of `tree` with `parents`, as the factory. No ref moves. */
+export async function commitTree(
+  repo: string,
+  tree: string,
+  parents: readonly string[],
+  message: string,
+): Promise<string> {
+  const out = await git(
+    [
+      '-C',
+      repo,
+      ...NO_HOOKS,
+      'commit-tree',
+      tree,
+      ...parents.flatMap((p) => ['-p', p]),
+      '-m',
+      message,
+    ],
+    {
+      env: {
+        ...worktreeGitEnv(),
+        GIT_AUTHOR_NAME: FACTORY_COMMITTER.name,
+        GIT_AUTHOR_EMAIL: FACTORY_COMMITTER.email,
+        GIT_COMMITTER_NAME: FACTORY_COMMITTER.name,
+        GIT_COMMITTER_EMAIL: FACTORY_COMMITTER.email,
+      },
+    },
+  );
+  return out.trim();
 }
 
 /** Points `ref` (a full ref name, such as `refs/factory/attempts/<id>`) at `sha`. */

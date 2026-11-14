@@ -25,6 +25,7 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
+  phaseAConfig,
 } from '../support/api.js';
 import { scriptWith, validTaskResponse } from '../support/scripts.js';
 import { groupAlive, killGroup, killGroupsOnFinish, waitFor } from '../support/processes.js';
@@ -62,7 +63,7 @@ async function setup(
   killGroupsOnFinish(rt);
   const repo = await registeredRepo(rt);
   if (config !== undefined) {
-    const res = await post(rt, `/v1/projects/${repo.projectId}/config`, config);
+    const res = await post(rt, `/v1/projects/${repo.projectId}/config`, phaseAConfig(config));
     expect(res.status).toBe(200);
   }
   const job = await createJob(rt, repo.id);

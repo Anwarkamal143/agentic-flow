@@ -24,12 +24,14 @@ import {
   StageIdSchema,
   StageRunStateSchema,
   TaskDefinitionSchema,
+  TaskCancelReasonSchema,
   TaskStateSchema,
   TERMINAL_JOB_STATUSES,
   WorkflowSnapshotSchema,
   type AcceptanceCriterion,
   type CancelJobInput,
   type CreateJobInput,
+  type RequestReplanInput,
   type Job,
   type JobSummary,
   type StageRun,
@@ -40,9 +42,20 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { changeJob, changeJobIn, readJobState, stepTask, type JobState } from './engine.js';
 import { ApiFailure } from './errors.js';
 import { attemptFindings } from './findings.js';
+import type { ArtifactStore } from './artifacts.js';
+import { openCleanupItem } from './cleanup.js';
+import { currentCriteria } from './criteria.js';
+import { cancelOpenItems } from './inbox.js';
+import { requestReplanIn } from './replan.js';
 import { newId } from './ids.js';
 
 const OPERATOR = 'user:local';
+
+/** What `requestReplan` returns: the Job, and the Replan cap Approval when one holds the request. */
+export interface ReplanResult {
+  job: Job;
+  capApprovalId?: string;
+}
 
 export class JobService {
   constructor(
@@ -54,7 +67,37 @@ export class JobService {
      * command, by process group) and records it; settles once that is done.
      */
     private readonly stopWork: (jobId: string) => Promise<void> = () => Promise.resolve(),
+    /** Where a Replan request is stored (`requestReplan`); none: Replans can't be requested. */
+    private readonly artifacts?: ArtifactStore,
   ) {}
+
+  /**
+   * `requestReplan` (ARCHITECTURE §4.7, ADR-0029): the operator asks for a
+   * Replan of a Job in execution, with feedback for the planner. Under
+   * `maxReplans` it is counted and `replan_requested` set (no Task or Rework
+   * is dispatched from then on; planning starts once no Attempt is in
+   * flight); at the cap a `replan_cap_reached` Blocker Approval holds it.
+   */
+  requestReplan(id: string, input: RequestReplanInput): ReplanResult {
+    const artifacts = this.artifacts;
+    if (artifacts === undefined) throw new Error('no Artifact store configured');
+    const outcome = changeJob(
+      this.db,
+      { jobId: id, expectedVersion: input.expectedVersion, actor: OPERATOR },
+      (tx, _state, step) =>
+        requestReplanIn(
+          tx,
+          artifacts,
+          { jobId: id, feedback: input.feedback, actor: OPERATOR, approvalId: null },
+          step,
+        ),
+    );
+    this.onCommit();
+    return {
+      job: this.get(id),
+      ...(outcome.kind === 'capped' ? { capApprovalId: outcome.approvalId } : {}),
+    };
+  }
 
   /**
    * Intake: records the Job with its frozen Workflow Snapshot and Effective
@@ -84,6 +127,7 @@ export class JobService {
         );
         const effectiveConfig = resolveEffectiveConfig({
           project: ProjectConfigSchema.parse(JSON.parse(project.configJson)),
+          job: { concurrency: input.concurrency },
         });
         const jobId = newId('job');
         const now = new Date().toISOString();
@@ -188,7 +232,10 @@ export class JobService {
    * included, and the Tasks not in flight. Then the work in flight is stopped:
    * its process group gets SIGTERM, then SIGKILL after a grace period, and its
    * Attempt and Task are recorded `cancelled` with the Worktree preserved and
-   * the leases released. Settles when all of that is recorded.
+   * the leases released. Only then, in a last transaction, is anything the
+   * stopped work moved on or opened cancelled, and the Job's one `cleanup`
+   * Inbox Item opened (PRODUCT_SPEC §12, ADR-0027) when a Worktree is left
+   * preserved. Settles when all of that is recorded.
    */
   async cancel(id: string, input: CancelJobInput): Promise<Job> {
     changeJob(
@@ -205,6 +252,9 @@ export class JobService {
           }
         }
         cancelOpenTasks(tx, id, input.reason);
+        cancelOpenItems(tx, id, OPERATOR);
+        // A Replan waiting for the work in flight never starts on a cancelled Job.
+        tx.update(schema.jobs).set({ replanRequested: false }).where(eq(schema.jobs.id, id)).run();
         appendEvent(tx, {
           entityKind: 'job',
           entityId: id,
@@ -217,22 +267,21 @@ export class JobService {
     );
     this.onCommit();
     await this.stopWork(id);
-    // A Task the work in flight moved on (say, to Rework) just before it stopped is cancelled too.
+    // A Task the work in flight moved on (say, to Rework), or an item it opened (say, a
+    // Question), just before it stopped is cancelled too. Then, last, the cleanup item.
     changeJob(this.db, { jobId: id, expectedVersion: 'current', actor: OPERATOR }, (tx) => {
       cancelOpenTasks(tx, id, input.reason);
+      cancelOpenItems(tx, id, OPERATOR);
+      openCleanupItem(tx, id, OPERATOR);
     });
     this.onCommit();
     return this.get(id);
   }
 
+  /** The current Specification's criteria (a spec waiting on its `spec_change` Approval is not, ADR-0031). */
   acceptanceCriteria(jobId: string): AcceptanceCriterion[] {
     this.get(jobId); // 404 for an unknown Job
-    return this.db
-      .select()
-      .from(schema.acceptanceCriteria)
-      .where(eq(schema.acceptanceCriteria.jobId, jobId))
-      .orderBy(asc(sql`rowid`))
-      .all();
+    return currentCriteria(this.db, jobId);
   }
 
   tasks(jobId: string): Task[] {
@@ -296,6 +345,7 @@ export class JobService {
         commits: JSON.parse(a.commitsJson) as unknown,
         wipCommit: a.wipCommit,
         protocolViolations: JSON.parse(a.protocolViolationsJson) as unknown,
+        questions: JSON.parse(a.questionsJson) as unknown,
         findings: attemptFindings(this.db, a),
         usage: a.usageJson === null ? null : (JSON.parse(a.usageJson) as unknown),
         startedAt: a.startedAt,
@@ -454,9 +504,11 @@ function toTask(row: typeof schema.tasks.$inferSelect): Task {
     title: row.title,
     repositoryId: row.repositoryId,
     state: TaskStateSchema.parse(row.state),
+    cancelReason: row.cancelReason === null ? null : TaskCancelReasonSchema.parse(row.cancelReason),
     ...definition,
     maxAttempts: row.maxAttempts,
     maxRetries: row.maxRetries,
+    maxQuestions: row.maxQuestions,
     blocker: row.blockerJson === null ? null : BlockerSchema.parse(JSON.parse(row.blockerJson)),
     planArtifactId: row.planArtifactId,
     version: row.version,
@@ -494,11 +546,14 @@ function toSummary(state: JobState, repositoryId: string): JobSummary {
 }
 
 function toJob(state: JobState, repositoryId: string): Job {
+  const effectiveConfig = EffectiveConfigSchema.parse(JSON.parse(state.job.configSnapshotJson));
   return {
     ...toSummary(state, repositoryId),
     description: state.job.description,
     workflowSnapshot: WorkflowSnapshotSchema.parse(JSON.parse(state.job.workflowSnapshotJson)),
-    effectiveConfig: EffectiveConfigSchema.parse(JSON.parse(state.job.configSnapshotJson)),
+    effectiveConfig,
     stageRuns: state.stageRuns.map(toStageRun),
+    replanRequested: state.job.replanRequested,
+    replans: { used: state.job.replansUsed, max: effectiveConfig.maxReplans.value },
   };
 }

@@ -24,7 +24,8 @@ import {
 } from '@factory/domain';
 import { resolveCommit, uncommittedPaths } from '@factory/git';
 import { attachGuarded, inspectSpool } from '@factory/harness';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
+import { takeOverClaim } from './claim.js';
 import { changeJob, stepAttempt, stepTask, stepWorktree } from './engine.js';
 import { leaseExpiry, parseProcess, settleExecution, type Resumption } from './execution.js';
 import { releaseAttemptTokens, requireWorktree } from './worktree.js';
@@ -193,12 +194,13 @@ function executionCancelled(db: FactoryDb, jobId: string): boolean {
     .select({ state: schema.stageRuns.state })
     .from(schema.stageRuns)
     .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'execution')))
+    .orderBy(desc(schema.stageRuns.attempt))
     .get();
   return run?.state === 'cancelled';
 }
 
 /** `unknown` when the Worktree is gone or git can't read it. */
-async function worktreeStatus(path: string): Promise<RecoveredWorktree> {
+export async function worktreeStatus(path: string): Promise<RecoveredWorktree> {
   if (!existsSync(path)) return 'unknown';
   try {
     if ((await resolveCommit(path, 'HEAD')) === undefined) return 'unknown';
@@ -208,7 +210,7 @@ async function worktreeStatus(path: string): Promise<RecoveredWorktree> {
   }
 }
 
-/** Hands the Attempt's leases (its Task, its port block) to this runtime, renewed. */
+/** Hands the Attempt's leases (its Task with its capacity tokens, its port block) to this runtime, renewed. */
 function takeOverLeases(
   db: FactoryDb,
   holder: string,
@@ -218,10 +220,7 @@ function takeOverLeases(
 ): void {
   const now = new Date().toISOString();
   db.transaction((tx) => {
-    tx.update(schema.leases)
-      .set({ holder, heartbeatAt: now, expiresAt: leaseExpiry() })
-      .where(and(eq(schema.leases.resourceKind, 'task'), eq(schema.leases.resourceId, taskId)))
-      .run();
+    takeOverClaim(tx, taskId, holder);
     tx.update(schema.leases)
       .set({ holder: `${holder}/${attemptId}`, heartbeatAt: now, expiresAt: leaseExpiry() })
       .where(
@@ -239,7 +238,7 @@ function takeOverLeases(
  * time): SIGTERM to its group, then SIGKILL. A dead leader's group is left
  * alone: without the leader, nothing proves the group is still ours.
  */
-async function stopIfAlive(spool: string, startedAt: number): Promise<void> {
+export async function stopIfAlive(spool: string, startedAt: number): Promise<void> {
   if (inspectSpool(spool).state !== 'alive') return;
   await attachGuarded({ spool, startedAt, timeoutMs: Number.MAX_SAFE_INTEGER })?.cancel();
 }

@@ -13,7 +13,7 @@ Choices made while building `apps/dashboard`: the job list and the job detail pa
 - **Every read goes through the runtime HTTP API** (`src/lib/runtime.ts`), from server components and one route handler. The dashboard never opens the database (CLAUDE.md "One writer"). ARCHITECTURE §1 allows it to open the database read-only for heavy queries, but none is heavy yet.
 - **The token never reaches the browser.** The server reads it, with the runtime record, from the factory home (`FACTORY_HOME`, through `@factory/home`), on every request. If the runtime is not running, the page says so and says how to start it.
 - **Responses are parsed against the `@factory/domain` schemas**, so the pages show only persisted data the contract describes. A drifted runtime fails loudly instead of rendering guesses.
-- **Read-only:** only GET requests to the runtime; no forms, buttons, inputs or Server Actions; the stream route answers GET only (405 otherwise). Changes go through the CLI.
+- **Read-only:** only GET requests to the runtime; no forms, buttons, inputs or Server Actions; the stream route answers GET only (405 otherwise). Changes go through the CLI. *Superseded by ADR-0022 (#37): the Inbox is now the one write path; every other page stays without write controls.*
 
 ## Live updates: SSE as a signal, the API as the truth
 

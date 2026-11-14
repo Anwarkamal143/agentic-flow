@@ -1,8 +1,11 @@
 /**
- * The Task scheduler, Phase A: one concurrency slot. It runs the `execution`
- * Stage (claim a ready Task, give it a Worktree, run the developer Harness,
- * verify the result itself) and the `closure` Stage (the Delivery Report, then
- * Worktree removal). ARCHITECTURE §7, §10, §12.
+ * The Task scheduler, multi-slot (ADR-0020): every Task it can claim under
+ * the global, per-Repository and per-Job limits (`claim.ts`) runs at once.
+ * It runs the `execution` Stage (claim a ready Task, give it a Worktree from
+ * its Dependency Base, run the developer Harness, verify the result itself,
+ * then hand it to the review flow in `review.ts`) and the `closure` Stage
+ * (`closure.ts`). ARCHITECTURE §7, §10, §12. The proposal scheduler keeps
+ * its one slot.
  *
  * After a Harness Run the factory trusts nothing it said: the head commit and
  * the commits come from git, leftovers become a flagged WIP commit, and every
@@ -15,31 +18,26 @@ import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   AttemptCauseSchema,
   AttemptStateSchema,
-  BlockerSchema,
   checkPathScope,
   criterionVerdict,
   addUsage,
   attemptsCountedForRework,
   HarnessExitSchema,
+  inboxQuestionsOf,
+  questionProtocolIssues,
+  questionRoute,
+  resultAsks,
   UsageSchema,
-  VerificationLogContentSchema,
   type HarnessExit,
   routeFailedAttempt,
   type AttemptCause,
+  type AnsweredQuestion,
+  type GrantGuidance,
   type AttemptFinding,
   type Blocker,
-  decideApproval,
-  evidenceSource,
-  type GateRef,
   type HarnessLogContent,
   type VerificationLogContent,
-  EvidenceVerdictSchema,
-  isBlocking,
-  isCurrent,
   verificationProblems,
-  type ApprovalInput,
-  type ReviewPacket,
-  type ReviewProposal,
   RESULT_FILE,
   RuleIssueSchema,
   schemaIssues,
@@ -48,8 +46,6 @@ import {
   TaskDefinitionSchema,
   TaskPacketSchema,
   TaskResultSchema,
-  type AttemptExitReason,
-  type AttemptState,
   type RuleIssue,
   type TaskDefinition,
   type TaskPacket,
@@ -62,10 +58,8 @@ import {
   addWorktree,
   changedPathKinds,
   changedPaths,
-  commitAll,
   commitsBetween,
   fetchRemote,
-  removeWorktree,
   resolveCommit,
   uncommittedPaths,
   updateRef,
@@ -84,11 +78,22 @@ import {
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore, StoredContent } from './artifacts.js';
-import { criteriaCoveredBy } from './criteria.js';
-import { buildDeliveryReport } from './delivery.js';
+import { claimNextTask, heartbeatIntervalMs, leaseExpiry } from './claim.js';
+import { heartbeatTick, sweptAttempt } from './sweeper.js';
+import { criteriaCoveredBy, currentSpec } from './criteria.js';
+import { blockOnBaseConflict, makeDependencyBase } from './dependency-base.js';
+import { settleExecution } from './keep-going.js';
+import {
+  failClosure,
+  nextClosure,
+  runClosure,
+  runningClosures,
+  type CrashPoint,
+} from './closure.js';
 import { attemptFindings, gateFinding, scopeFinding } from './findings.js';
 import {
   changeJob,
+  readJobState,
   stepAttempt,
   stepTask,
   stepWorktree,
@@ -97,17 +102,14 @@ import {
 } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
-import {
-  buildReviewPacket,
-  evaluateReview,
-  renderReviewPrompt,
-  REVIEW_TEMPLATE_HASH,
-  REVIEW_TEMPLATE_ID,
-  type ReviewEvaluation,
-} from './review.js';
+import { routeByFaultOrigin, type FaultRouteInput } from './fault-route.js';
+import { answersAfter, openQuestionItem } from './questions.js';
+import { guidanceAfter } from './blocker-approvals.js';
+import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
   allocatePortBlock,
+  commitLeftovers,
   excludeResultFile,
   releaseAttemptTokens,
   requireWorktree,
@@ -125,25 +127,18 @@ const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_REVIEW_WALL_CLOCK_MS = 10 * 60_000;
 /** Developer Harness Runs per Attempt: the first, plus one re-prompt for an invalid Task Result. */
 const DEVELOPER_RUNS = 2;
-/** Reviewer Harness Runs per review: the first, plus one re-prompt. */
-const REVIEW_RUNS = 2;
-/** How often the runtime renews the leases it holds (ARCHITECTURE §12 step 4). */
 /** The security tier every Harness Run runs under in Phase A: Tier 0, the local guardrail. */
 const TIER: SecurityTier = 'local';
 
-export const LEASE_HEARTBEAT_MS = 15_000;
-/** A lease expires this long after its last heartbeat. */
-export const LEASE_TTL_MS = 90_000;
-
-/** When a lease renewed now expires. */
-export function leaseExpiry(now = Date.now()): string {
-  return new Date(now + LEASE_TTL_MS).toISOString();
-}
+export { LEASE_HEARTBEAT_MS, LEASE_TTL_MS, leaseExpiry } from './claim.js';
+export { claimNextTask, type Claim, type ClaimOptions } from './claim.js';
 
 export interface TaskSchedulerOptions {
   db: FactoryDb;
   /** `undefined`: no Harness is configured, so ready Tasks wait. */
   harness: AgentHarness | undefined;
+  /** `config.json` `concurrency.global`: Tasks in flight at once, over every Job. */
+  globalConcurrency: number;
   harnessVersion: string | null;
   artifacts: ArtifactStore;
   workspaceRoot: string;
@@ -169,9 +164,7 @@ export interface TaskSchedulerOptions {
   crashAt?: CrashPoint;
 }
 
-/** Where the test-only fault injection (`FACTORY_TEST_CRASH_AT`) can kill the runtime. */
-export const CRASH_POINTS = ['closure.after_report'] as const;
-export type CrashPoint = (typeof CRASH_POINTS)[number];
+export { CRASH_POINTS, type CrashPoint } from './closure.js';
 
 /** An Attempt (or a closure) a previous runtime left in progress, to carry on with. */
 export type Resumption =
@@ -182,9 +175,21 @@ export type Resumption =
 /** See {@link AttemptProcessSchema}. */
 export type AttemptProcess = z.infer<typeof AttemptProcessSchema>;
 
+/**
+ * One unit of work in flight (an Attempt or a closure), and the process it
+ * waits on now, so a cancel or a shutdown can stop it.
+ */
+interface Slot {
+  jobId: string;
+  done: Promise<void>;
+  run: HarnessRun | undefined;
+  proc: GuardedProcess | undefined;
+}
+
 /** Everything an Attempt's steps need, rebuilt from the database when it is resumed. */
 interface AttemptContext {
   harness: AgentHarness;
+  slot: Slot;
   job: typeof schema.jobs.$inferSelect;
   task: TaskRow;
   definition: TaskDefinition;
@@ -264,16 +269,7 @@ export function parseProcess(json: string): AttemptProcess {
   return AttemptProcessSchema.parse(JSON.parse(json));
 }
 
-/** A verification run as recorded, without its stored content. */
-type RecordedRun = Omit<VerificationRunRecord, 'content'>;
-
-interface Outcome {
-  state: Extract<AttemptState, 'passed' | 'failed'>;
-  exitReason: AttemptExitReason;
-  detail: string;
-  /** What the factory's Gates found (the review's Findings are recorded with the review). */
-  findings?: AttemptFinding[];
-}
+type Outcome = AttemptOutcome;
 
 /** Where a pinned ref keeps each Attempt's head, so later Attempts can't lose its commits. */
 export function attemptRef(attemptId: string): string {
@@ -282,10 +278,10 @@ export function attemptRef(attemptId: string): string {
 
 export class TaskScheduler {
   private readonly loop = new PassLoop(() => this.pass(), POLL_MS);
-  private currentRun: HarnessRun | undefined;
-  private currentProc: GuardedProcess | undefined;
-  /** The Job whose work the slot holds, and when that work ends. */
-  private inflight: { jobId: string; done: Promise<void> } | undefined;
+  /** The work in flight, by Task id (an Attempt) or `closure:<Stage Run id>`. */
+  private readonly slots = new Map<string, Slot>();
+  /** Serializes the git setup of new Worktrees per Factory Clone (fetch, Dependency Base, `worktree add`). */
+  private readonly cloneLocks = new Map<string, Promise<void>>();
   private closed = false;
   private readonly holder = `runtime:${String(process.pid)}`;
   private readonly wallClockMs: number;
@@ -310,17 +306,13 @@ export class TaskScheduler {
   start(): void {
     if (this.opts.harness === undefined) return;
     // A closure left running resumes too (it never writes its report twice).
-    for (const run of this.opts.db
-      .select({ id: schema.stageRuns.id, jobId: schema.stageRuns.jobId })
-      .from(schema.stageRuns)
-      .where(and(eq(schema.stageRuns.stageId, 'closure'), eq(schema.stageRuns.state, 'running')))
-      .all()) {
+    for (const run of runningClosures(this.opts.db)) {
       this.resumptions.push({ kind: 'closure', stageRunId: run.id, jobId: run.jobId });
     }
     this.renewLeases();
     this.heartbeat = setInterval(() => {
       this.renewLeases();
-    }, LEASE_HEARTBEAT_MS);
+    }, heartbeatIntervalMs());
     this.heartbeat.unref();
     this.loop.start();
   }
@@ -331,23 +323,26 @@ export class TaskScheduler {
   }
 
   /**
-   * Stops scheduling and stops the process in flight (Harness Run or
-   * verification command). Its Attempt is left as it is, for recovery at the
-   * next start (ADR-0012). The leases stop being renewed.
+   * Stops scheduling and stops every process in flight (Harness Runs and
+   * verification commands). Their Attempts are left as they are, for
+   * recovery at the next start (ADR-0012). The leases stop being renewed.
    */
   async close(): Promise<void> {
     this.closed = true;
     clearInterval(this.heartbeat);
     this.loop.halt();
-    await Promise.all([this.currentRun?.cancel(), this.currentProc?.cancel()]);
+    const slots = [...this.slots.values()];
+    await Promise.all(slots.map((s) => Promise.all([s.run?.cancel(), s.proc?.cancel()])));
+    await Promise.all(slots.map((s) => s.done));
     await this.loop.idle();
   }
 
   /**
-   * Stops a cancelled Job's work in flight (#12): its process group gets
-   * SIGTERM, then SIGKILL after the grace period; the Attempt and the Task are
-   * then recorded `cancelled`, the Worktree preserved and the leases released.
-   * Settles once that is recorded. The Job's own cancellation is already committed.
+   * Stops a cancelled Job's work in flight (#12): each process group gets
+   * SIGTERM, then SIGKILL after the grace period; each Attempt and its Task
+   * are then recorded `cancelled`, the Worktree preserved and the leases
+   * released. Settles once all of that is recorded. The Job's own
+   * cancellation is already committed.
    */
   async cancelJob(jobId: string): Promise<void> {
     for (const r of this.resumptions.filter((r) => this.jobOf(r) === jobId)) {
@@ -355,23 +350,23 @@ export class TaskScheduler {
       // A closure the cancellation already ended has nothing left to stop.
       if (r.kind !== 'closure') await this.cancelLeftAttempt(r.attemptId);
     }
-    const inflight = this.inflight;
-    if (inflight?.jobId !== jobId) return;
-    await Promise.all([this.currentRun?.cancel(), this.currentProc?.cancel()]);
-    await inflight.done;
+    const slots = [...this.slots.values()].filter((s) => s.jobId === jobId);
+    await Promise.all(slots.map((s) => Promise.all([s.run?.cancel(), s.proc?.cancel()])));
+    await Promise.all(slots.map((s) => s.done));
   }
 
-  /** Renews every lease this runtime holds (ARCHITECTURE §12 step 4). */
+  /** The heartbeat tick: renews every lease this runtime holds, then sweeps expired ones (ADR-0024). */
   private renewLeases(): void {
     if (this.closed) return;
-    const now = Date.now();
-    this.opts.db
-      .update(schema.leases)
-      .set({ heartbeatAt: new Date(now).toISOString(), expiresAt: leaseExpiry(now) })
-      .where(
-        sql`${schema.leases.holder} = ${this.holder} OR ${schema.leases.holder} LIKE ${`${this.holder}/%`}`,
-      )
-      .run();
+    heartbeatTick({
+      db: this.opts.db,
+      holder: this.holder,
+      spoolRoot: this.opts.spoolRoot,
+      inFlight: (taskId) => this.slots.get(taskId)?.done,
+      closed: () => this.closed,
+      onCommit: this.opts.onCommit,
+      log: this.opts.log,
+    });
   }
 
   private jobOf(r: Resumption): string | undefined {
@@ -385,47 +380,95 @@ export class TaskScheduler {
     return attempt?.jobId;
   }
 
-  /** Runs at most one closure or one Attempt. `true` when it did some work. */
-  private async pass(): Promise<boolean> {
+  /**
+   * Starts all the work that can start now, without waiting for it: what a
+   * previous runtime left in progress, every queued closure, then every
+   * ready Task the concurrency limits let it claim. `true` when it started some.
+   */
+  private pass(): Promise<boolean> {
+    try {
+      return Promise.resolve(this.startWork());
+    } catch (err) {
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+
+  private startWork(): boolean {
     const harness = this.opts.harness;
     if (harness === undefined) return false;
-    const resumption = this.resumptions.shift();
-    if (resumption !== undefined) {
+    let started = false;
+    for (let r = this.resumptions.shift(); r !== undefined; r = this.resumptions.shift()) {
+      const resumption = r;
       const jobId = this.jobOf(resumption);
-      if (jobId === undefined) return true;
+      if (jobId === undefined) continue;
+      started = true;
       if (resumption.kind === 'closure') {
-        await this.hold(jobId, () =>
-          this.guard(jobId, () => this.runClosure(resumption.stageRunId, jobId, 'running'), {
+        this.launch(`closure:${resumption.stageRunId}`, jobId, () =>
+          this.guard(jobId, () => runClosure(this.opts, resumption.stageRunId, jobId, 'running'), {
             closureId: resumption.stageRunId,
           }),
         );
-        return true;
+        continue;
       }
-      const attempt = requireAttempt(this.opts.db, resumption.attemptId);
-      await this.hold(jobId, () =>
-        this.guard(jobId, () => this.resumeAttempt(harness, resumption), {
-          taskId: attempt.taskId,
-        }),
+      const { taskId } = requireAttempt(this.opts.db, resumption.attemptId);
+      this.launch(taskId, jobId, (slot) =>
+        this.guard(jobId, () => this.resumeAttempt(harness, resumption, slot), { taskId }),
       );
-      return true;
     }
-    const closure = this.nextClosure();
-    if (closure !== undefined) {
-      await this.hold(closure.jobId, () =>
-        this.guard(closure.jobId, () => this.runClosure(closure.id, closure.jobId, 'queued'), {
-          closureId: closure.id,
-        }),
+    // A closure moves to `running` before its first await, so the next lookup finds the next one.
+    for (
+      let closure = nextClosure(this.opts.db);
+      closure !== undefined && !this.slots.has(`closure:${closure.id}`);
+      closure = nextClosure(this.opts.db)
+    ) {
+      const { id, jobId } = closure;
+      started = true;
+      this.launch(`closure:${id}`, jobId, () =>
+        this.guard(jobId, () => runClosure(this.opts, id, jobId, 'queued'), { closureId: id }),
       );
-      return true;
     }
-    const claimed = this.claimNext();
-    if (claimed === undefined) return false;
-    await this.hold(claimed.jobId, () =>
-      this.guard(claimed.jobId, () => this.runAttempt(harness, claimed.taskId), {
-        taskId: claimed.taskId,
-      }),
+    for (;;) {
+      const claimed = claimNextTask(this.opts.db, {
+        holder: this.holder,
+        globalLimit: this.opts.globalConcurrency,
+        actor: ACTOR,
+      });
+      if (claimed === undefined) break;
+      this.opts.onCommit();
+      started = true;
+      const { jobId, taskId } = claimed;
+      this.launch(taskId, jobId, (slot) =>
+        this.guard(jobId, () => this.runAttempt(harness, taskId, slot), { taskId }),
+      );
+    }
+    return started;
+  }
+
+  /** Runs `body` in a new slot, without waiting for it; the slot goes once it ends. */
+  private launch(key: string, jobId: string, body: (slot: Slot) => Promise<void>): void {
+    const slot: Slot = { jobId, done: Promise.resolve(), run: undefined, proc: undefined };
+    this.slots.set(key, slot);
+    slot.done = body(slot).finally(() => {
+      // A swept slot can end after a Retry of its Task took the key ("retry now", ADR-0026).
+      if (this.slots.get(key) === slot) this.slots.delete(key);
+      this.wake();
+    });
+  }
+
+  /** Runs `body` while holding the clone's setup lock (one Worktree setup at a time per clone). */
+  private async withClone<T>(clone: string, body: () => Promise<T>): Promise<T> {
+    const before = this.cloneLocks.get(clone) ?? Promise.resolve();
+    const run = before.then(body);
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
     );
-    return true;
+    this.cloneLocks.set(clone, settled);
+    try {
+      return await run;
+    } finally {
+      if (this.cloneLocks.get(clone) === settled) this.cloneLocks.delete(clone);
+    }
   }
 
   /** Runs `body`; an unexpected error fails the work where it can be seen, never silently. */
@@ -442,21 +485,11 @@ export class TaskScheduler {
       if (this.closed) return;
       try {
         if (subject.taskId !== undefined) this.failTask(jobId, subject.taskId, message);
-        if (subject.closureId !== undefined) this.failClosure(jobId, subject.closureId, message);
+        if (subject.closureId !== undefined)
+          failClosure(this.opts, jobId, subject.closureId, message);
       } catch (failErr) {
         this.opts.log(`task scheduler: could not record the failure: ${String(failErr)}`);
       }
-    }
-  }
-
-  /** Marks the slot as holding `jobId`'s work while `body` runs (for {@link cancelJob}). */
-  private async hold(jobId: string, body: () => Promise<void>): Promise<void> {
-    const done = body();
-    this.inflight = { jobId, done };
-    try {
-      await done;
-    } finally {
-      this.inflight = undefined;
     }
   }
 
@@ -470,6 +503,7 @@ export class TaskScheduler {
       .select({ state: schema.stageRuns.state })
       .from(schema.stageRuns)
       .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'execution')))
+      .orderBy(desc(schema.stageRuns.attempt))
       .get();
     return execution?.state === 'cancelled' ? 'cancelled' : undefined;
   }
@@ -479,74 +513,16 @@ export class TaskScheduler {
    * recorded `cancelled` first; on shutdown it is left as it is.
    */
   private async stopped(ctx: AttemptContext): Promise<boolean> {
+    if (sweptAttempt(ctx.attemptId)) return true; // its lease expired: the sweeper ends it (ADR-0024)
     const reason = this.stopReason(ctx.job.id);
     if (reason === undefined) return false;
     if (reason === 'cancelled') await this.recordCancelled(ctx.attemptId);
     return true;
   }
 
-  // ---- claim ------------------------------------------------------------------
-
-  /**
-   * Claims the oldest Job's next ready Task: inserts its lease and moves it
-   * `ready → claimed` in one versioned transaction (and starts `execution`).
-   */
-  private claimNext(): { jobId: string; taskId: string } | undefined {
-    const next = this.opts.db
-      .select({ task: schema.tasks })
-      .from(schema.tasks)
-      .innerJoin(schema.jobs, eq(schema.jobs.id, schema.tasks.jobId))
-      .innerJoin(
-        schema.stageRuns,
-        and(
-          eq(schema.stageRuns.jobId, schema.tasks.jobId),
-          eq(schema.stageRuns.stageId, 'execution'),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.tasks.state, 'ready'),
-          inArray(schema.stageRuns.state, ['queued', 'running']),
-        ),
-      )
-      .orderBy(asc(schema.jobs.createdAt), asc(schema.tasks.priority), asc(sql`"tasks"."rowid"`))
-      .limit(1)
-      .get();
-    if (next === undefined) return undefined;
-    const { jobId, id: taskId } = next.task;
-    const now = new Date();
-    changeJob(
-      this.opts.db,
-      { jobId, expectedVersion: 'current', actor: ACTOR },
-      (tx, state, step) => {
-        const task = requireTask(tx, taskId, 'ready');
-        const leaseId = newId('lse');
-        const inserted = tx
-          .insert(schema.leases)
-          .values({
-            resourceKind: 'task',
-            resourceId: taskId,
-            holder: this.holder,
-            leaseId,
-            acquiredAt: now.toISOString(),
-            heartbeatAt: now.toISOString(),
-            expiresAt: leaseExpiry(),
-          })
-          .onConflictDoNothing()
-          .run();
-        if (inserted.changes !== 1) throw new Error(`Task ${taskId} is already leased`);
-        stepTask(tx, { jobId, actor: ACTOR }, task, 'claimed', { payload: { leaseId } });
-        const execution = state.stageRuns.find((r) => r.stageId === 'execution');
-        if (execution?.state === 'queued') step(execution, 'running');
-      },
-    );
-    this.opts.onCommit();
-    return { jobId, taskId };
-  }
-
   // ---- an Attempt ----------------------------------------------------------------
 
-  private async runAttempt(harness: AgentHarness, taskId: string): Promise<void> {
+  private async runAttempt(harness: AgentHarness, taskId: string, slot: Slot): Promise<void> {
     const { db } = this.opts;
     const task = requireTask(db, taskId, 'claimed');
     const definition = TaskDefinitionSchema.parse(JSON.parse(task.definitionJson));
@@ -569,25 +545,58 @@ export class TaskScheduler {
     const clone = repo.clonePath;
     const attemptId = newId('att');
     const n = (previous?.n ?? 0) + 1;
-    // A Retry redoes an interrupted Attempt: its packet's Findings, none of its own.
+    // A Retry redoes an interrupted Attempt, and an answer Attempt goes on from one that
+    // asked: both carry its packet's Findings, none of its own (it raised none).
     const cause: AttemptCause =
-      previous === undefined ? 'initial' : previous.state === 'interrupted' ? 'retry' : 'rework';
+      previous === undefined
+        ? 'initial'
+        : previous.state === 'interrupted'
+          ? 'retry'
+          : previous.state === 'needs_decision'
+            ? 'answer'
+            : 'rework';
     const priorFindings =
       previous === undefined
         ? []
-        : cause === 'retry'
+        : cause === 'retry' || cause === 'answer'
           ? TaskPacketSchema.parse(JSON.parse(previous.packetJson)).context.priorFindings
           : attemptFindings(db, previous);
+    // Every question asked so far on this Task, with the human's answers (ADR-0023).
+    const answers =
+      previous === undefined ? [] : db.transaction((tx) => answersAfter(tx, previous));
+    // Every grant's guidance so far on this Task (ADR-0026).
+    const guidance =
+      previous === undefined ? [] : db.transaction((tx) => guidanceAfter(tx, previous));
     const { wallClockMs } = this;
-    let worktree: { id: string; path: string; branch: string; baseSha: string; reused: boolean };
+    let worktree: {
+      id: string;
+      path: string;
+      branch: string;
+      baseSha: string;
+      reused: boolean;
+      /** The Tasks whose approved heads the base holds (the Dependency Base). */
+      dependencies?: string[];
+    };
     if (previous === undefined) {
-      // A new Worktree, from a freshly fetched base, in the Factory Clone only.
-      await fetchRemote(clone);
-      const baseSha =
-        (await resolveCommit(clone, `refs/remotes/origin/${repo.defaultBranch}`)) ??
-        (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
-      if (baseSha === undefined)
-        throw new Error(`the Factory Clone has no ${repo.defaultBranch} to start from`);
+      // A new Worktree in the Factory Clone only: from its Dependency Base, or else
+      // from the freshly fetched default branch. One setup per clone at a time.
+      const base = await this.withClone(clone, async () => {
+        await fetchRemote(clone);
+        const dependencyBase = await makeDependencyBase(db, clone, task);
+        if (dependencyBase.kind !== 'none') return dependencyBase;
+        const sha =
+          (await resolveCommit(clone, `refs/remotes/origin/${repo.defaultBranch}`)) ??
+          (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
+        if (sha === undefined)
+          throw new Error(`the Factory Clone has no ${repo.defaultBranch} to start from`);
+        return { sha, dependencies: [] };
+      });
+      if ('paths' in base) {
+        // A human Blocker, never a replan (ADR-0028): no Attempt or Worktree is made.
+        blockOnBaseConflict(db, { jobId: job.id, actor: ACTOR }, taskId, base);
+        this.opts.onCommit();
+        return;
+      }
       const at = taskWorktree({
         workspaceRoot: this.opts.workspaceRoot,
         repositoryId: repo.id,
@@ -595,7 +604,13 @@ export class TaskScheduler {
         taskId: task.id,
         taskKey: task.key,
       });
-      worktree = { id: newId('wt'), ...at, baseSha, reused: false };
+      worktree = {
+        id: newId('wt'),
+        ...at,
+        baseSha: base.sha,
+        reused: false,
+        dependencies: base.dependencies,
+      };
     } else {
       // Rework continues on the Task Branch, from the same base: the earlier work is kept.
       const row = requireWorktree(db, previous.worktreeId);
@@ -622,15 +637,19 @@ export class TaskScheduler {
       baseSha,
       wallClockMs,
       priorFindings,
+      answers,
+      guidance,
     });
-    await excludeResultFile(clone);
-    if (worktree.reused) {
-      // A Task Result left by the Attempt before must never be read as this one's.
-      rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
-    } else {
-      mkdirSync(dirname(path), { recursive: true });
-      await addWorktree({ repo: clone, path, branch, startSha: baseSha });
-    }
+    await this.withClone(clone, async () => {
+      await excludeResultFile(clone);
+      if (worktree.reused) {
+        // A Task Result left by the Attempt before must never be read as this one's.
+        rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
+      } else {
+        mkdirSync(dirname(path), { recursive: true });
+        await addWorktree({ repo: clone, path, branch, startSha: baseSha });
+      }
+    });
 
     const portBase = changeJob(
       db,
@@ -675,7 +694,16 @@ export class TaskScheduler {
             jobId: job.id,
             type: 'worktree.created',
             actor: ACTOR,
-            payload: { taskId, to: 'active', path, branch, baseSha, portBase: base },
+            payload: {
+              taskId,
+              to: 'active',
+              path,
+              branch,
+              baseSha,
+              portBase: base,
+              // The Dependency Base: the Tasks whose approved heads `baseSha` holds (ADR-0021).
+              dependencyBase: worktree.dependencies ?? [],
+            },
           });
         }
         tx.insert(schema.attempts)
@@ -716,6 +744,8 @@ export class TaskScheduler {
             worktreeId,
             baseSha,
             priorFindings: priorFindings.length,
+            answers: answers.length,
+            guidance: guidance.length,
           },
         });
         stepTask(
@@ -742,6 +772,7 @@ export class TaskScheduler {
     });
     const ctx: AttemptContext = {
       harness,
+      slot,
       job,
       task,
       definition,
@@ -766,8 +797,9 @@ export class TaskScheduler {
   private async resumeAttempt(
     harness: AgentHarness,
     r: Extract<Resumption, { kind: 'reattach' | 'resume' }>,
+    slot: Slot,
   ): Promise<void> {
-    const ctx = this.contextOf(harness, r.attemptId);
+    const ctx = this.contextOf(harness, r.attemptId, slot);
     const attempt = requireAttempt(this.opts.db, r.attemptId);
     if (await this.stopped(ctx)) return;
     const recorded = attempt.processJson === null ? undefined : parseProcess(attempt.processJson);
@@ -790,7 +822,7 @@ export class TaskScheduler {
   }
 
   /** The Attempt's context, rebuilt from its rows and its Task Packet. */
-  private contextOf(harness: AgentHarness, attemptId: string): AttemptContext {
+  private contextOf(harness: AgentHarness, attemptId: string, slot: Slot): AttemptContext {
     const { db } = this.opts;
     const attempt = requireAttempt(db, attemptId);
     const task = db.select().from(schema.tasks).where(eq(schema.tasks.id, attempt.taskId)).get();
@@ -807,6 +839,7 @@ export class TaskScheduler {
     const packet = TaskPacketSchema.parse(JSON.parse(attempt.packetJson));
     return {
       harness,
+      slot,
       job,
       task,
       definition: TaskDefinitionSchema.parse(JSON.parse(task.definitionJson)),
@@ -924,11 +957,15 @@ export class TaskScheduler {
           .map((i) => `[${i.rule}] ${i.message}`)
           .join('; ')}`,
       };
+    } else if (resultAsks(inspection.result.value)) {
+      // A Question (ARCHITECTURE §8): no Gate runs on work that waits for an answer.
+      this.askHuman(ctx, { inspection, resultContent, usage, result: inspection.result.value });
+      return;
     } else if (inspection.result.value.status !== 'done') {
       outcome = {
         state: 'failed',
         exitReason: 'not_done',
-        detail: `the Task Result's status is ${inspection.result.value.status}; only done is handled before Phase B`,
+        detail: `the Task Result's status is ${inspection.result.value.status}, not done or needs_decision`,
       };
     } else if (scopeViolations.length > 0) {
       // The path-scope Gate (ARCHITECTURE §7 step 3): nothing runs on out-of-scope work.
@@ -1015,49 +1052,62 @@ export class TaskScheduler {
     };
     const usage =
       attempt.usageJson === null ? null : UsageSchema.parse(JSON.parse(attempt.usageJson));
-    const at = { headSha: facts.headSha, baseSha: ctx.baseSha };
-    const reviewed = await this.review(ctx, at, this.recordedRuns(ctx), from);
-    if (reviewed === undefined) return; // stopped during the review
-    this.finishReview({
-      jobId: ctx.job.id,
-      taskId: ctx.task.id,
-      attemptId: ctx.attemptId,
-      worktreeId: ctx.worktreeId,
-      inspection: facts,
-      usage,
-      reviewed,
-      current: {
-        headSha: (await resolveCommit(ctx.path, 'HEAD')) ?? '(none)',
-        baseSha: ctx.baseSha,
+    const reviewed = await runReview(
+      this.opts,
+      {
+        subject: {
+          jobId: ctx.job.id,
+          taskId: ctx.task.id,
+          taskKey: ctx.task.key,
+          attemptId: ctx.attemptId,
+        },
+        worktree: ctx.path,
+        definition: ctx.definition,
+        at: { headSha: facts.headSha, baseSha: ctx.baseSha },
+        runs: recordedRuns(this.opts, ctx.attemptId, ctx.definition),
+        harnessId: ctx.harness.id,
+        wallClockMs: this.reviewWallClockMs,
+        firstRun: from?.run ?? 1,
       },
-      reviewerChanges: await worktreeProblems(ctx.path, facts.headSha, 'reviewer'),
-    });
-  }
-
-  /** The Attempt's recorded verification runs, with their output, as the review is sent them. */
-  private recordedRuns(ctx: AttemptContext): RecordedRun[] {
-    return this.opts.db
-      .select()
-      .from(schema.verificationRuns)
-      .where(eq(schema.verificationRuns.attemptId, ctx.attemptId))
-      .orderBy(asc(sql`rowid`))
-      .all()
-      .map((r) => {
-        const log = VerificationLogContentSchema.parse(
-          this.opts.artifacts.readJson(r.outputArtifactId),
-        );
-        return {
-          key: r.commandKey,
-          command: r.command,
-          required: r.required,
-          criteria: ctx.definition.verification.find((v) => v.key === r.commandKey)?.criteria ?? [],
-          exitCode: r.exitCode,
-          timedOut: r.timedOut,
-          startedAt: r.startedAt,
-          durationMs: r.durationMs,
-          output: log.output,
-        };
-      });
+      {
+        run: (input, evaluate) =>
+          input.run === from?.run
+            ? this.finishRun(ctx, input, from.reattached, evaluate)
+            : this.harnessRun(ctx, input, evaluate),
+        stopped: () => this.stopped(ctx),
+      },
+    );
+    if (reviewed === undefined) return; // stopped during the review
+    finishReview(
+      this.opts,
+      {
+        jobId: ctx.job.id,
+        taskId: ctx.task.id,
+        attemptId: ctx.attemptId,
+        reviewedHead: facts.headSha,
+        reviewed,
+        current: {
+          headSha: (await resolveCommit(ctx.path, 'HEAD')) ?? '(none)',
+          baseSha: ctx.baseSha,
+        },
+        reviewerChanges: await worktreeProblems(ctx.path, facts.headSha, 'reviewer'),
+      },
+      (tx, state, step, outcome) => {
+        endAttempt(tx, state, step, {
+          jobId: ctx.job.id,
+          taskId: ctx.task.id,
+          attemptId: ctx.attemptId,
+          worktreeId: ctx.worktreeId,
+          baseSha: ctx.baseSha,
+          inspection: facts,
+          outcome,
+          usage,
+          from: 'in_review',
+          artifacts: this.opts.artifacts,
+        });
+      },
+    );
+    this.dropSpools(ctx.attemptId);
   }
 
   private packet(input: {
@@ -1070,10 +1120,12 @@ export class TaskScheduler {
     baseSha: string;
     wallClockMs: number;
     priorFindings: AttemptFinding[];
+    answers: AnsweredQuestion[];
+    guidance: GrantGuidance[];
   }): TaskPacket {
     const { job, task, definition, repo } = input;
     const artifacts = this.opts.artifacts.listForJob(job.id).filter((a) => a.stageRunId !== null);
-    const spec = artifacts.find((a) => a.kind === 'spec');
+    const spec = currentSpec(this.opts.db, job.id);
     const discovery = artifacts.find((a) => a.kind === 'discovery');
     const objective =
       spec === undefined
@@ -1120,9 +1172,12 @@ export class TaskScheduler {
         artifacts: artifacts.map((a) => ({ id: a.id, kind: a.kind, contentHash: a.contentHash })),
         files,
         priorFindings: input.priorFindings,
+        answers: input.answers,
+        guidance: input.guidance,
       },
       limits: { maxTurns: MAX_TURNS, wallClockS: input.wallClockMs / 1000 },
-      protocol: { resultFile: RESULT_FILE, mayAskQuestions: false },
+      // The developer may ask (ARCHITECTURE §7 Question rules); the reviewer never can.
+      protocol: { resultFile: RESULT_FILE, mayAskQuestions: true },
     } satisfies TaskPacket);
   }
 
@@ -1275,7 +1330,7 @@ export class TaskScheduler {
       if (spool !== undefined) rmSync(spool, { recursive: true, force: true });
       return { result: undefined, sessionRef: undefined };
     }
-    this.currentRun = started;
+    ctx.slot.run = started;
     // Progress events are counted; the Run's output is stored as its log (below).
     const drained = (async () => {
       let count = 0;
@@ -1284,7 +1339,7 @@ export class TaskScheduler {
     })();
     const result = await started.result;
     const events = await drained;
-    this.currentRun = undefined;
+    ctx.slot.run = undefined;
     const judged = evaluate?.(result);
     // The Run's output, redacted on write like every Artifact (ADR-0011), for `factory logs`.
     const content = this.opts.artifacts.writeContent({
@@ -1392,9 +1447,9 @@ export class TaskScheduler {
         timeoutMs: this.verifyTimeoutMs,
         spool,
       });
-      this.currentProc = proc;
+      ctx.slot.proc = proc;
       const exit = await proc.exit;
-      this.currentProc = undefined;
+      ctx.slot.proc = undefined;
       this.recordProcess(this.opts.db, ctx.attemptId, undefined);
       rmSync(spool, { recursive: true, force: true });
       if (await this.stopped(ctx)) return undefined;
@@ -1445,11 +1500,126 @@ export class TaskScheduler {
       { jobId: input.jobId, expectedVersion: 'current', actor: ACTOR },
       (tx, state, step) => {
         this.recordVerification(tx, input);
-        endAttempt(tx, state, step, { ...input, from: 'verifying' });
+        endAttempt(tx, state, step, {
+          ...input,
+          from: 'verifying',
+          artifacts: this.opts.artifacts,
+        });
       },
     );
     this.opts.onCommit();
     this.dropSpools(input.attemptId);
+  }
+
+  /**
+   * The developer asked a human (ARCHITECTURE §8 step 2), in one transaction:
+   * the Task Result is recorded, the Attempt ends `needs_decision`, one
+   * `question` Inbox Item batches its questions (or, at `max_questions`, a
+   * `question_cap_reached` Blocker opens none), the Task is `blocked`, its
+   * lease and capacity tokens are released and the Worktree is preserved. No
+   * process stays alive while it waits.
+   */
+  private askHuman(
+    ctx: AttemptContext,
+    input: {
+      inspection: Inspection;
+      resultContent: StoredContent | undefined;
+      usage: Usage | null;
+      result: TaskResult;
+    },
+  ): void {
+    const jobId = ctx.job.id;
+    const taskId = ctx.task.id;
+    const { attemptId } = ctx;
+    const questions = inboxQuestionsOf(input.result);
+    changeJob(
+      this.opts.db,
+      { jobId, expectedVersion: 'current', actor: ACTOR },
+      (tx, state, step) => {
+        const op = { jobId, actor: ACTOR };
+        const evidence = this.recordVerification(tx, {
+          jobId,
+          taskId,
+          attemptId,
+          baseSha: ctx.baseSha,
+          inspection: input.inspection,
+          resultContent: input.resultContent,
+          verificationRuns: [],
+        });
+        const task = requireTask(tx, taskId, 'verifying');
+        const answerAttemptsUsed = tx
+          .select({ id: schema.attempts.id })
+          .from(schema.attempts)
+          .where(and(eq(schema.attempts.taskId, taskId), eq(schema.attempts.cause, 'answer')))
+          .all().length;
+        const route = questionRoute({ answerAttemptsUsed, maxQuestions: task.maxQuestions });
+        const itemId =
+          route.kind === 'ask'
+            ? openQuestionItem(tx, {
+                jobId,
+                taskId,
+                taskKey: task.key,
+                attemptId,
+                questions,
+                evidence,
+                requestedBy: `agent:${ctx.harness.id}/${attemptId}`,
+                actor: ACTOR,
+              })
+            : undefined;
+        stepAttempt(
+          tx,
+          op,
+          attemptId,
+          'verifying',
+          {
+            state: 'needs_decision',
+            exitReason: 'needs_decision',
+            exitDetail:
+              itemId === undefined
+                ? `the developer asked ${String(questions.length)} question(s) with no answer Attempt left (maxQuestions ${String(task.maxQuestions)})`
+                : `the developer asked ${String(questions.length)} question(s); Inbox Item ${itemId} waits for the answers`,
+            ...inspectionColumns(input.inspection, input.usage),
+            processJson: null,
+            finishedAt: new Date().toISOString(),
+          },
+          {
+            exitReason: 'needs_decision',
+            headSha: input.inspection.headSha,
+            baseSha: ctx.baseSha,
+            questions: questions.length,
+            ...(itemId === undefined ? {} : { approvalId: itemId }),
+          },
+        );
+        const blocker: Blocker = {
+          ...(route.kind === 'ask'
+            ? {
+                kind: 'human' as const,
+                reason: 'awaiting_human' as const,
+                detail: `the developer asked ${String(questions.length)} question(s) and waits for the answers`,
+                requiredAction: `answer Inbox Item ${String(itemId)} (factory inbox answer ${String(itemId)})`,
+              }
+            : route.blocker),
+          taskId,
+          attemptId,
+          createdAt: new Date().toISOString(),
+        };
+        stepTask(tx, op, task, 'blocked', {
+          reason: blocker.reason,
+          payload: {
+            attemptId,
+            headSha: input.inspection.headSha,
+            ...(itemId === undefined ? {} : { approvalId: itemId }),
+          },
+          blocker,
+        });
+        const worktree = requireWorktree(tx, ctx.worktreeId);
+        releaseAttemptTokens(tx, taskId, worktree.portBase);
+        stepWorktree(tx, op, worktree, 'active', 'preserved');
+        settleExecution(tx, state, step);
+      },
+    );
+    this.opts.onCommit();
+    this.dropSpools(attemptId);
   }
 
   /** Removes an ended Attempt's spool directories (they hold raw process output). */
@@ -1488,80 +1658,6 @@ export class TaskScheduler {
       });
     });
     this.opts.onCommit();
-  }
-
-  /**
-   * The independent review: a reviewer Harness Run in a new Session, in the
-   * Worktree at the reviewed head, given the Review Packet only. Its output
-   * is checked like any proposal; one re-prompt (again a new Session) carries
-   * the problems. `undefined` when the work stopped.
-   */
-  private async review(
-    ctx: AttemptContext,
-    at: GateRef,
-    runs: readonly RecordedRun[],
-    from?: { run: number; reattached: HarnessRun | undefined },
-  ): Promise<Reviewed | undefined> {
-    const { db } = this.opts;
-    const { job, task, definition, attemptId, harness } = ctx;
-    const spec = this.opts.artifacts
-      .listForJob(job.id)
-      .find((a) => a.kind === 'spec' && a.stageRunId !== null);
-    if (spec === undefined) throw new Error(`Job ${job.id} has no Specification to review against`);
-    const criteria = criteriaCoveredBy(db, job.id, definition.acceptance);
-    const packet = await buildReviewPacket({
-      subject: { jobId: job.id, taskId: task.id, taskKey: task.key, attemptId, ...at },
-      repo: ctx.path,
-      specification: SpecificationProposalSchema.parse(this.opts.artifacts.readJson(spec.id)),
-      criteria,
-      runs,
-      commandVerdicts: criteria.map((c) => ({
-        code: c.code,
-        ...criterionVerdict(runs.filter((r) => r.criteria.includes(c.code))),
-      })),
-    });
-    let rejected: RuleIssue[] | undefined;
-    for (let n = from?.run ?? 1; n <= REVIEW_RUNS; n++) {
-      let evaluation: ReviewEvaluation | undefined;
-      const evaluate = (r: HarnessRawResult) => {
-        evaluation = evaluateReview(r, packet);
-        return evaluation.kind === 'invalid'
-          ? { outcome: 'invalid', issues: evaluation.issues }
-          : { outcome: evaluation.kind };
-      };
-      const input: RunInput = {
-        role: 'reviewer',
-        template: { id: REVIEW_TEMPLATE_ID, hash: REVIEW_TEMPLATE_HASH },
-        run: n,
-        prompt: renderReviewPrompt(packet, rejected),
-        wallClockMs: this.reviewWallClockMs,
-        ...(rejected === undefined ? {} : { reprompt: rejected }),
-      };
-      const { result, sessionRef } =
-        n === from?.run
-          ? await this.finishRun(ctx, input, from.reattached, evaluate)
-          : await this.harnessRun(ctx, input, evaluate);
-      if (await this.stopped(ctx)) return undefined;
-      evaluation ??= evaluateReview(result, packet);
-      if (evaluation.kind === 'valid') {
-        return {
-          kind: 'valid',
-          packet,
-          value: evaluation.value,
-          sessionRef: sessionRef ?? null,
-          harnessId: harness.id,
-        };
-      }
-      if (evaluation.kind === 'harness_failed') {
-        return { kind: 'failed', exitReason: 'review_failed', detail: evaluation.message };
-      }
-      rejected = evaluation.issues;
-    }
-    return {
-      kind: 'failed',
-      exitReason: 'invalid_output',
-      detail: `the review was invalid after ${String(REVIEW_RUNS - 1)} re-prompt: ${(rejected ?? []).map((i) => `[${i.rule}] ${i.message}`).join('; ')}`,
-    };
   }
 
   /**
@@ -1638,164 +1734,6 @@ export class TaskScheduler {
     await this.recordCancelled(attemptId);
   }
 
-  /**
-   * Records a valid review (its Artifact, its row, its Findings and its
-   * criterion verdicts as Evidence), then decides approval with the full rule
-   * against the Task Branch head as git reads it now, and ends the Attempt. One
-   * transaction. No review is stored without a valid proposal: the Attempt fails
-   * `invalid_output` (still invalid after the re-prompt) or `review_failed` (the
-   * reviewer Run crashed, timed out or did not start).
-   */
-  private finishReview(input: {
-    jobId: string;
-    taskId: string;
-    attemptId: string;
-    worktreeId: string;
-    inspection: GitFacts;
-    usage: Usage | null;
-    reviewed: Reviewed;
-    current: GateRef;
-    reviewerChanges: string[];
-  }): void {
-    const { jobId, taskId, attemptId, reviewed } = input;
-    const reviewedHead = input.inspection.headSha;
-    const base = input.current.baseSha;
-    const content =
-      reviewed.kind === 'valid' ? this.opts.artifacts.writeContent(reviewed.value) : undefined;
-    changeJob(
-      this.opts.db,
-      { jobId, expectedVersion: 'current', actor: ACTOR },
-      (tx, state, step) => {
-        const task = requireTask(tx, taskId, 'in_review');
-        const definition = TaskDefinitionSchema.parse(JSON.parse(task.definitionJson));
-        let review: ApprovalInput['review'] = null;
-        if (reviewed.kind === 'valid' && content !== undefined) {
-          const { value } = reviewed;
-          const artifact = this.opts.artifacts.record(
-            tx,
-            { jobId, taskId, attemptId, kind: 'review', content },
-            ACTOR,
-          );
-          const reviewId = newId('rev');
-          tx.insert(schema.reviews)
-            .values({
-              id: reviewId,
-              jobId,
-              taskId,
-              attemptId,
-              reviewerHarnessId: reviewed.harnessId,
-              reviewerHarnessVersion: this.opts.harnessVersion,
-              sessionRef: reviewed.sessionRef,
-              promptTemplateId: REVIEW_TEMPLATE_ID,
-              promptTemplateHash: REVIEW_TEMPLATE_HASH,
-              packetJson: JSON.stringify(reviewed.packet),
-              headSha: reviewedHead,
-              baseSha: base,
-              outcome: value.outcome,
-              summary: value.summary,
-              artifactId: artifact.id,
-              createdAt: new Date().toISOString(),
-            })
-            .run();
-          value.findings.forEach((f, position) => {
-            tx.insert(schema.reviewFindings)
-              .values({ id: newId('fnd'), reviewId, position, ...f, blocking: isBlocking(f) })
-              .run();
-          });
-          for (const criterion of criteriaCoveredBy(tx, jobId, definition.acceptance)) {
-            const verdict = value.criteria.find((c) => c.code === criterion.code);
-            tx.insert(schema.evidence)
-              .values({
-                id: newId('evd'),
-                attemptId,
-                kind: 'criterion',
-                criterionId: criterion.id,
-                reviewId,
-                verdict: verdict?.verdict ?? 'not_tested',
-                detail: verdict?.detail ?? 'the review gave no verdict',
-                headSha: reviewedHead,
-                baseSha: base,
-                artifactId: artifact.id,
-              })
-              .run();
-          }
-          appendEvent(tx, {
-            entityKind: 'review',
-            entityId: reviewId,
-            jobId,
-            type: 'review.recorded',
-            actor: ACTOR,
-            payload: {
-              taskId,
-              attemptId,
-              outcome: value.outcome,
-              headSha: reviewedHead,
-              baseSha: base,
-              findings: value.findings.length,
-              blocking: value.findings.filter(isBlocking).length,
-            },
-          });
-          review = {
-            outcome: value.outcome,
-            blockingFindings: value.findings.filter(isBlocking).length,
-            headSha: reviewedHead,
-            baseSha: base,
-          };
-        }
-        let outcome: Outcome;
-        if (reviewed.kind === 'failed') {
-          outcome = { state: 'failed', exitReason: reviewed.exitReason, detail: reviewed.detail };
-        } else {
-          const decision = decideApproval(
-            approvalInput(tx, {
-              jobId,
-              attemptId,
-              definition,
-              current: input.current,
-              review,
-            }),
-          );
-          const problems = [...decision.problems, ...input.reviewerChanges];
-          const changesRequested =
-            review?.outcome === 'changes_requested' && isCurrent(review, input.current);
-          const self = { id: attemptId, n: requireAttempt(tx, attemptId).n };
-          outcome =
-            problems.length === 0
-              ? {
-                  state: 'passed',
-                  exitReason: 'completed',
-                  detail: 'every Gate passed and the review approved',
-                }
-              : {
-                  state: 'failed',
-                  exitReason: changesRequested ? 'changes_requested' : 'gates_failed',
-                  detail: problems.join('; '),
-                  // A review that requested changes brings its own Findings; the rest are the Gates'.
-                  findings: [
-                    ...(changesRequested
-                      ? []
-                      : decision.problems.map((p) => gateFinding(self, 'approval', p))),
-                    ...input.reviewerChanges.map((p) => gateFinding(self, 'worktree.clean', p)),
-                  ],
-                };
-        }
-        endAttempt(tx, state, step, {
-          jobId,
-          taskId,
-          attemptId,
-          worktreeId: input.worktreeId,
-          baseSha: base,
-          inspection: input.inspection,
-          outcome,
-          usage: input.usage,
-          from: 'in_review',
-        });
-      },
-    );
-    this.opts.onCommit();
-    this.dropSpools(attemptId);
-  }
-
   /** Records the Task Result claim, the verification runs, their logs and their Evidence. */
   private recordVerification(
     tx: Tx,
@@ -1808,16 +1746,26 @@ export class TaskScheduler {
       resultContent: StoredContent | undefined;
       verificationRuns: VerificationRunRecord[];
     },
-  ): void {
+  ): string[] {
     const { jobId, taskId, attemptId } = input;
     const head = input.inspection.headSha;
     const base = input.baseSha;
+    const recorded: string[] = [];
     if (input.resultContent !== undefined) {
-      this.opts.artifacts.record(
-        tx,
-        { jobId, taskId, attemptId, kind: 'task_result', content: input.resultContent },
-        ACTOR,
+      recorded.push(
+        this.opts.artifacts.record(
+          tx,
+          { jobId, taskId, attemptId, kind: 'task_result', content: input.resultContent },
+          ACTOR,
+        ).id,
       );
+    }
+    // The questions the Task Result asked, kept on the Attempt (redacted on write, ADR-0011).
+    if (input.inspection.result.kind === 'valid') {
+      tx.update(schema.attempts)
+        .set({ questionsJson: JSON.stringify(inboxQuestionsOf(input.inspection.result.value)) })
+        .where(eq(schema.attempts.id, attemptId))
+        .run();
     }
     const definition = TaskDefinitionSchema.parse(
       JSON.parse(requireTask(tx, taskId, 'verifying').definitionJson),
@@ -1880,6 +1828,7 @@ export class TaskScheduler {
           .run();
       }
     }
+    return recorded;
   }
 
   /** Fails a Task the factory itself could not carry through (`factory_error`). */
@@ -1937,107 +1886,6 @@ export class TaskScheduler {
     if (ended !== undefined) this.dropSpools(ended);
   }
 
-  // ---- closure ---------------------------------------------------------------------
-
-  private nextClosure(): { id: string; jobId: string } | undefined {
-    return this.opts.db
-      .select({ id: schema.stageRuns.id, jobId: schema.stageRuns.jobId })
-      .from(schema.stageRuns)
-      .innerJoin(schema.jobs, eq(schema.jobs.id, schema.stageRuns.jobId))
-      .where(and(eq(schema.stageRuns.stageId, 'closure'), eq(schema.stageRuns.state, 'queued')))
-      .orderBy(asc(schema.jobs.createdAt))
-      .limit(1)
-      .get();
-  }
-
-  /**
-   * Writes the Delivery Report, then removes the Job's Worktrees (their
-   * branches stay in the Factory Clone), then completes `closure`. A Worktree
-   * that git refuses to remove stays `preserved`.
-   */
-  private async runClosure(
-    stageRunId: string,
-    jobId: string,
-    from: 'queued' | 'running',
-  ): Promise<void> {
-    const { db } = this.opts;
-    if (from === 'queued') {
-      changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (_, state, step) => {
-        step(requireStageRun(state, stageRunId, 'queued'), 'running');
-      });
-      this.opts.onCommit();
-    }
-
-    // A closure that stopped after recording its report resumes from that report:
-    // it is never written twice.
-    const existing = this.opts.artifacts.listForJob(jobId).find((a) => a.kind === 'report');
-    if (existing === undefined) {
-      const content = this.opts.artifacts.writeContent(await buildDeliveryReport(db, jobId));
-      db.transaction(
-        (tx) => {
-          this.opts.artifacts.record(tx, { jobId, kind: 'report', content }, ACTOR);
-        },
-        { behavior: 'immediate' },
-      );
-      this.opts.onCommit();
-      if (this.opts.crashAt === 'closure.after_report') process.kill(process.pid, 'SIGKILL');
-    }
-
-    // Removal only after delivery: the branches hold the work, the report says where.
-    const preserved = db
-      .select()
-      .from(schema.worktrees)
-      .where(and(eq(schema.worktrees.jobId, jobId), eq(schema.worktrees.state, 'preserved')))
-      .all();
-    for (const worktree of preserved) {
-      const repo = db
-        .select()
-        .from(schema.repositories)
-        .where(eq(schema.repositories.id, worktree.repositoryId))
-        .get();
-      try {
-        if (repo === undefined) throw new Error('no Repository');
-        await removeWorktree(repo.clonePath, worktree.path);
-      } catch (err) {
-        this.event(jobId, 'worktree', worktree.id, 'worktree.remove_failed', {
-          path: worktree.path,
-          message: err instanceof Error ? err.message : String(err),
-        });
-        continue;
-      }
-      changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx) => {
-        stepWorktree(
-          tx,
-          { jobId, actor: ACTOR },
-          requireWorktree(tx, worktree.id),
-          'preserved',
-          'removed',
-        );
-      });
-      this.opts.onCommit();
-    }
-
-    changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (_, state, step) => {
-      step(requireStageRun(state, stageRunId, 'running'), 'succeeded');
-    });
-    this.opts.onCommit();
-  }
-
-  private failClosure(jobId: string, stageRunId: string, message: string): void {
-    changeJob(
-      this.opts.db,
-      { jobId, expectedVersion: 'current', actor: ACTOR },
-      (_, state, step) => {
-        const run = state.stageRuns.find((r) => r.id === stageRunId);
-        if (run?.state !== 'running') return;
-        step(run, 'failed', {
-          failure: { reason: 'factory_error', message: `closure failed: ${message}`, issues: [] },
-        });
-      },
-    );
-    this.opts.onCommit();
-  }
-
   private event(
     jobId: string,
     entityKind: string,
@@ -2060,17 +1908,7 @@ export class TaskScheduler {
  * parsed and checked against git.
  */
 async function inspect(worktree: string, baseSha: string): Promise<Inspection> {
-  const leftovers = await uncommittedPaths(worktree);
-  let wipCommit: string | null = null;
-  if (leftovers.length > 0) {
-    wipCommit = await commitAll(
-      worktree,
-      `wip: uncommitted changes left by the Harness\n\n` +
-        `The factory committed these so nothing is lost. Review them.\n\n` +
-        `Factory-WIP: true\n` +
-        leftovers.map((p) => `Factory-WIP-Path: ${p}`).join('\n'),
-    );
-  }
+  const wipCommit = (await commitLeftovers(worktree))?.sha ?? null;
   const headSha = await resolveCommit(worktree, 'HEAD');
   if (headSha === undefined) throw new Error(`the Worktree ${worktree} has no HEAD`);
   const commits = (await commitsBetween(worktree, baseSha, headSha)).map((c) => c.sha);
@@ -2136,9 +1974,13 @@ function readTaskResult(worktree: string): Inspection['result'] {
     }
     if (result.kind === 'missing') {
       const parsed = TaskResultSchema.safeParse(json);
-      result = parsed.success
-        ? { kind: 'valid', value: parsed.data }
-        : { kind: 'invalid', content: json, issues: schemaIssues(parsed.error) };
+      // A result that contradicts the question protocol is invalid too (one re-prompt, ADR-0023).
+      const protocol = parsed.success ? questionProtocolIssues(parsed.data) : [];
+      result = !parsed.success
+        ? { kind: 'invalid', content: json, issues: schemaIssues(parsed.error) }
+        : protocol.length > 0
+          ? { kind: 'invalid', content: json, issues: protocol }
+          : { kind: 'valid', value: parsed.data };
     }
   }
   return result;
@@ -2157,17 +1999,6 @@ function exitedCleanly(
 ): result is HarnessRawResult & { exit: { kind: 'exited'; code: 0 } } {
   return result !== undefined && result.exit.kind === 'exited' && result.exit.code === 0;
 }
-
-/** The reviewer's proposal and what it was given, or why there is none. */
-type Reviewed =
-  | {
-      kind: 'valid';
-      packet: ReviewPacket;
-      value: ReviewProposal;
-      sessionRef: string | null;
-      harnessId: string;
-    }
-  | { kind: 'failed'; exitReason: 'review_failed' | 'invalid_output'; detail: string };
 
 function usageOf(result: HarnessRawResult | undefined): Usage {
   return result === undefined
@@ -2229,61 +2060,15 @@ function commandCriteriaFailures(
     .map((c) => `mandatory ${c.code} has Evidence fail from its verifying commands`);
 }
 
-/** The approval rule's input, read from what is recorded for the Attempt. */
-function approvalInput(
-  tx: Tx,
-  input: {
-    jobId: string;
-    attemptId: string;
-    definition: TaskDefinition;
-    current: GateRef;
-    review: ApprovalInput['review'];
-  },
-): ApprovalInput {
-  const { jobId, attemptId, definition, current, review } = input;
-  const runs = tx
-    .select()
-    .from(schema.verificationRuns)
-    .where(eq(schema.verificationRuns.attemptId, attemptId))
-    .all();
-  const evidence = tx
-    .select()
-    .from(schema.evidence)
-    .where(and(eq(schema.evidence.attemptId, attemptId), eq(schema.evidence.kind, 'criterion')))
-    .all();
-  return {
-    current,
-    verification: runs.map((r) => ({
-      key: r.commandKey,
-      required: r.required,
-      exitCode: r.exitCode,
-      timedOut: r.timedOut,
-      headSha: r.headSha,
-      baseSha: r.baseSha,
-    })),
-    criteria: criteriaCoveredBy(tx, jobId, definition.acceptance).map((c) => ({
-      code: c.code,
-      mandatory: c.mandatory,
-      evidence: evidence
-        .filter((e) => e.criterionId === c.id)
-        .map((e) => ({
-          source: evidenceSource(e),
-          verdict: EvidenceVerdictSchema.parse(e.verdict),
-          headSha: e.headSha,
-          baseSha: e.baseSha,
-        })),
-    })),
-    review,
-  };
-}
-
 /**
  * Ends the Attempt with `outcome`, releases its leases, preserves the Worktree,
  * and moves the Task: `approved`; or, after a failure, where Rework routing
  * sends it (ARCHITECTURE §4.6): back to `ready` for a Rework Attempt (through
- * `changes_requested`), `blocked` with a Blocker (the cap is reached, or a
- * blocking Finding blames the Plan, the Specification or the infrastructure),
- * or `failed`. Then settles `execution`.
+ * `changes_requested`), `blocked` with a Blocker (the cap is reached, a
+ * blocking Finding blames the infrastructure, or it blames the Specification,
+ * which re-runs, ADR-0031),
+ * `cancelled` with its dependents and a Replan asked for (a blocking Finding
+ * blames the Plan, ADR-0030), or `failed`. Then settles `execution`.
  */
 function endAttempt(
   tx: Tx,
@@ -2299,6 +2084,7 @@ function endAttempt(
     outcome: Outcome;
     usage: Usage | null;
     from: 'verifying' | 'in_review';
+    artifacts: ArtifactStore;
   },
 ): void {
   const { jobId, taskId, attemptId, outcome, inspection } = input;
@@ -2325,11 +2111,13 @@ function endAttempt(
       findings: outcome.findings?.length ?? 0,
     },
   );
+  let replanned = false;
   const task = requireTask(tx, taskId, input.from);
   const payload = { attemptId, headSha: inspection.headSha };
   const reason = outcome.exitReason;
   if (outcome.state === 'passed') {
     stepTask(tx, op, task, 'approved', { reason, payload });
+    readyDependents(tx, op, taskId);
   } else {
     const attempt = requireAttempt(tx, attemptId);
     const route = routeFailedAttempt({
@@ -2348,6 +2136,16 @@ function endAttempt(
     });
     if (route.kind === 'fail') {
       stepTask(tx, op, task, 'failed', { reason, payload });
+    } else if (route.kind === 'replan' || route.kind === 'respecify') {
+      const faulted: FaultRouteInput = {
+        task,
+        attemptId,
+        attemptN: attempt.n,
+        headSha: inspection.headSha,
+        findings: attemptFindings(tx, attempt),
+      };
+      routeByFaultOrigin(tx, input.artifacts, op, route.kind, faulted, step);
+      replanned = true;
     } else if (route.kind === 'rework') {
       const back = stepTask(tx, op, task, 'changes_requested', { reason, payload });
       stepTask(tx, op, back, 'ready', {
@@ -2372,7 +2170,39 @@ function endAttempt(
   const worktree = requireWorktree(tx, input.worktreeId);
   releaseAttemptTokens(tx, taskId, worktree.portBase);
   stepWorktree(tx, op, worktree, 'active', 'preserved');
-  settleExecution(tx, state, step);
+  // The Replan may have superseded `execution` already: settle on what is stored now.
+  settleExecution(tx, replanned ? readJobState(tx, jobId) : state, step);
+}
+
+/**
+ * Moves each `pending` Task that depends on the just-approved `taskId` to
+ * `ready` once every Task it depends on is approved (ARCHITECTURE §4.4). In
+ * the transaction that approves `taskId`, so a dependent is never claimed
+ * before its last dependency's `approved` event.
+ */
+function readyDependents(tx: Tx, op: { jobId: string; actor: string }, taskId: string): void {
+  const dependents = tx
+    .select({ task: schema.tasks })
+    .from(schema.taskDependencies)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskDependencies.taskId))
+    .where(
+      and(eq(schema.taskDependencies.dependsOnTaskId, taskId), eq(schema.tasks.state, 'pending')),
+    )
+    .orderBy(asc(sql`"tasks"."rowid"`))
+    .all();
+  for (const { task } of dependents) {
+    const deps = tx
+      .select({ key: schema.tasks.key, state: schema.tasks.state })
+      .from(schema.taskDependencies)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskDependencies.dependsOnTaskId))
+      .where(eq(schema.taskDependencies.taskId, task.id))
+      .all();
+    if (!deps.every((d) => d.state === 'approved' || d.state === 'integrated')) continue;
+    stepTask(tx, op, task, 'ready', {
+      reason: 'dependencies_approved',
+      payload: { dependsOn: deps.map((d) => d.key) },
+    });
+  }
 }
 
 const MAX_RESULT_BYTES = 1024 * 1024;
@@ -2401,54 +2231,5 @@ function requireAttempt(db: FactoryDb | Tx, id: string) {
   return attempt;
 }
 
-function requireStageRun(state: JobState, id: string, expected: string) {
-  const run = state.stageRuns.find((r) => r.id === id);
-  if (run?.state !== expected)
-    throw new Error(`Stage Run ${id} is ${String(run?.state)}, not ${expected}`);
-  return run;
-}
-
-/** Task states in which the Task is still being worked on, or is about to be. */
-const IN_PROGRESS = ['ready', 'claimed', 'running', 'verifying', 'in_review', 'changes_requested'];
-
-/**
- * Ends `execution` once no Task is in progress: `failed` if a Task failed
- * (with no Rework route); `waiting_human` or `blocked` if a Task is blocked
- * (the Stage Run carries the first Blocker, human ones first, so the Job
- * shows why); `succeeded` (and `closure` queued) when every Task is approved.
- */
-export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper): void {
-  const execution = state.stageRuns.find((r) => r.stageId === 'execution');
-  if (execution?.state !== 'running') return;
-  const tasks = tx
-    .select()
-    .from(schema.tasks)
-    .where(eq(schema.tasks.jobId, state.job.id))
-    .orderBy(asc(sql`rowid`))
-    .all();
-  const failed = tasks.find((t) => t.state === 'failed');
-  if (failed !== undefined) {
-    step(execution, 'failed', {
-      failure: {
-        reason: 'task_failed',
-        message: `Task ${failed.key} failed, with no Rework route`,
-        issues: [],
-      },
-    });
-    return;
-  }
-  if (tasks.some((t) => IN_PROGRESS.includes(t.state))) return;
-  const blockers = tasks
-    .filter((t) => t.state === 'blocked' && t.blockerJson !== null)
-    .map((t) => BlockerSchema.parse(JSON.parse(t.blockerJson ?? 'null')));
-  const blocker = blockers.find((b) => b.kind === 'human') ?? blockers[0];
-  if (blocker !== undefined) {
-    step(execution, blocker.kind === 'human' ? 'waiting_human' : 'blocked', { blocker });
-    return;
-  }
-  if (tasks.length > 0 && tasks.every((t) => t.state === 'approved')) {
-    step(execution, 'succeeded');
-    const closure = state.stageRuns.find((r) => r.stageId === 'closure' && r.state === 'pending');
-    if (closure !== undefined) step(closure, 'queued');
-  }
-}
+// Ending `execution` lives with the keep-going rules (ADR-0028).
+export { settleExecution } from './keep-going.js';

@@ -5,7 +5,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Software Factory',
-  description: 'Read-only view of the factory’s Jobs',
+  description: 'The factory’s Jobs, live activity and Inbox',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -17,13 +17,23 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <Link href="/" className="font-semibold">
               Software Factory
             </Link>
-            <nav aria-label="Main">
+            <nav aria-label="Main" className="flex gap-4">
               <Link href="/" className="text-sm text-muted-foreground hover:text-foreground">
                 Jobs
               </Link>
+              <Link href="/inbox" className="text-sm text-muted-foreground hover:text-foreground">
+                Inbox
+              </Link>
+              <Link
+                href="/activity"
+                className="text-sm text-muted-foreground hover:text-foreground"
+              >
+                Live activity
+              </Link>
             </nav>
             <span className="ml-auto text-xs text-muted-foreground">
-              Read-only. Changes go through the <code>factory</code> CLI.
+              Decisions are made in the Inbox; everything else goes through the <code>factory</code>{' '}
+              CLI.
             </span>
           </div>
         </header>

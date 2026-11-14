@@ -30,11 +30,11 @@ import {
   usageLabels,
 } from '@/lib/format';
 
-function State({ value }: { value: string }) {
+export function State({ value }: { value: string }) {
   return <Badge variant={stateVariant(value)}>{humanize(value)}</Badge>;
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
       <dt className="text-xs text-muted-foreground">{label}</dt>
@@ -86,6 +86,10 @@ export function JobOverview({ job }: { job: Job }) {
           </Field>
           <Field label="Created">
             {formatTime(job.createdAt)} by {job.createdBy}
+          </Field>
+          <Field label="Replans">
+            {job.replans.used} of {job.replans.max} used
+            {job.replanRequested ? ' · replan requested, waiting for the Attempts in flight' : ''}
           </Field>
         </dl>
         {job.description === '' ? (
@@ -230,6 +234,11 @@ function TaskCard({
             <span className="font-mono text-sm text-muted-foreground">{task.key}</span> {task.title}
           </CardTitle>
           <State value={task.state} />
+          {task.cancelReason !== null && (
+            <span className="text-xs text-muted-foreground">
+              Cancelled by {humanize(task.cancelReason)}
+            </span>
+          )}
         </div>
         <CardDescription>{task.objective}</CardDescription>
       </CardHeader>

@@ -7,6 +7,8 @@ import { z } from 'zod';
 import { BillingSchema, CostTagSchema, type CostTag } from './billing.js';
 import { AttemptFindingSchema } from './findings.js';
 import { RiskSchema, RuleIssueSchema, TaskRoleSchema } from './proposals.js';
+import { AnsweredQuestionSchema, InboxQuestionSchema } from './questions.js';
+import { GrantGuidanceSchema } from './blocker-approvals.js';
 
 // ---- Task states (ARCHITECTURE §4.4) ---------------------------------------
 
@@ -24,6 +26,13 @@ export const TaskStateSchema = z.enum([
   'failed',
   'cancelled',
 ]);
+
+/**
+ * Why a Task is `cancelled` (spec #33): its dependency `failed` (`dependency_failed`), a Replan
+ * didn't carry it over (`replan`), or the human cancelled the Job (`human`).
+ */
+export const TaskCancelReasonSchema = z.enum(['dependency_failed', 'replan', 'human']);
+export type TaskCancelReason = z.infer<typeof TaskCancelReasonSchema>;
 export type TaskState = z.infer<typeof TaskStateSchema>;
 
 /** Allowed Task transitions. Everything else is refused by the engine. */
@@ -45,7 +54,9 @@ export const TASK_TRANSITIONS: Readonly<Record<TaskState, readonly TaskState[]>>
   ],
   in_review: ['approved', 'changes_requested', 'ready', 'failed', 'blocked', 'cancelled'],
   changes_requested: ['ready', 'blocked', 'failed', 'cancelled'],
-  approved: ['integrated'],
+  // `→ cancelled`: a Replan didn't carry it over (its definition changed, or its approval no
+  // longer holds); its approved head stays on record (ADR-0029).
+  approved: ['integrated', 'cancelled'],
   blocked: ['ready', 'cancelled'],
   integrated: [],
   failed: [],
@@ -67,7 +78,9 @@ export function initialTaskState(dependsOn: readonly string[]): TaskState {
  * `running`: the Harness Run is alive. `verifying`: the factory is checking the
  * result itself. `in_review`: the independent reviewer is reviewing it.
  * `passed`: every Gate passed and the Task is approved. `failed`: see the exit
- * reason. `interrupted` and `cancelled` are set by recovery and cancellation.
+ * reason. `needs_decision`: it ended asking a human (ADR-0023); its Task
+ * waits, and the answer starts a fresh Attempt. `interrupted` and `cancelled`
+ * are set by recovery and cancellation.
  */
 export const AttemptStateSchema = z.enum([
   'running',
@@ -75,6 +88,7 @@ export const AttemptStateSchema = z.enum([
   'in_review',
   'passed',
   'failed',
+  'needs_decision',
   'interrupted',
   'cancelled',
 ]);
@@ -88,6 +102,7 @@ export type AttemptState = z.infer<typeof AttemptStateSchema>;
  * `review_failed`: the reviewer Harness Run did not exit 0 (it crashed, timed
  * out or did not start), so there is no review. `invalid_output`: no valid
  * Task Result, or no valid review, after its one re-prompt.
+ * `needs_decision`: the Task Result asked a human (state `needs_decision`).
  * `not_done`: the Task Result's status is not `done`. `harness_failed`: the
  * Harness Run did not exit 0. `factory_error`: the factory itself broke.
  * `cancelled`: a human cancelled the Job (state `cancelled`). `interrupted`:
@@ -100,6 +115,7 @@ export const AttemptExitReasonSchema = z.enum([
   'changes_requested',
   'review_failed',
   'invalid_output',
+  'needs_decision',
   'not_done',
   'harness_failed',
   'factory_error',
@@ -111,17 +127,19 @@ export type AttemptExitReason = z.infer<typeof AttemptExitReasonSchema>;
 /**
  * Why an Attempt exists. `initial`: the Task's first. `rework`: the one before
  * failed a Gate or its review. `retry`: the one before was interrupted (an
- * infrastructure failure, not a verdict on the work).
+ * infrastructure failure, not a verdict on the work). `answer`: a human
+ * answered the questions of the one before (ADR-0023).
  */
-export const AttemptCauseSchema = z.enum(['initial', 'rework', 'retry']);
+export const AttemptCauseSchema = z.enum(['initial', 'rework', 'retry', 'answer']);
 export type AttemptCause = z.infer<typeof AttemptCauseSchema>;
 
 /**
  * How many of a Task's Attempts count toward its `max_attempts` (the Rework
- * cap): every Attempt but a Retry, which redoes an interrupted one. Pure.
+ * cap): every Attempt but a Retry, which redoes an interrupted one, and an
+ * answer Attempt, which `max_questions` caps instead. Pure.
  */
 export function attemptsCountedForRework(attempts: readonly { cause: AttemptCause }[]): number {
-  return attempts.filter((a) => a.cause !== 'retry').length;
+  return attempts.filter((a) => a.cause !== 'retry' && a.cause !== 'answer').length;
 }
 
 /** How far a usage value can be trusted (ARCHITECTURE §13). */
@@ -214,6 +232,16 @@ export const TaskPacketSchema = z.object({
     files: z.array(z.string()),
     /** A Rework Attempt: the Findings of the Attempt before it, to fix first. */
     priorFindings: z.array(AttemptFindingSchema).default([]),
+    /**
+     * Every question an earlier Attempt of the Task asked, with the human's
+     * answer (ADR-0023). Guidance only: an answer never changes the scope.
+     */
+    answers: z.array(AnsweredQuestionSchema).default([]),
+    /**
+     * Guidance a human gave with a grant of more Attempts (ADR-0026), every
+     * grant so far on the Task. Guidance only: it never changes the scope.
+     */
+    guidance: z.array(GrantGuidanceSchema).default([]),
   }),
   limits: z.object({ maxTurns: z.number().int().positive(), wallClockS: z.number().positive() }),
   protocol: z.object({ resultFile: z.literal(RESULT_FILE), mayAskQuestions: z.boolean() }),
@@ -395,6 +423,12 @@ export const AttemptSchema = z.object({
   wipCommit: z.string().nullable(),
   /** Ways the Task Result disagreed with git. */
   protocolViolations: z.array(RuleIssueSchema),
+  /**
+   * The questions its Task Result asked (agent-proposed, redacted): the
+   * batched Inbox Question for `needs_decision`, or the non-blocking ones left
+   * open under `done`.
+   */
+  questions: z.array(InboxQuestionSchema),
   /** The Findings raised against it, by the factory's Gates and by its review. */
   findings: z.array(AttemptFindingSchema),
   usage: UsageSchema.nullable(),
@@ -405,10 +439,14 @@ export const AttemptSchema = z.object({
 });
 export type Attempt = z.infer<typeof AttemptSchema>;
 
-// ---- Delivery Report (Phase A: a local branch) --------------------------------
+// ---- Delivery Report (v3, ADR-0028: local branches in the Factory Clone) -------
 
 export const DeliveryReportSchema = z.object({
-  reportVersion: z.literal(2),
+  reportVersion: z.literal(3),
+  /** How the Job ended: a `failed` Job's approved branches are partial results. */
+  outcome: z.enum(['completed', 'failed']),
+  /** One plain sentence on the outcome, saying so when the Job failed. */
+  statement: z.string(),
   job: z.object({ id: z.string(), title: z.string() }),
   repository: z.object({
     id: z.string(),
@@ -417,6 +455,28 @@ export const DeliveryReportSchema = z.object({
     clonePath: z.string(),
     source: z.string(),
   }),
+  /**
+   * Every Task, in Plan order, with its Task Branch (`null` when it never got
+   * a Worktree). `leaf`: no Task depends on it. `fetchCommand` (run from the
+   * source checkout) is offered only for an approved Task no approved Task
+   * depends on: its branch holds every approved Task beneath it. A failed or
+   * cancelled leaf is listed, never offered.
+   */
+  branches: z.array(
+    z.object({
+      key: z.string(),
+      title: z.string(),
+      state: TaskStateSchema,
+      cancelReason: TaskCancelReasonSchema.nullable(),
+      branch: z.string().nullable(),
+      headSha: z.string().nullable(),
+      leaf: z.boolean(),
+      fetchCommand: z.string().nullable(),
+    }),
+  ),
+  /** Where the branches are, and that the offered ones are not combined (before Phase C). */
+  notes: z.array(z.string()),
+  /** The approved Tasks, in detail. */
   tasks: z.array(
     z.object({
       key: z.string(),
@@ -425,11 +485,11 @@ export const DeliveryReportSchema = z.object({
       branch: z.string(),
       baseSha: z.string(),
       headSha: z.string(),
-      /** Run from the source checkout: brings the Task Branch into it. */
-      fetchCommand: z.string(),
       commits: z.array(z.object({ sha: z.string(), subject: z.string() })),
       changedFiles: z.array(z.string()),
       wipCommit: z.string().nullable(),
+      /** Non-blocking questions its approved Attempt left open (agent-proposed, unanswered). */
+      openQuestions: z.array(z.object({ id: z.string(), text: z.string() })).default([]),
       verification: z.array(
         z.object({
           key: z.string(),

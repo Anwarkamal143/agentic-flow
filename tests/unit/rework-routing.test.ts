@@ -1,9 +1,9 @@
 /**
  * Rework routing (ARCHITECTURE §4.6): a failed Gate or a blocking review
  * Finding sends the Task back for a new Attempt, up to its `max_attempts`.
- * Hitting the cap, or a Finding whose Fault Origin is the Plan or the
- * Specification, stops with a human Blocker instead, so nothing loops. Pure;
- * tested through `@factory/domain`.
+ * Hitting the cap stops with a human Blocker instead, so nothing loops; a
+ * Specification Finding re-runs specification (#47) and a Plan Finding goes
+ * back to planning (B4). Pure; tested through `@factory/domain`.
  */
 import { routeFailedAttempt, type FaultOrigin } from '@factory/domain';
 import { describe, expect, it } from 'vitest';
@@ -35,23 +35,30 @@ describe('Rework routing', () => {
     ).toMatchObject({ kind: 'blocked', blocker: { kind: 'human', reason: 'rework_cap_reached' } });
   });
 
-  it('routes a blocking Plan or Specification Finding to a human, before the cap is reached', () => {
-    expect(
-      routeFailedAttempt({
-        exitReason: 'changes_requested',
-        findings: [finding('implementation'), finding('plan')],
-        n: 1,
-        maxAttempts: 3,
-      }),
-    ).toMatchObject({ kind: 'blocked', blocker: { kind: 'human', reason: 'fault_origin_plan' } });
-    expect(
-      routeFailedAttempt({
-        exitReason: 'changes_requested',
-        findings: [finding('plan'), finding('spec')],
-        n: 1,
-        maxAttempts: 3,
-      }),
-    ).toMatchObject({ kind: 'blocked', blocker: { kind: 'human', reason: 'fault_origin_spec' } });
+  it('routes a blocking Specification Finding to re-specification, before the Plan and the cap (#47)', () => {
+    for (const n of [1, 3]) {
+      expect(
+        routeFailedAttempt({
+          exitReason: 'changes_requested',
+          findings: [finding('plan'), finding('spec'), finding('implementation')],
+          n,
+          maxAttempts: 3,
+        }),
+      ).toEqual({ kind: 'respecify' });
+    }
+  });
+
+  it('routes a blocking Plan Finding back to planning, even on the last Attempt (B4)', () => {
+    for (const n of [1, 3]) {
+      expect(
+        routeFailedAttempt({
+          exitReason: 'changes_requested',
+          findings: [finding('implementation'), finding('plan'), finding('infrastructure')],
+          n,
+          maxAttempts: 3,
+        }),
+      ).toEqual({ kind: 'replan' });
+    }
   });
 
   it('blocks on infrastructure when a blocking Finding blames the infrastructure', () => {

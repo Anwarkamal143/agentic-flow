@@ -1,5 +1,6 @@
 import type {
   AcceptanceCriterion,
+  Approval,
   Artifact,
   Attempt,
   DeliveryReport,
@@ -7,6 +8,7 @@ import type {
   CancelJobInput,
   CreateJobInput,
   Job,
+  RequestReplanInput,
   JobSummary,
   Repository,
   Review,
@@ -17,7 +19,7 @@ import { resolveHome } from '@factory/home';
 import { ApiRequestError, findRuntime, type RuntimeClient } from '../client.js';
 import { EXIT_NOT_RUNNING } from './lifecycle.js';
 
-function client(): RuntimeClient | undefined {
+export function client(): RuntimeClient | undefined {
   const found = findRuntime(resolveHome());
   if (found.kind === 'not_running') {
     process.stderr.write('Runtime: not running. Run: factory start\n');
@@ -31,6 +33,8 @@ export interface JobCreateOptions {
   repo: string;
   title: string;
   description: string | undefined;
+  /** Overrides of the Job's concurrency limits (the runtime checks the range). */
+  concurrency?: CreateJobInput['concurrency'];
 }
 
 /** `factory job create`: records a Job for a registered Repository. */
@@ -52,6 +56,9 @@ export async function jobCreate(opts: JobCreateOptions): Promise<number> {
     repositoryId: repo.id,
     title: opts.title,
     description: opts.description ?? '',
+    ...(opts.concurrency === undefined || Object.keys(opts.concurrency).length === 0
+      ? {}
+      : { concurrency: opts.concurrency }),
   };
   const job = await api.json<Job>('POST', '/v1/jobs', { body: input });
   process.stdout.write(`Created Job ${job.id} for ${repo.name}\n`);
@@ -138,12 +145,71 @@ export async function jobCancel(id: string, opts: { reason: string | undefined }
       });
       process.stdout.write(`Cancelled Job ${cancelled.id}\n`);
       writeJob(cancelled);
+      await writeCleanupItem(api, cancelled.id);
       return 0;
     } catch (err) {
       const conflict = err instanceof ApiRequestError && err.body?.error === 'version_conflict';
       if (!conflict || attempt >= CANCEL_TRIES) throw err;
     }
   }
+}
+
+/**
+ * `factory job replan <job> --feedback <text>` (`requestReplan`, ADR-0029):
+ * asks for a Replan of a Job in execution. Nothing new is dispatched from
+ * then on; planning starts once no Attempt is in flight. At `maxReplans` the
+ * request waits in a Blocker Approval instead (its id is printed).
+ */
+export async function jobReplan(id: string, opts: { feedback: string }): Promise<number> {
+  const api = client();
+  if (api === undefined) return EXIT_NOT_RUNNING;
+  for (let attempt = 1; ; attempt++) {
+    const job = await getJob(api, id);
+    if (job === undefined) return 1;
+    const input: RequestReplanInput = { expectedVersion: job.version, feedback: opts.feedback };
+    try {
+      const result = await api.json<Job & { capApprovalId?: string }>(
+        'POST',
+        `/v1/jobs/${encodeURIComponent(id)}/replan`,
+        { body: input },
+      );
+      process.stdout.write(
+        result.capApprovalId === undefined
+          ? `Replan requested for Job ${result.id} (${String(result.replans.used)} of ${String(result.replans.max)} Replans used). ` +
+              'Nothing new is dispatched; planning starts once no Attempt is in flight, and the new Plan waits at plan_approval.\n'
+          : `Job ${result.id} has used ${String(result.replans.used)} of ${String(result.replans.max)} Replans (maxReplans): ` +
+              `the request waits in Blocker Approval ${result.capApprovalId}. ` +
+              `Grant one more Replan with: factory inbox decide ${result.capApprovalId} grant_replan\n`,
+      );
+      return 0;
+    } catch (err) {
+      if (!(err instanceof ApiRequestError)) throw err;
+      const conflict = err.body?.error === 'version_conflict';
+      if (conflict && attempt < CANCEL_TRIES) continue;
+      process.stderr.write(`factory: ${err.body?.error ?? 'error'}: ${err.message}\n`);
+      return 1;
+    }
+  }
+}
+
+/**
+ * The Job's `cleanup` Inbox Item, opened once the cancel stopped everything
+ * (ADR-0027): its id and how to decide it, or why there is none.
+ */
+async function writeCleanupItem(api: RuntimeClient, jobId: string): Promise<void> {
+  const items = await api.json<Approval[]>('GET', '/v1/inbox?all=true');
+  const item = items.find((i) => i.jobId === jobId && i.kind === 'cleanup');
+  if (item === undefined) {
+    process.stdout.write('No cleanup Approval: the cancel left no preserved Worktree.\n');
+    return;
+  }
+  process.stdout.write(
+    [
+      `Cleanup Approval ${item.id}: ${item.question} (default: ${item.recommended ?? 'keep'}; Task Branches are always kept)`,
+      `  decide: factory inbox decide ${item.id} keep|discard --expect-version ${String(item.version)}`,
+      '',
+    ].join('\n'),
+  );
 }
 
 async function getJob(api: RuntimeClient, id: string): Promise<Job | undefined> {
@@ -159,7 +225,14 @@ async function getJob(api: RuntimeClient, id: string): Promise<Job | undefined> 
 }
 
 function writeJob(job: Job): void {
-  const config = Object.entries(job.effectiveConfig)
+  type Config = Job['effectiveConfig'];
+  type Setting = Config[Exclude<keyof Config, 'concurrency'>] | Config['concurrency']['perJob'];
+  const { concurrency, ...settings } = job.effectiveConfig;
+  const entries: [string, Setting][] = [
+    ...Object.entries(settings),
+    ...Object.entries(concurrency).map(([key, v]): [string, Setting] => [`concurrency.${key}`, v]),
+  ];
+  const config = entries
     .map(([key, v]) =>
       typeof v.value === 'object'
         ? `${key} (from ${v.source})`
@@ -173,6 +246,7 @@ function writeJob(job: Job): void {
     `  repository: ${job.repositoryId}`,
     `  recipe:     ${job.workflowSnapshot.recipeId} v${String(job.workflowSnapshot.recipeVersion)}`,
     `  config:     ${config}`,
+    `  replans:    ${String(job.replans.used)} of ${String(job.replans.max)} used${job.replanRequested ? '; replan requested, waiting for the Attempts in flight' : ''}`,
     `  version:    ${String(job.version)}`,
     `  created:    ${job.createdAt} by ${job.createdBy}`,
     'Stages:',
@@ -199,7 +273,7 @@ function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
     lines.push('Tasks:');
     for (const t of tasks) {
       lines.push(
-        `  ${t.key.padEnd(14)} ${t.state.padEnd(10)} ${t.title}`,
+        `  ${t.key.padEnd(14)} ${(t.cancelReason === null ? t.state : `${t.state} (${t.cancelReason})`).padEnd(10)} ${t.title}`,
         `    writable:  ${t.scope.writable.join(', ')}`,
         `    forbidden: ${t.scope.forbidden.join(', ') || '(none)'}`,
         `    verify:    ${t.verification.map((v) => `${v.key}: ${v.command}`).join('; ')}`,
@@ -288,16 +362,29 @@ function writeAttempts(
 }
 
 function writeDelivery(report: DeliveryReport): void {
+  const version: number = report.reportVersion;
+  if (version < 3) {
+    // A report written before v3 (ADR-0028) has no branch list: show where it is.
+    process.stdout.write(
+      `Delivery: a v${String(version)} Delivery Report; read its report Artifact.\n`,
+    );
+    return;
+  }
   const lines = [
-    'Delivery (local branch in the Factory Clone):',
+    'Delivery (local branches in the Factory Clone):',
+    `  ${report.statement}`,
     `  clone: ${report.repository.clonePath}`,
   ];
-  for (const t of report.tasks) {
+  for (const b of report.branches) {
+    const state = b.cancelReason === null ? b.state : `${b.state} (${b.cancelReason})`;
     lines.push(
-      `  ${t.key}: ${t.branch} at ${t.headSha.slice(0, 12)}`,
-      `    fetch from your checkout: ${t.fetchCommand}`,
+      `  ${b.key}: ${state}${b.leaf ? ', leaf' : ''}` +
+        (b.branch === null ? ', no branch' : `, ${b.branch}`) +
+        (b.headSha === null ? '' : ` at ${b.headSha.slice(0, 12)}`),
     );
+    if (b.fetchCommand !== null) lines.push(`    fetch from your checkout: ${b.fetchCommand}`);
   }
+  lines.push(...report.notes.map((n) => `  ${n}`));
   if (report.knownLimitations.length > 0) {
     lines.push('Known limitations:', ...report.knownLimitations.map((l) => `  - ${l}`));
   }
