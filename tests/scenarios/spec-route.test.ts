@@ -300,6 +300,7 @@ describe('the spec Fault Origin route', () => {
     expect(tasks.map((t) => [t.id === task?.id, t.state])).toEqual([
       [true, 'cancelled'],
       [false, 'approved'],
+      [false, 'approved'], // the Integration Task
     ]);
     expect((await specsOf(again, job.id)).map((a) => a.id)).toEqual([oldSpec?.id, newSpec?.id]);
     expect((await criteriaOf(again, job.id)).find((c) => c.code === 'AC-01')?.text).toBe(V2);
@@ -407,6 +408,7 @@ describe('the spec Fault Origin route', () => {
     expect(attempts.map((a) => [a.n, a.cause, a.state])).toEqual([
       [1, 'initial', 'failed'],
       [2, 'rework', 'passed'],
+      [1, 'merge', 'passed'],
     ]);
     expect(attempts[1]?.packet.context.guidance.map((g) => g.text)).toEqual([
       'Keep the spec; add a JSDoc comment.',
@@ -436,7 +438,11 @@ describe('the spec Fault Origin route', () => {
     expect((await decide(rt, capped, 'replan', 'Plan it again.')).status).toBe(200);
     const done = await waitForJob(rt, job.id, jobSettled, 30_000);
     expect(done.status, rt.output()).toBe('completed');
-    expect((await tasksOf(rt, job.id)).map((t) => t.state)).toEqual(['cancelled', 'approved']);
+    expect((await tasksOf(rt, job.id)).map((t) => t.state)).toEqual([
+      'cancelled',
+      'approved',
+      'approved', // the Integration Task
+    ]);
     expect((await jobOf(rt, job.id)).replans).toEqual({ used: 2, max: 2 });
     expect((await criteriaOf(rt, job.id)).find((c) => c.code === 'AC-01')?.text).toBe(V1);
   });

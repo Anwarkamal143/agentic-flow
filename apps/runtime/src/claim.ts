@@ -2,7 +2,7 @@
  * Claiming a ready Task (ARCHITECTURE §12 steps 1–3, ADR-0020). One
  * `BEGIN IMMEDIATE` transaction inserts the Task lease and one capacity token
  * per limit (global, per Repository, per Job), then moves the Task
- * `ready → claimed` (and `execution` `queued → running`). Any failure rolls
+ * `ready → claimed` (and its Stage, `execution` or `integration`, `queued → running`). Any failure rolls
  * all of it back. The tokens share the Task lease's `lease_id`, so they are
  * released with it when the Attempt ends.
  *
@@ -15,10 +15,12 @@ import {
   CAPACITY_RESOURCE,
   claimCapacity,
   EffectiveConfigSchema,
+  stageOfTask,
+  TaskKindSchema,
   type CapacityDecision,
   type HeldCapacityToken,
 } from '@factory/domain';
-import { and, eq, inArray, like } from 'drizzle-orm';
+import { and, eq, inArray, like, sql } from 'drizzle-orm';
 import { READY_TASK_ORDER } from './dispatch.js';
 import { changeJob, stepTask } from './engine.js';
 import { newId } from './ids.js';
@@ -86,11 +88,15 @@ export function claimNextTask(db: FactoryDb, opts: ClaimOptions): Claim | undefi
   const candidates = db
     .select({ jobId: schema.tasks.jobId, taskId: schema.tasks.id })
     .from(schema.tasks)
+    // A Plan Task runs in `execution`, the Integration Task in `integration` (ADR-0034).
     .innerJoin(
       schema.stageRuns,
       and(
         eq(schema.stageRuns.jobId, schema.tasks.jobId),
-        eq(schema.stageRuns.stageId, 'execution'),
+        eq(
+          schema.stageRuns.stageId,
+          sql`case when ${schema.tasks.kind} = 'integration' then 'integration' else 'execution' end`,
+        ),
       ),
     )
     // A Job whose Replan is requested dispatches nothing new, Rework included (ADR-0029).
@@ -167,8 +173,9 @@ function claimTask(
           capacity: decision.tokens.map((t) => `${t.resourceKind}/${t.resourceId}`),
         },
       });
-      const execution = state.stageRuns.filter((r) => r.stageId === 'execution').at(-1);
-      if (execution?.state === 'queued') step(execution, 'running');
+      const stageId = stageOfTask(TaskKindSchema.parse(task.kind));
+      const stage = state.stageRuns.filter((r) => r.stageId === stageId).at(-1);
+      if (stage?.state === 'queued') step(stage, 'running');
       return { jobId, taskId, leaseId, tokens: decision.tokens };
     },
   );

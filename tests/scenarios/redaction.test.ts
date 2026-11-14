@@ -104,6 +104,10 @@ describe('redaction', () => {
       ['add-sum', 1, 'verification', 'typecheck'],
       ['add-sum', 1, 'verification', 'leak'],
       ['add-sum', 1, 'harness', 'reviewer'],
+      // The Integration Task re-runs every command on the integration head, redacted the same.
+      ['integration', 1, 'verification', 'test'],
+      ['integration', 1, 'verification', 'typecheck'],
+      ['integration', 1, 'verification', 'leak'],
     ]);
 
     // Nowhere else either: Artifacts, events, the SSE stream, the runtime's output.

@@ -146,7 +146,10 @@ describe('crash recovery (A5)', () => {
     const job = await waitForJob(again, jobId, settled, 30_000);
     expect(job.status, again.output()).toBe('completed');
 
-    const [attempt, more] = await json<AttemptBody[]>(again.request(`/v1/jobs/${jobId}/attempts`));
+    // The Integration Task's merge Attempt runs no Harness: only the Plan Task's Attempts count here.
+    const [attempt, more] = (
+      await json<AttemptBody[]>(again.request(`/v1/jobs/${jobId}/attempts`))
+    ).filter((a) => a.cause !== 'merge');
     expect(more, 'no second Attempt').toBeUndefined();
     expect(attempt).toMatchObject({ n: 1, cause: 'initial', state: 'passed' });
     expect(
@@ -186,6 +189,7 @@ describe('crash recovery (A5)', () => {
     expect(attempts.map((a) => [a.n, a.cause, a.state, a.exitReason])).toEqual([
       [1, 'initial', 'interrupted', 'interrupted'],
       [2, 'retry', 'passed', 'completed'],
+      [1, 'merge', 'passed', 'completed'],
     ]);
     expect([...(await developerStarts(again, jobId)).values()]).toEqual([1, 1]);
   });
@@ -216,6 +220,7 @@ describe('crash recovery (A5)', () => {
       [1, 'initial', 'interrupted', 'interrupted'],
       [2, 'retry', 'failed', 'gates_failed'],
       [3, 'rework', 'passed', 'completed'],
+      [1, 'merge', 'passed', 'completed'],
     ]);
   });
 
@@ -316,8 +321,9 @@ describe('crash recovery (A5)', () => {
     const worktrees = await json<{ path: string; state: string }[]>(
       again.request(`/v1/jobs/${created.id}/worktrees`),
     );
-    expect(worktrees.map((w) => w.state)).toEqual(['removed']);
-    expect(existsSync(worktrees[0]?.path ?? '')).toBe(false);
+    // The Task's Worktree and the Integration Task's.
+    expect(worktrees.map((w) => w.state)).toEqual(['removed', 'removed']);
+    for (const w of worktrees) expect(existsSync(w.path), w.path).toBe(false);
   });
 });
 

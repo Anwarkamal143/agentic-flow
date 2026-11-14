@@ -6,7 +6,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { schema, type FactoryDb, type Tx } from '@factory/db';
-import { RESULT_FILE } from '@factory/domain';
+import { integrationBranch, RESULT_FILE } from '@factory/domain';
 import { commitAll, infoExcludePath, uncommittedPaths } from '@factory/git';
 import { and, eq } from 'drizzle-orm';
 import { releaseClaim } from './claim.js';
@@ -38,6 +38,23 @@ export function taskWorktree(input: {
       `${input.taskId}-${input.taskKey}`,
     ),
     branch: `factory/${input.jobId}/${input.taskId}-${input.taskKey}`,
+  };
+}
+
+/**
+ * The Integration Task's Worktree (ADR-0034): its own directory (named by the
+ * Task id, so a rebuild after a Replan never reuses the old one) on the Job's
+ * Integration Branch `factory/<job-id>/integration`.
+ */
+export function integrationWorktree(input: {
+  workspaceRoot: string;
+  repositoryId: string;
+  jobId: string;
+  taskId: string;
+}): { path: string; branch: string } {
+  return {
+    path: join(input.workspaceRoot, input.repositoryId, input.jobId, `${input.taskId}-integration`),
+    branch: integrationBranch(input.jobId),
   };
 }
 

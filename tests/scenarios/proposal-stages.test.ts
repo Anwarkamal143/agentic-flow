@@ -34,6 +34,7 @@ interface CriterionBody {
 
 interface TaskBody {
   id: string;
+  kind: string;
   key: string;
   title: string;
   repositoryId: string;
@@ -69,6 +70,7 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       ['planning', 'succeeded'],
       ['plan_approval', 'skipped'],
       ['execution', 'succeeded'],
+      ['integration', 'succeeded'],
       ['closure', 'succeeded'],
     ]);
     expect(job).toMatchObject({ status: 'completed', currentStage: 'closure' });
@@ -82,7 +84,11 @@ describe('proposal Stages, driven by the Fake Harness', () => {
     ]);
 
     const tasks = await json<TaskBody[]>(rt.request(`/v1/jobs/${job.id}/tasks`));
-    expect(tasks).toHaveLength(1);
+    // The Plan's one Task, then the factory's own Integration Task (ADR-0034).
+    expect(tasks.map((t) => [t.kind, t.key])).toEqual([
+      ['plan', 'add-sum'],
+      ['integration', 'integration'],
+    ]);
     expect(tasks[0]).toMatchObject({
       key: 'add-sum',
       title: 'Add sum() to math.ts',

@@ -189,6 +189,7 @@ describe('B1: an A → {B, C} → D DAG', { timeout: 60_000 }, () => {
       ['b', 'approved'],
       ['c', 'approved'],
       ['d', 'approved'],
+      ['integration', 'approved'],
     ]);
     const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((k) => {
       const span = byKey.get(k);
@@ -209,7 +210,8 @@ describe('B1: an A → {B, C} → D DAG', { timeout: 60_000 }, () => {
     expect(maxInFlight(byKey.values())).toBe(2);
 
     const attempts = await json<AttemptBody[]>(rt.request(`/v1/jobs/${job.id}/attempts`));
-    expect(attempts, 'one Attempt per Task').toHaveLength(4);
+    // One per Plan Task, then the Integration Task's merge Attempt.
+    expect(attempts, 'one Attempt per Task').toHaveLength(5);
     const attemptOf = (span: Span) => {
       const found = attempts.find((x) => x.taskId === span.id);
       if (found?.headSha == null) throw new Error('no approved head');

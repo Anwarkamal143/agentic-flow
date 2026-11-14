@@ -364,6 +364,7 @@ describe('the plan Fault Origin route', () => {
     expect(tasks.map((t) => [t.key, t.state])).toEqual([
       ['a', 'cancelled'],
       ['a', 'approved'],
+      ['integration', 'approved'],
     ]);
     expect((await jobOf(rt, job.id)).replans).toEqual({ used: 1, max: 1 });
   });

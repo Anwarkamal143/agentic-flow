@@ -25,6 +25,7 @@ import { git, resolveCommit } from '@factory/git';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { currentCriteria } from './criteria.js';
 import { stepTask } from './engine.js';
+import { cancelIntegrationTasks } from './integration.js';
 import { newId } from './ids.js';
 
 export interface JobRepository {
@@ -97,7 +98,8 @@ export type PlanReader = (artifactId: string) => PlanProposal;
  * Job's Tasks the new Plan leaves unaffected is kept (its id, Task Branch,
  * Worktree, Attempts and cap counts) and moved onto the new Plan; every
  * other unfinished one is cancelled, with its open Inbox Items, its Worktree
- * left preserved; every entry nothing carries becomes a new Task.
+ * left preserved; every entry nothing carries becomes a new Task. An
+ * unfinished Integration Task is cancelled too (ADR-0034).
  */
 export function persistPlanTasks(
   tx: Tx,
@@ -116,10 +118,14 @@ export function persistPlanTasks(
     });
   const op = { jobId: ctx.jobId, actor: ctx.actor };
 
+  // The Integration Task is not part of any Plan: never carried over, cancelled instead (ADR-0034).
+  cancelIntegrationTasks(tx, op, (taskId) => {
+    cancelTaskItems(tx, op, taskId);
+  });
   const current = tx
     .select()
     .from(schema.tasks)
-    .where(eq(schema.tasks.jobId, ctx.jobId))
+    .where(and(eq(schema.tasks.jobId, ctx.jobId), eq(schema.tasks.kind, 'plan')))
     .orderBy(asc(sql`"tasks"."rowid"`))
     .all();
   const plans = new Map<string, PlanProposal>();
@@ -344,6 +350,7 @@ export function cancelPlanTasks(
     .where(
       and(
         eq(schema.tasks.jobId, op.jobId),
+        eq(schema.tasks.kind, 'plan'),
         eq(schema.tasks.planArtifactId, planArtifactId),
         inArray(schema.tasks.state, ['pending', 'ready', 'blocked', 'changes_requested']),
       ),

@@ -56,6 +56,9 @@ import {
   type PlanDecisionInput,
   type PlanView,
   type RequestPlanChangesInput,
+  stageOfTask,
+  TaskKindSchema,
+  integrationBranch,
 } from '@factory/domain';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -268,10 +271,7 @@ export class InboxService {
           reason: 'answered',
           payload: { approvalId: id, answeredAttemptId: row.subjectRef },
         });
-        const execution = state.stageRuns.filter((r) => r.stageId === 'execution').at(-1);
-        if (execution?.state === 'waiting_human' || execution?.state === 'blocked') {
-          step(execution, 'queued', { reason: `Question ${id} answered by ${actor}` });
-        }
+        requeueExecution(state, step, `Question ${id} answered by ${actor}`, task);
       },
     );
     this.onCommit();
@@ -654,12 +654,24 @@ export class InboxService {
     const spec = currentSpec(this.db, jobId);
     const triage = latestArtifact(this.db, jobId, 'triage');
     const config = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson));
-    const tasks = this.db
+    const rows = this.db
       .select()
       .from(schema.tasks)
       .where(eq(schema.tasks.planArtifactId, plan.id))
       .orderBy(asc(sql`"tasks"."rowid"`))
-      .all()
+      .all();
+    // The Integration Task is the factory's, not the Plan's (ADR-0034): listed apart.
+    const integrationTasks = rows
+      .filter((t) => t.kind === 'integration')
+      .map((t) => ({
+        id: t.id,
+        key: t.key,
+        repositoryId: t.repositoryId,
+        state: t.state,
+        branch: integrationBranch(jobId),
+      }));
+    const tasks = rows
+      .filter((t) => t.kind === 'plan')
       .map((t) => {
         const d = TaskDefinitionSchema.parse(JSON.parse(t.definitionJson));
         return {
@@ -719,6 +731,7 @@ export class InboxService {
       triageRisk,
       repositories,
       tasks,
+      integrationTasks,
       parallel: parallelWaves(tasks),
       decisionPoints: humanDecisionPoints(
         WorkflowSnapshotSchema.parse(JSON.parse(job.workflowSnapshotJson)),
@@ -837,11 +850,20 @@ function requireAttemptRow(tx: Tx, id: string): typeof schema.attempts.$inferSel
   return row;
 }
 
-/** Re-queues `execution` once a Blocker is cleared, so the next claim picks the Task up. */
-function requeueExecution(state: JobState, step: StageRunStepper, reason: string): void {
-  const execution = state.stageRuns.filter((r) => r.stageId === 'execution').at(-1);
-  if (execution?.state === 'waiting_human' || execution?.state === 'blocked') {
-    step(execution, 'queued', { reason });
+/**
+ * Re-queues the Stage `task` runs in (`execution`, or `integration` for the
+ * Integration Task) once a Blocker is cleared, so the next claim picks it up.
+ */
+function requeueExecution(
+  state: JobState,
+  step: StageRunStepper,
+  reason: string,
+  task: { kind: string },
+): void {
+  const stageId = stageOfTask(TaskKindSchema.parse(task.kind));
+  const stage = state.stageRuns.filter((r) => r.stageId === stageId).at(-1);
+  if (stage?.state === 'waiting_human' || stage?.state === 'blocked') {
+    step(stage, 'queued', { reason });
   }
 }
 
@@ -878,6 +900,7 @@ function applyGrant(
       state,
       step,
       `Blocker Approval ${item.id}: ${actor} granted +${String(grant)}`,
+      task,
     );
     return;
   }
@@ -956,7 +979,12 @@ function applyRework(
     reason: 'rework_with_guidance',
     payload: { approvalId: item.id, attemptId: blocker.attemptId, nextAttempt: used + 1 },
   });
-  requeueExecution(state, step, `Blocker Approval ${item.id}: ${actor} chose Rework with guidance`);
+  requeueExecution(
+    state,
+    step,
+    `Blocker Approval ${item.id}: ${actor} chose Rework with guidance`,
+    task,
+  );
 }
 
 /**
@@ -1009,6 +1037,7 @@ function applyRetry(
     state,
     step,
     `Blocker Approval ${item.id}: ${actor} chose a Retry (process ${process})`,
+    task,
   );
 }
 

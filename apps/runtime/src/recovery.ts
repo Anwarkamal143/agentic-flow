@@ -24,10 +24,11 @@ import {
 } from '@factory/domain';
 import { resolveCommit, uncommittedPaths } from '@factory/git';
 import { attachGuarded, inspectSpool } from '@factory/harness';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { takeOverClaim } from './claim.js';
 import { changeJob, stepAttempt, stepTask, stepWorktree } from './engine.js';
 import { leaseExpiry, parseProcess, settleExecution, type Resumption } from './execution.js';
+import { latestStageRunOfTask } from './task-stage.js';
 import { releaseAttemptTokens, requireWorktree } from './worktree.js';
 
 const ACTOR = 'system:recovery';
@@ -57,7 +58,7 @@ export async function recoverTasks(opts: RecoveryOptions): Promise<Resumption[]>
       .from(schema.attempts)
       .where(and(eq(schema.attempts.taskId, task.id), inArray(schema.attempts.state, IN_PROGRESS)))
       .get();
-    const cancelled = executionCancelled(db, task.jobId);
+    const cancelled = executionCancelled(db, task.jobId, task.id);
     if (attempt === undefined) {
       // Claimed, but its Attempt never started: nothing ran. Give the claim back.
       changeJob(db, { jobId: task.jobId, expectedVersion: 'current', actor: ACTOR }, (tx) => {
@@ -188,15 +189,12 @@ export async function recoverTasks(opts: RecoveryOptions): Promise<Resumption[]>
   return resumptions;
 }
 
-/** Whether the Job's `execution` was cancelled (its work in flight must stop, not go on). */
-function executionCancelled(db: FactoryDb, jobId: string): boolean {
-  const run = db
-    .select({ state: schema.stageRuns.state })
-    .from(schema.stageRuns)
-    .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'execution')))
-    .orderBy(desc(schema.stageRuns.attempt))
-    .get();
-  return run?.state === 'cancelled';
+/**
+ * Whether the Stage the Task runs in (`execution`, or `integration` for the
+ * Integration Task) was cancelled: its work in flight must stop, not go on.
+ */
+function executionCancelled(db: FactoryDb, jobId: string, taskId: string): boolean {
+  return latestStageRunOfTask(db, jobId, taskId)?.state === 'cancelled';
 }
 
 /** `unknown` when the Worktree is gone or git can't read it. */

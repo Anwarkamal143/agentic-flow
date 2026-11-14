@@ -128,9 +128,11 @@ export type AttemptExitReason = z.infer<typeof AttemptExitReasonSchema>;
  * Why an Attempt exists. `initial`: the Task's first. `rework`: the one before
  * failed a Gate or its review. `retry`: the one before was interrupted (an
  * infrastructure failure, not a verdict on the work). `answer`: a human
- * answered the questions of the one before (ADR-0023).
+ * answered the questions of the one before (ADR-0023). `merge`: the
+ * Integration Task's first, in which the factory merges the approved Task
+ * Branches and verifies the result; no Harness runs (ADR-0034).
  */
-export const AttemptCauseSchema = z.enum(['initial', 'rework', 'retry', 'answer']);
+export const AttemptCauseSchema = z.enum(['initial', 'rework', 'retry', 'answer', 'merge']);
 export type AttemptCause = z.infer<typeof AttemptCauseSchema>;
 
 /**
@@ -440,10 +442,10 @@ export const AttemptSchema = z.object({
 });
 export type Attempt = z.infer<typeof AttemptSchema>;
 
-// ---- Delivery Report (v3, ADR-0028: local branches in the Factory Clone) -------
+// ---- Delivery Report (v4: v3 of ADR-0028 plus the Integration Branch, ADR-0034) ----
 
 export const DeliveryReportSchema = z.object({
-  reportVersion: z.literal(3),
+  reportVersion: z.literal(4),
   /** How the Job ended: a `failed` Job's approved branches are partial results. */
   outcome: z.enum(['completed', 'failed']),
   /** One plain sentence on the outcome, saying so when the Job failed. */
@@ -528,6 +530,36 @@ export const DeliveryReportSchema = z.object({
       }),
     }),
   ),
+  /**
+   * The Integration Branch (ADR-0034), when the Job's Workflow Snapshot has an
+   * `integration` Stage and it ran; `null` otherwise (a `feature` v2 Job, or a
+   * failed execution). `fetchCommand` is offered only once its verification
+   * passed: the Task Branches are then not offered separately.
+   */
+  integration: z
+    .object({
+      taskId: z.string(),
+      state: TaskStateSchema,
+      branch: z.string(),
+      /** The default branch as freshly fetched when the branch was built. */
+      baseSha: z.string().nullable(),
+      headSha: z.string().nullable(),
+      /** The Task Branches merged `--no-ff`, in merge order. */
+      merged: z.array(z.object({ key: z.string(), branch: z.string(), headSha: z.string() })),
+      fetchCommand: z.string().nullable(),
+      /** The verification the factory re-ran on the integration head. */
+      verification: z.array(
+        z.object({
+          key: z.string(),
+          command: z.string(),
+          exitCode: z.number().int().nullable(),
+          verdict: EvidenceVerdictSchema,
+        }),
+      ),
+      /** Why the Integration Task did not finish, when it did not (its Blocker or last exit). */
+      problem: z.string().nullable(),
+    })
+    .nullable(),
   knownLimitations: z.array(z.string()),
 });
 export type DeliveryReport = z.infer<typeof DeliveryReportSchema>;

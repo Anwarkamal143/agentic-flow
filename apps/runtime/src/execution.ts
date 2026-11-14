@@ -53,6 +53,8 @@ import {
   type Usage,
   toolPolicyOf,
   type SecurityTier,
+  stageOfTask,
+  TaskKindSchema,
 } from '@factory/domain';
 import {
   addWorktree,
@@ -60,6 +62,7 @@ import {
   changedPaths,
   commitsBetween,
   fetchRemote,
+  releaseBranch,
   resolveCommit,
   uncommittedPaths,
   updateRef,
@@ -84,6 +87,11 @@ import { criteriaCoveredBy, currentSpec } from './criteria.js';
 import { blockOnBaseConflict, makeDependencyBase } from './dependency-base.js';
 import { settleExecution } from './keep-going.js';
 import {
+  blockOnIntegrationConflict,
+  integrationSources,
+  mergeTaskBranches,
+} from './integration.js';
+import {
   failClosure,
   nextClosure,
   runClosure,
@@ -101,6 +109,7 @@ import {
   type StageRunStepper,
 } from './engine.js';
 import { newId } from './ids.js';
+import { latestStageRunOfTask } from './task-stage.js';
 import { PassLoop } from './pass-loop.js';
 import { routeByFaultOrigin, type FaultRouteInput } from './fault-route.js';
 import { answersAfter, openQuestionItem } from './questions.js';
@@ -111,6 +120,7 @@ import {
   allocatePortBlock,
   commitLeftovers,
   excludeResultFile,
+  integrationWorktree,
   releaseAttemptTokens,
   requireWorktree,
   taskWorktree,
@@ -129,6 +139,10 @@ const DEFAULT_REVIEW_WALL_CLOCK_MS = 10 * 60_000;
 const DEVELOPER_RUNS = 2;
 /** The security tier every Harness Run runs under in Phase A: Tier 0, the local guardrail. */
 const TIER: SecurityTier = 'local';
+/** A merge Attempt's `harness_id`: the factory merged, no Harness ran (ADR-0034). */
+const MERGE_HARNESS_ID = 'factory';
+/** A merge Attempt sends no prompt: its template is recorded as none. */
+const MERGE_TEMPLATE = { id: 'none', hash: 'none' };
 
 export { LEASE_HEARTBEAT_MS, LEASE_TTL_MS, leaseExpiry } from './claim.js';
 export { claimNextTask, type Claim, type ClaimOptions } from './claim.js';
@@ -497,15 +511,11 @@ export class TaskScheduler {
    * Why the Attempt's work must stop now: the runtime is shutting down (the
    * Attempt is left for recovery), or its Job was cancelled.
    */
-  private stopReason(jobId: string): 'closed' | 'cancelled' | undefined {
+  private stopReason(jobId: string, taskId: string): 'closed' | 'cancelled' | undefined {
     if (this.closed) return 'closed';
-    const execution = this.opts.db
-      .select({ state: schema.stageRuns.state })
-      .from(schema.stageRuns)
-      .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'execution')))
-      .orderBy(desc(schema.stageRuns.attempt))
-      .get();
-    return execution?.state === 'cancelled' ? 'cancelled' : undefined;
+    // The Stage the Task runs in: `execution`, or `integration` for the Integration Task.
+    const stage = latestStageRunOfTask(this.opts.db, jobId, taskId);
+    return stage?.state === 'cancelled' ? 'cancelled' : undefined;
   }
 
   /**
@@ -514,7 +524,7 @@ export class TaskScheduler {
    */
   private async stopped(ctx: AttemptContext): Promise<boolean> {
     if (sweptAttempt(ctx.attemptId)) return true; // its lease expired: the sweeper ends it (ADR-0024)
-    const reason = this.stopReason(ctx.job.id);
+    const reason = this.stopReason(ctx.job.id, ctx.task.id);
     if (reason === undefined) return false;
     if (reason === 'cancelled') await this.recordCancelled(ctx.attemptId);
     return true;
@@ -542,6 +552,19 @@ export class TaskScheduler {
       .where(eq(schema.attempts.taskId, taskId))
       .orderBy(desc(schema.attempts.n))
       .get();
+    // The Integration Task's first Attempt merges and verifies; no Harness runs (ADR-0034).
+    // A merge Attempt interrupted before its Gates ran is merged again, never handed to a Harness.
+    if (
+      task.kind === 'integration' &&
+      (previous === undefined || (previous.cause === 'merge' && previous.state === 'interrupted'))
+    ) {
+      await this.runMerge(
+        harness,
+        { task, definition, job, repo, n: (previous?.n ?? 0) + 1 },
+        slot,
+      );
+      return;
+    }
     const clone = repo.clonePath;
     const attemptId = newId('att');
     const n = (previous?.n ?? 0) + 1;
@@ -790,6 +813,290 @@ export class TaskScheduler {
   }
 
   /**
+   * The Integration Task's merge Attempt (ADR-0034). Under the clone's setup
+   * lock: the default branch is fetched, the approved Task Branches merged
+   * onto it `--no-ff` in topological order (ties by key), and the result
+   * checked out in a new Worktree on `factory/<job-id>/integration`. A
+   * conflict blocks the Task with `base_merge_conflict` (no Attempt or
+   * Worktree is made). Otherwise the Attempt starts at `verifying` and the
+   * factory verifies the integration head like any Attempt.
+   */
+  private async runMerge(
+    harness: AgentHarness,
+    input: {
+      task: TaskRow;
+      definition: TaskDefinition;
+      job: typeof schema.jobs.$inferSelect;
+      repo: typeof schema.repositories.$inferSelect;
+      n: number;
+    },
+    slot: Slot,
+  ): Promise<void> {
+    const { db } = this.opts;
+    const { task, definition, job, repo, n } = input;
+    const clone = repo.clonePath;
+    const at = integrationWorktree({
+      workspaceRoot: this.opts.workspaceRoot,
+      repositoryId: repo.id,
+      jobId: job.id,
+      taskId: task.id,
+    });
+    const sources = integrationSources(db, task);
+    const built = await this.withClone(clone, async () => {
+      await fetchRemote(clone);
+      const baseSha =
+        (await resolveCommit(clone, `refs/remotes/origin/${repo.defaultBranch}`)) ??
+        (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
+      if (baseSha === undefined)
+        throw new Error(`the Factory Clone has no ${repo.defaultBranch} to integrate onto`);
+      const merge = await mergeTaskBranches(clone, {
+        baseSha,
+        integrationBranch: at.branch,
+        sources,
+      });
+      if (merge.kind === 'conflict') return { ...merge, baseSha };
+      await excludeResultFile(clone);
+      mkdirSync(dirname(at.path), { recursive: true });
+      // A rebuild after a Replan: the cancelled Integration Task's Worktree lets go of the
+      // branch (detached at the same commit; every Attempt head stays at its pinned ref).
+      const detached = await releaseBranch(clone, at.branch);
+      await addWorktree({
+        repo: clone,
+        path: at.path,
+        branch: at.branch,
+        startSha: merge.headSha,
+        resetBranch: true,
+      });
+      return { ...merge, baseSha, detached };
+    });
+    if (built.kind === 'conflict') {
+      blockOnIntegrationConflict(
+        db,
+        { jobId: job.id, actor: ACTOR },
+        task.id,
+        { ...built, integrationBranch: at.branch },
+        settleExecution,
+      );
+      this.opts.onCommit();
+      return;
+    }
+    const { baseSha, headSha } = built;
+    const attemptId = newId('att');
+    const worktreeId = newId('wt');
+    const packet = this.packet({
+      job,
+      task,
+      definition,
+      repo,
+      path: at.path,
+      branch: at.branch,
+      baseSha,
+      wallClockMs: this.wallClockMs,
+      priorFindings: [],
+      answers: [],
+      guidance: [],
+    });
+    const portBase = changeJob(
+      db,
+      { jobId: job.id, expectedVersion: 'current', actor: ACTOR },
+      (tx) => {
+        const op = { jobId: job.id, actor: ACTOR };
+        const base = allocatePortBlock(tx, {
+          holder: `${this.holder}/${attemptId}`,
+          expiresAt: leaseExpiry(),
+        });
+        const now = new Date().toISOString();
+        tx.insert(schema.worktrees)
+          .values({
+            id: worktreeId,
+            jobId: job.id,
+            taskId: task.id,
+            repositoryId: repo.id,
+            path: at.path,
+            branch: at.branch,
+            baseSha,
+            state: 'active',
+            portBase: base,
+            createdAt: now,
+          })
+          .run();
+        appendEvent(tx, {
+          entityKind: 'worktree',
+          entityId: worktreeId,
+          jobId: job.id,
+          type: 'worktree.created',
+          actor: ACTOR,
+          payload: {
+            taskId: task.id,
+            to: 'active',
+            path: at.path,
+            branch: at.branch,
+            baseSha,
+            portBase: base,
+            // What the Integration Branch holds: each Task Branch merged --no-ff, in this order.
+            integrated: sources
+              .filter((src) => built.merged.includes(src.key))
+              .map((src) => ({ key: src.key, branch: src.branch, headSha: src.headSha })),
+            headSha,
+            ...(built.detached.length === 0 ? {} : { detached: built.detached }),
+          },
+        });
+        tx.insert(schema.attempts)
+          .values({
+            id: attemptId,
+            taskId: task.id,
+            n,
+            cause: 'merge',
+            // The factory merged; verification runs under the Tier 0 guardrail like any Attempt's.
+            state: 'verifying',
+            harnessId: MERGE_HARNESS_ID,
+            harnessVersion: null,
+            tier: TIER,
+            promptTemplateId: MERGE_TEMPLATE.id,
+            promptTemplateHash: MERGE_TEMPLATE.hash,
+            packetJson: JSON.stringify(packet),
+            worktreeId,
+            baseSha,
+            commitsJson: '[]',
+            protocolViolationsJson: '[]',
+            startedAt: now,
+            version: 0,
+          })
+          .run();
+        appendEvent(tx, {
+          entityKind: 'attempt',
+          entityId: attemptId,
+          jobId: job.id,
+          type: 'attempt.started',
+          actor: ACTOR,
+          payload: {
+            taskId: task.id,
+            n,
+            cause: 'merge',
+            harnessId: MERGE_HARNESS_ID,
+            tier: TIER,
+            worktreeId,
+            baseSha,
+            headSha,
+            merged: built.merged,
+          },
+        });
+        const claimed = requireTask(tx, task.id, 'claimed');
+        const running = stepTask(tx, op, claimed, 'running', { payload: { attemptId } });
+        stepTask(tx, op, running, 'verifying', { payload: { attemptId, headSha } });
+        return base;
+      },
+    );
+    this.opts.onCommit();
+    const ctx: AttemptContext = {
+      harness,
+      slot,
+      job,
+      task,
+      definition,
+      repo,
+      attemptId,
+      n,
+      path: at.path,
+      baseSha,
+      worktreeId,
+      env: guardrailEnv(this.opts.runtimeEnv, {
+        FACTORY_JOB_ID: job.id,
+        FACTORY_TASK_ID: task.id,
+        FACTORY_ATTEMPT_ID: attemptId,
+        FACTORY_PORT_BASE: String(portBase),
+        PORT: String(portBase),
+        CI: 'true',
+      }),
+      packet,
+    };
+    if (await this.stopped(ctx)) return;
+    await this.verifyMerge(ctx);
+  }
+
+  /**
+   * The factory's Gates on the integration head (ADR-0034): the path-scope
+   * Gate over the union of the Plan Tasks' writable globs, every de-duplicated
+   * verification command, and their criteria, with Evidence tied to the
+   * integration `(head_sha, base_sha)`. No review runs here (the Integration
+   * Review is its own Stage). A failed Gate ends the Attempt `gates_failed`,
+   * routed like any other. Reads what it needs from git and the row, so a
+   * resumed verification starts here too.
+   */
+  private async verifyMerge(ctx: AttemptContext): Promise<void> {
+    const { path, baseSha, attemptId, definition } = ctx;
+    const headSha = await resolveCommit(path, 'HEAD');
+    if (headSha === undefined) throw new Error(`the Worktree ${path} has no HEAD`);
+    await updateRef(ctx.repo.clonePath, attemptRef(attemptId), headSha);
+    const facts: Inspection = {
+      headSha,
+      commits: (await commitsBetween(path, baseSha, headSha)).map((c) => c.sha),
+      wipCommit: null,
+      violations: [],
+      // No Harness ran, so no Task Result was asked for.
+      result: { kind: 'missing' },
+    };
+    const self = { id: attemptId, n: ctx.n };
+    const scopeViolations = checkPathScope(
+      await changedPathKinds(path, baseSha, headSha),
+      definition.scope,
+    );
+    let outcome: Outcome;
+    let verificationRuns: VerificationRunRecord[] = [];
+    if (scopeViolations.length > 0) {
+      outcome = {
+        state: 'failed',
+        exitReason: 'gates_failed',
+        detail: scopeViolations.map((v) => `[${v.rule}] ${v.message}`).join('; '),
+        findings: scopeViolations.map((v) => scopeFinding(self, v)),
+      };
+    } else {
+      const verified = await this.verify(ctx);
+      if (verified === undefined) return; // stopped during verification
+      verificationRuns = verified;
+      const at = { headSha, baseSha };
+      const problems: [rule: string, problem: string][] = [
+        ...verificationProblems(
+          at,
+          verificationRuns.map((r) => ({ ...r, ...at })),
+        ).map((p) => ['verification', p] as [string, string]),
+        ...(await worktreeProblems(path, headSha, 'verification')).map(
+          (p) => ['worktree.clean', p] as [string, string],
+        ),
+        ...commandCriteriaFailures(
+          verificationRuns,
+          criteriaCoveredBy(this.opts.db, ctx.job.id, definition.acceptance),
+        ).map((p) => ['criteria', p] as [string, string]),
+      ];
+      outcome =
+        problems.length === 0
+          ? {
+              state: 'passed',
+              exitReason: 'completed',
+              detail: `the Integration Branch's verification passed on ${headSha}`,
+            }
+          : {
+              state: 'failed',
+              exitReason: 'gates_failed',
+              detail: problems.map(([, p]) => p).join('; '),
+              findings: problems.map(([rule, p]) => gateFinding(self, rule, p)),
+            };
+    }
+    this.finish({
+      jobId: ctx.job.id,
+      taskId: ctx.task.id,
+      attemptId,
+      worktreeId: ctx.worktreeId,
+      baseSha,
+      inspection: facts,
+      resultContent: undefined,
+      verificationRuns,
+      outcome,
+      usage: null,
+    });
+  }
+
+  /**
    * Carries on with an Attempt a previous runtime left in progress, as
    * recovery decided (ADR-0012): re-attached to its Harness process, or
    * resumed at the factory's own step. Nothing that was stored is redone.
@@ -913,6 +1220,10 @@ export class TaskScheduler {
   private async verifyStep(ctx: AttemptContext): Promise<void> {
     const { path, baseSha, attemptId, definition, harness } = ctx;
     const attempt = requireAttempt(this.opts.db, attemptId);
+    if (attempt.cause === 'merge') {
+      await this.verifyMerge(ctx);
+      return;
+    }
     const developerExit: HarnessExit | null =
       attempt.developerExitJson === null
         ? null
@@ -1229,7 +1540,11 @@ export class TaskScheduler {
         prompt: input.prompt,
         cwd: ctx.path,
         env: ctx.env,
-        subject: { jobId: ctx.job.id, stageId: 'execution', taskKey: ctx.task.key },
+        subject: {
+          jobId: ctx.job.id,
+          stageId: stageOfTask(TaskKindSchema.parse(ctx.task.kind)),
+          taskKey: ctx.task.key,
+        },
         limits: { wallClockMs: input.wallClockMs, maxTurns: MAX_TURNS },
         policy: toolPolicyOf(ctx.job.configSnapshotJson, input.role),
         spool,
@@ -1262,7 +1577,7 @@ export class TaskScheduler {
         payload: {
           attemptId: ctx.attemptId,
           taskId: ctx.task.id,
-          stageId: 'execution',
+          stageId: stageOfTask(TaskKindSchema.parse(ctx.task.kind)),
           role: input.role,
           harnessId: harness.id,
           n: input.run,

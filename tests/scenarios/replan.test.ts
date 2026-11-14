@@ -221,6 +221,7 @@ describe('requested Replan', () => {
       ['plan_approval', 'succeeded'],
       ['execution', 'superseded'],
       ['execution', expect.stringMatching(/queued|running|succeeded/)],
+      ['integration', expect.any(String)],
       ['closure', expect.any(String)],
     ]);
 
@@ -475,6 +476,7 @@ describe('the Inbox "replan" options', () => {
     expect(tasks.map((t) => [t.id === capped?.id, t.state])).toEqual([
       [true, 'cancelled'],
       [false, 'approved'],
+      [false, 'approved'], // the Integration Task
     ]);
     const events = await eventsOf(rt, job.id);
     const runs = events.filter(
