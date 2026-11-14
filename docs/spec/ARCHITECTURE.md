@@ -194,7 +194,8 @@ review_findings(id, review_id, severity, fault_origin, location, problem, why,
                 recommendation, blocking)
 approvals(id, job_id, task_id?, kind, subject_ref, question, options_json, recommended,
           state, deferred, decided_by, decided_at, decision_json, expires_policy, version)
-         -- kind: question | plan | spec_change | blocker | cleanup   (an "Inbox Item")
+         -- kind: question | plan | spec_change | blocker | cleanup | merge [Phase C]   (an "Inbox Item")
+         --   a PR closed without merging opens a question [Phase C]
          -- state: open | decided | cancelled | superseded;  expires_policy: remain_pending
          -- subject_ref: what is decided on (e.g. the plan Artifact id); a decision naming
          --   another subject or version is refused
@@ -203,7 +204,9 @@ events(seq INTEGER PK AUTOINCREMENT, ts, entity_kind, entity_id, job_id?, type,
 audit_log(id, ts, actor, action, target, before_json, after_json, policy_ref, correlation_id)
 ```
 
-Added in v1: organizations, users, memberships, pull_requests, pr_checks, budgets, usage_records, skills, recipes (as DB rows), notifications. Write a table's migration only in the phase that uses it.
+Added in Phase C: pull_requests, pr_checks (written by the GitHub poller; the views read only these rows).
+
+Added in v1: organizations, users, memberships, budgets, usage_records, skills, recipes (as DB rows), notifications. Write a table's migration only in the phase that uses it.
 
 ## 6. Agent harness contract [MVP]
 
@@ -290,7 +293,10 @@ Every human-kind Blocker opens an Inbox Approval (kind `blocker`) with fixed opt
 | `rework_cap_reached`, `question_cap_reached` | grant +N Attempts (optional guidance into `context`), replan, cancel the Job |
 | `replan_cap_reached` | grant +1 replan, cancel the Job |
 | `recovery_uncertain`, `retry_cap_reached` | retry now, cancel the Job |
-| `base_merge_conflict` | replan, cancel the Job |
+| `base_merge_conflict` | replan, cancel the Job. [Phase C] also covers a Task Branch conflicting while merging into the Integration Branch, and a base merge-in conflict; the conflict details become the replan feedback |
+| `ci_failed` [Phase C] | rework (the check's name, summary and link as untrusted context), re-run the checks, cancel the Job |
+| `merge_method_refused` [Phase C] | retry the merge (after the repository's settings changed), cancel the Job |
+| `integration_rewrite` [Phase C] | force-push with lease (pinned to the last head the factory pushed; audited; the PR is updated in place), open a new PR on `factory/<job-id>/integration-2` (the old one closed with a marked comment), cancel the Job |
 
 "Retry now" re-checks the pid and start time first; if the process is still alive it offers "kill and retry" instead. A human's word alone never starts a second process. A "replan" option counts against `max_replans`. Raising a cap is written to `audit_log` (`decided_by user:local`). Approvals stay pending (`remain_pending`, §17) and never auto-approve; "defer" only hides an item from the default view and can be undone.
 
@@ -353,8 +359,8 @@ Loop (every 1–2 s, plus a wake-up after any relevant event):
 
 ## 14. Git, staleness and delivery [Phase C]
 
-- **Integration:** approved task branches merge into `factory/<job-id>` (the job integration branch) in dependency order. After each merge, the affected verification re-runs on the integration branch. A conflict creates an `integration` task (role: integration agent) or asks a human, depending on policy. Then the **integration review** (§9) runs on the integration branch before any PR is opened.
-- **Staleness:** before the PR is opened and before merge, compare `base_sha` with the remote default branch. If the base moved, rebase or merge base into the integration branch. **Every gate with an old `(head, base)` pair is stale** and re-runs (verification and CI always; review only if the diff changed beyond the merge itself, or when policy says always).
+- **Integration:** approved task branches merge into `factory/<job-id>/integration` (the job integration branch; `factory/<job-id>` would clash with the Task Branch refs under it) in dependency order. The branch belongs to the Job's Integration Task (one per Job and Repository), created by the factory, not the planner. After each merge, the affected verification re-runs on the integration branch. A conflict creates an `integration` task (role: integration agent) or asks a human, depending on policy. [Phase C builds the human route only: the `base_merge_conflict` Blocker; the integration agent is an extension point.] Then the **integration review** (§9) runs on the integration branch before any PR is opened.
+- **Staleness:** before the PR is opened and before merge, compare `base_sha` with the remote default branch. If the base moved, merge the base into the integration branch (never rebase it). A published integration branch is rewritten only through the `integration_rewrite` Blocker Approval (§8.1), never by the factory's own judgment. **Every gate with an old `(head, base)` pair is stale** and re-runs (verification and CI always; review only if the diff changed beyond the merge itself, or when policy says always).
 - **PR feedback loop:** the poller reads PR reviews and comments. A human "changes requested", or a comment addressed to the factory, creates a rework attempt on the integration branch and updates the PR in place. Comment text is untrusted: it is shown to the agent as context and never treated as instructions about permissions.
 - **Local-first:** GitHub is **polled** (conditional requests with ETag, 30–60 s while a PR is open). Webhooks or a tunnel are optional [Later].
 - **Multi-repo:** one integration branch and one PR per repository. Each job has a `delivery_order` (from the DAG). The default contract strategy is **expand → migrate consumers → contract**, with feature flags where a change can't be made additive. Reports must say that multiple PRs are *not* atomic.
