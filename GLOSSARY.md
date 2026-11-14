@@ -14,6 +14,14 @@ _Avoid_: Workspace, product
 A git repository registered with the factory. It belongs to exactly one Project.
 _Avoid_: Repo (fine in casual speech), codebase
 
+**GitHub Coordinates**:
+Where a Repository lives on GitHub, as `owner/name`: taken from a github.com remote URL or given at registration. A Repository without them has no GitHub remote.
+_Avoid_: slug, full name
+
+**Token Reference**:
+Where the factory's GitHub token comes from, never the token itself: `gh` (the `gh` login) or `env:NAME`. It is resolved for each request and the value is only held in memory.
+_Avoid_: token config, credentials
+
 **Factory Clone**:
 The factory's own copy of a Repository, from which every Worktree is made. The owner's own checkout is never written to.
 _Avoid_: Mirror, local repo, checkout

@@ -1,9 +1,11 @@
 import { resolve } from 'node:path';
-import type {
-  RegisterRepositoryInput,
-  RegisterRepositoryResult,
-  RepositoryCommands,
-  RepositoryInspection,
+import {
+  formatCoordinates,
+  parseCoordinates,
+  type RegisterRepositoryInput,
+  type RegisterRepositoryResult,
+  type RepositoryCommands,
+  type RepositoryInspection,
 } from '@factory/domain';
 import { resolveHome } from '@factory/home';
 import { findRuntime } from '../client.js';
@@ -19,6 +21,8 @@ export interface RepoAddOptions {
   /** Overrides for the detected commands. An empty string means "no command". */
   testCommand: string | undefined;
   typecheckCommand: string | undefined;
+  /** `owner/name`: the Repository's GitHub coordinates, over any its origin URL gives. */
+  github: string | undefined;
   /** Confirms the shown commands without prompting. */
   yes: boolean;
 }
@@ -36,6 +40,11 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
   }
   const { client } = found;
   const path = resolve(opts.path);
+  const github = opts.github === undefined ? undefined : parseCoordinates(opts.github);
+  if (github !== undefined && !github.ok) {
+    process.stderr.write(`factory: --github: ${github.error}\n`);
+    return 2;
+  }
 
   const inspection = await client.json<RepositoryInspection>('POST', '/v1/repositories/inspect', {
     body: { path },
@@ -56,6 +65,13 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
           ? 'none; the Factory Clone will be made from this path'
           : `${inspection.remoteUrl}; the Factory Clone will be made from it, reusing local objects`
       }\n` +
+      `  GitHub:    ${
+        github !== undefined
+          ? `${formatCoordinates(github.coordinates)} (from --github)`
+          : inspection.github === null
+            ? 'none (no github.com origin; set one with --github owner/name)'
+            : `${formatCoordinates(inspection.github)} (from the origin URL)`
+      }\n` +
       `Commands${inspection.packageManager === null ? '' : ` (package manager: ${inspection.packageManager})`}:\n` +
       `  test:      ${label('test', opts.testCommand)}\n` +
       `  typecheck: ${label('typecheck', opts.typecheckCommand)}\n`,
@@ -71,7 +87,12 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
     }
   }
 
-  const input: RegisterRepositoryInput = { path, project, commands };
+  const input: RegisterRepositoryInput = {
+    path,
+    project,
+    commands,
+    ...(opts.github === undefined ? {} : { github: opts.github.trim() }),
+  };
   const result = await client.json<RegisterRepositoryResult>('POST', '/v1/repositories', {
     body: input,
     timeoutMs: REGISTER_TIMEOUT_MS,
@@ -86,6 +107,7 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
           : `${repository.remoteUrl ?? ''} (reusing objects from ${repository.source})`
       }\n` +
       `  default branch: ${repository.defaultBranch}\n` +
+      `  GitHub:         ${repository.github === null ? 'none' : formatCoordinates(repository.github)}\n` +
       `Your checkout was not modified.\n`,
   );
   return 0;

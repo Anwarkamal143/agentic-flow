@@ -3,7 +3,7 @@
  * variables and known secret patterns are replaced before anything is stored
  * or streamed. Pure; tested through `@factory/domain`.
  */
-import { createRedactor, secretsFromEnv } from '@factory/domain';
+import { createLearningRedactor, createRedactor, secretsFromEnv } from '@factory/domain';
 import { describe, expect, it } from 'vitest';
 
 const TOKEN = 'tok-3f9a1c77e2b04d18';
@@ -100,5 +100,28 @@ describe('createRedactor', () => {
   it('is idempotent', () => {
     const once = redact(`${TOKEN} AKIAIOSFODNN7EXAMPLE`);
     expect(redact(once)).toBe(once);
+  });
+});
+
+describe('createLearningRedactor', () => {
+  it('redacts a secret learned after it was made, through the same function', () => {
+    const { redact, learn } = createLearningRedactor([{ name: 'GH_TOKEN', value: TOKEN }]);
+    const later = 'gho-resolved-later-0123';
+    expect(redact(`a ${later} b`)).toBe(`a ${later} b`);
+
+    learn({ name: 'github_token_reference', value: later });
+
+    expect(redact(`a ${later} b ${TOKEN}`)).toBe(
+      'a [REDACTED:github_token_reference] b [REDACTED:GH_TOKEN]',
+    );
+    expect(redact(JSON.stringify({ t: later }))).toBe('{"t":"[REDACTED:github_token_reference]"}');
+  });
+
+  it('learns a value once, and ignores one too short to redact', () => {
+    const { redact, learn } = createLearningRedactor([]);
+    learn({ name: 'a', value: 'value-long-enough' });
+    learn({ name: 'b', value: 'value-long-enough' });
+    learn({ name: 'c', value: 'short' });
+    expect(redact('value-long-enough short')).toBe('[REDACTED:a] short');
   });
 });

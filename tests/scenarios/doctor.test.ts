@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   fakeBin,
   initializedHome,
+  patchFactoryConfig,
   startRuntime,
   tempDir,
   versionTool,
@@ -97,6 +98,80 @@ describe('factory doctor', () => {
     for (const value of [secret, ghSecret]) {
       for (const text of everything) expect(text).not.toContain(value);
     }
+  });
+
+  it('reports whether an env: token reference resolves, never the token', async () => {
+    const token = `fake-gh-access-${'z'.repeat(24)}`;
+    const home = await initializedHome();
+    patchFactoryConfig(home, { github: { token: 'env:GH_ACCESS' } });
+    const rt = await startRuntime(home, { env: { PATH: fakeBin(TOOLS), GH_ACCESS: token } });
+
+    const res = await home.cli(['doctor']);
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).toMatch(/GitHub \(https:\/\/api\.github\.com\):/);
+    expect(res.stdout).toMatch(/resolves +token reference env:GH_ACCESS/);
+
+    const json = await home.cli(['doctor', '--json']);
+    const body = JSON.parse(json.stdout) as { github: unknown };
+    expect(body.github).toEqual({
+      tokenReference: 'env:GH_ACCESS',
+      apiBaseUrl: 'https://api.github.com',
+      resolves: true,
+    });
+
+    expect(await rt.stop()).toBe(0);
+    const everything = [res.stdout, res.stderr, json.stdout, rt.output()];
+    everything.push(...filesUnder(home.dir).map((f) => readFileSync(f, 'latin1')));
+    for (const text of everything) expect(text).not.toContain(token);
+  });
+
+  it('says why a token reference does not resolve', async () => {
+    const home = await initializedHome();
+    patchFactoryConfig(home, {
+      github: { token: 'env:GH_ACCESS', apiBaseUrl: 'http://127.0.0.1:9/api/v3' },
+    });
+    await startRuntime(home, { env: { PATH: fakeBin(TOOLS) } });
+
+    const res = await home.cli(['doctor']);
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).toMatch(/GitHub \(http:\/\/127\.0\.0\.1:9\/api\/v3\):/);
+    expect(res.stdout).toMatch(
+      /does not resolve +token reference env:GH_ACCESS: GH_ACCESS is not set/,
+    );
+  });
+
+  it('refuses to start with credentials in github.apiBaseUrl, never printing them', async () => {
+    const secret = `s3cret-${'w'.repeat(16)}`;
+    const home = await initializedHome();
+    patchFactoryConfig(home, { github: { apiBaseUrl: `https://user:${secret}@api.github.com` } });
+
+    const started = await startRuntime(home).then(
+      () => 'started',
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+
+    expect(started).toContain('github.apiBaseUrl');
+    expect(started).toContain('must not contain a username or password');
+    expect(started).not.toContain(secret);
+  });
+
+  it('resolves the default gh reference with `gh auth token`, never showing it', async () => {
+    const token = `gho_${'q'.repeat(36)}`;
+    const bin = fakeBin({
+      ...TOOLS,
+      gh: versionTool(
+        'gh version 2.63.2',
+        `[ "$1 $2" = "auth token" ] && { printf '%s\\n' '${token}'; exit 0; }\nexit 1`,
+      ),
+    });
+    const home = await initializedHome();
+    const rt = await startRuntime(home, { env: { PATH: bin } });
+
+    const res = await home.cli(['doctor']);
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).toMatch(/resolves +token reference gh/);
+    expect(await rt.stop()).toBe(0);
+    for (const text of [res.stdout, res.stderr, rt.output()]) expect(text).not.toContain(token);
   });
 
   it('asks for the runtime when it is not running', async () => {

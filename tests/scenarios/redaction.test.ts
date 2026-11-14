@@ -8,7 +8,14 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { initializedHome, startRuntime, tinyTsRepo, useFakeHarness } from '../support/factory.js';
+import {
+  fakeBin,
+  initializedHome,
+  patchFactoryConfig,
+  startRuntime,
+  tinyTsRepo,
+  useFakeHarness,
+} from '../support/factory.js';
 import {
   json,
   post,
@@ -141,6 +148,71 @@ describe('redaction', () => {
       expect(bytes.includes(patternSecret), file).toBe(false);
     }
   });
+
+  it.each([
+    {
+      reference: 'env:GH_ACCESS',
+      // Named so the env rule (`*_TOKEN`, …) would miss it, and no secret pattern matches it.
+      setup: (token: string) => ({ env: { GH_ACCESS: token } }),
+      redactedAs: '[REDACTED:GH_ACCESS]',
+    },
+    {
+      reference: 'gh',
+      // A gh login whose token matches no secret pattern: only resolving it teaches redaction.
+      setup: (token: string) => ({
+        env: {
+          PATH: `${fakeBin({ gh: `[ "$1 $2" = "auth token" ] && { echo '${token}'; exit 0; }\nexit 1` })}:${process.env['PATH'] ?? ''}`,
+        },
+      }),
+      redactedAs: '[REDACTED:gh_auth_token]',
+    },
+  ])(
+    'the GitHub token ($reference) is redacted once known, whatever it looks like',
+    async ({ reference, setup, redactedAs }) => {
+      const token = `plain-${randomBytes(12).toString('hex')}`;
+      const task = validTaskResponse();
+      task.steps.push({ run: `echo "harness found ${token}"` });
+      task.result['summary'] = `Added sum(). Token: ${token}`;
+      const home = await initializedHome();
+      patchFactoryConfig(home, { github: { token: reference } });
+      useFakeHarness(
+        home,
+        scriptWith({}, { 'add-sum': [task] }, { 'add-sum': [validReviewResponse()] }),
+      );
+      const rt = await startRuntime(home, setup(token));
+      // The token reference resolves (for gh: the runtime runs `gh auth token`).
+      const doctor = await rt.home.cli(['doctor']);
+      expect(doctor.stdout).toMatch(new RegExp(`resolves +token reference ${reference}`));
+
+      const added = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
+      expect(added.code, added.stderr).toBe(0);
+      const [repo] = await json<[{ id: string; projectId: string }]>(
+        rt.request('/v1/repositories'),
+      );
+      await skipPlanApproval(rt, repo.projectId);
+      const created = await json<JobBody>(
+        post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add sum()' }),
+      );
+      const job = await waitForJob(rt, created.id, (j) => j.status !== 'active', 20_000);
+      expect(job.status).toBe('completed');
+
+      const logs = await json<LogEntryBody[]>(rt.request(`/v1/jobs/${job.id}/logs`));
+      expect(logs.find((l) => l.content.role === 'developer')?.content.output).toContain(
+        `harness found ${redactedAs}`,
+      );
+      const seen = [JSON.stringify(logs), doctor.stdout, rt.output()];
+      seen.push(await (await rt.request('/v1/events?limit=1000')).text());
+      const artifacts = await json<{ id: string }[]>(rt.request(`/v1/jobs/${job.id}/artifacts`));
+      for (const a of artifacts)
+        seen.push(await (await rt.request(`/v1/artifacts/${a.id}/content`)).text());
+      for (const text of seen) expect(text).not.toContain(token);
+
+      expect(await rt.stop()).toBe(0);
+      for (const file of filesUnder(home.dir)) {
+        expect(readFileSync(file).includes(token), file).toBe(false);
+      }
+    },
+  );
 
   it('factory logs refuses an unknown Job', async () => {
     const rt = await startRuntime();

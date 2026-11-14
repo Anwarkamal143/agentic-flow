@@ -14,7 +14,16 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import { BillingSchema, DEFAULT_GLOBAL_CONCURRENCY, PriceTableSchema } from '@factory/domain';
+import {
+  BillingSchema,
+  DEFAULT_GITHUB_API_BASE_URL,
+  DEFAULT_GLOBAL_CONCURRENCY,
+  GitHubApiBaseUrlSchema,
+  PriceTableSchema,
+  TokenReferenceTextSchema,
+  tokenReferenceOf,
+  type TokenReference,
+} from '@factory/domain';
 import { z } from 'zod';
 
 export const DEFAULT_PORT = 7420;
@@ -112,18 +121,64 @@ export const FactoryConfigSchema = z.object({
     .object({ global: z.number().int().min(1).max(64).optional() })
     .strict()
     .optional(),
+  /**
+   * How the factory reaches GitHub (ADR-0033). `token`: a token reference,
+   * `gh` (the `gh` login, the default) or `env:NAME`, never a token value.
+   * `apiBaseUrl`: GitHub's REST API (tests point it at the fake GitHub).
+   */
+  github: z
+    .object({
+      token: TokenReferenceTextSchema.optional(),
+      apiBaseUrl: GitHubApiBaseUrlSchema.optional(),
+    })
+    .strict()
+    .optional(),
 });
 export type FactoryConfig = z.infer<typeof FactoryConfigSchema>;
+
+export interface GitHubSettings {
+  tokenReference: TokenReference;
+  apiBaseUrl: string;
+}
+
+/** The GitHub settings `config` sets, or the defaults (`gh`, github.com). */
+export function githubSettings(config: FactoryConfig): GitHubSettings {
+  return {
+    tokenReference: tokenReferenceOf(config.github?.token ?? 'gh'),
+    apiBaseUrl: (config.github?.apiBaseUrl ?? DEFAULT_GITHUB_API_BASE_URL).replace(/\/+$/, ''),
+  };
+}
 
 /** The global Task concurrency limit `config` sets, or the default. */
 export function globalConcurrency(config: FactoryConfig): number {
   return config.concurrency?.global ?? DEFAULT_GLOBAL_CONCURRENCY;
 }
 
+/**
+ * Throws a {@link ConfigError} naming each invalid field and why. Values are
+ * never quoted in it: a field may hold a secret by mistake.
+ */
 export function readConfig(home: FactoryHome): FactoryConfig | undefined {
   const raw = readIfExists(home.configPath);
   if (raw === undefined) return undefined;
-  return FactoryConfigSchema.parse(JSON.parse(raw));
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    throw new ConfigError(`${home.configPath} is not valid JSON`);
+  }
+  const parsed = FactoryConfigSchema.safeParse(json);
+  if (!parsed.success) {
+    const problems = parsed.error.issues.map(
+      (i) => `${i.path.length === 0 ? '(top level)' : i.path.join('.')}: ${i.message}`,
+    );
+    throw new ConfigError(`${home.configPath} is invalid: ${problems.join('; ')}`);
+  }
+  return parsed.data;
+}
+
+export class ConfigError extends Error {
+  override name = 'ConfigError';
 }
 
 export function writeConfig(home: FactoryHome, config: FactoryConfig): void {

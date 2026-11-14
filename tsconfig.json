@@ -17,6 +17,9 @@
       "path": "packages/harness"
     },
     {
+      "path": "packages/github"
+    },
+    {
       "path": "apps/runtime"
     },
     {

@@ -58,6 +58,9 @@ export const repositories = sqliteTable(
     clonePath: text('clone_path').notNull(),
     defaultBranch: text('default_branch').notNull(),
     profileJson: text('profile_json').notNull(),
+    /** GitHub coordinates (ADR-0033); both null when the Repository has no GitHub remote. */
+    githubOwner: text('github_owner'),
+    githubName: text('github_name'),
     createdAt: text('created_at').notNull(),
   },
   (t) => [

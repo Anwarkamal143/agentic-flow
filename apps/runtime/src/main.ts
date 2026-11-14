@@ -10,8 +10,10 @@ import type { Server } from 'node:http';
 import { serve } from '@hono/node-server';
 import { appendEvent, openDatabase } from '@factory/db';
 import {
+  ConfigError,
   RUNTIME_HOST,
   ensureHomeDirs,
+  githubSettings,
   globalConcurrency,
   isProcessAlive,
   readConfig,
@@ -30,7 +32,13 @@ import {
   type AgentHarness,
   type ClaudeCodeBilling,
 } from '@factory/harness';
-import { API_KEY_MISSING, createRedactor, secretsFromEnv, type Billing } from '@factory/domain';
+import {
+  API_KEY_MISSING,
+  createLearningRedactor,
+  secretsFromEnv,
+  type Billing,
+} from '@factory/domain';
+import { TokenSource } from '@factory/github';
 import { createApp, type RuntimeStatus } from './app.js';
 import { InboxService } from './inbox.js';
 import { ArtifactStore } from './artifacts.js';
@@ -63,7 +71,14 @@ if (!leaseKnobs.ok) fail(leaseKnobs.error);
 applyLeaseKnobs(leaseKnobs.knobs);
 
 const home = resolveHome();
-const config = readConfig(home);
+const config = (() => {
+  try {
+    return readConfig(home);
+  } catch (err) {
+    if (err instanceof ConfigError) fail(err.message);
+    throw err;
+  }
+})();
 const token = readToken(home);
 if (config === undefined || token === undefined) {
   fail(`factory home ${home.root} is not initialized. Run: factory init`);
@@ -74,12 +89,18 @@ ensureHomeDirs(home);
  * Secret values never reach history (ADR-0011): the values of the runtime's
  * secret-named variables and the factory's own token, plus known secret
  * patterns, are redacted from every database write, Artifact, Harness prompt
- * and output, and from this process's own output (the runtime log).
+ * and output, and from this process's own output (the runtime log). The
+ * GitHub token is learned too, whatever its variable is called, and again
+ * each time the token reference resolves (ADR-0033).
  */
-const redact = createRedactor([
+const redaction = createLearningRedactor([
   ...secretsFromEnv(process.env),
   { name: 'FACTORY_TOKEN', value: token },
 ]);
+const redact = redaction.redact;
+const github = githubSettings(config);
+const githubToken = new TokenSource(github.tokenReference, process.env, redaction.learn);
+githubToken.primeRedaction();
 for (const stream of [process.stdout, process.stderr]) {
   const write = stream.write.bind(stream) as (chunk: unknown, ...rest: unknown[]) => boolean;
   stream.write = (chunk: unknown, ...rest: unknown[]) =>
@@ -288,6 +309,7 @@ const app = createApp({
   doctor: () =>
     runDoctor(
       process.env,
+      { token: githubToken, apiBaseUrl: github.apiBaseUrl },
       config.harness?.id === 'claude-code' ? config.harness.command : 'claude',
       config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
     ),
