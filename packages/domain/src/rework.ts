@@ -125,6 +125,8 @@ export type Blocker = z.infer<typeof BlockerSchema>;
 export type ReworkRoute =
   | { kind: 'rework' }
   | { kind: 'fail' }
+  /** A blocking Finding blames the Plan: back to `planning` (ARCHITECTURE §4.6, B4). */
+  | { kind: 'replan' }
   | { kind: 'blocked'; blocker: Pick<Blocker, 'kind' | 'reason' | 'detail' | 'requiredAction'> };
 
 /** Exit reasons that are a verdict on the work, and so route to Rework. */
@@ -134,9 +136,11 @@ const REWORKABLE: readonly AttemptExitReason[] = ['gates_failed', 'changes_reque
  * Where a failed Attempt goes next. Only a verdict on the work (a failed Gate,
  * a review that requested changes) routes anywhere; anything else fails the
  * Task. A blocking Finding whose Fault Origin is the Specification, the Plan
- * or the infrastructure (in that precedence) stops for that; otherwise a new
- * Attempt follows, unless this one was the last allowed (`n >= maxAttempts`).
- * Pure.
+ * or the infrastructure (in that precedence) routes there: the Specification
+ * stops for a human (#47 routes it), the Plan goes back to planning (`replan`,
+ * counted against `max_replans`, not `max_attempts`), the infrastructure
+ * blocks; otherwise a new Attempt follows, unless this one was the last
+ * allowed (`n >= maxAttempts`). Pure.
  */
 export function routeFailedAttempt(input: {
   exitReason: AttemptExitReason;
@@ -147,8 +151,8 @@ export function routeFailedAttempt(input: {
 }): ReworkRoute {
   if (!REWORKABLE.includes(input.exitReason)) return { kind: 'fail' };
   // Only blocking Findings route; a non-blocking one is advice (ARCHITECTURE §4.6).
-  // Phase B extension point (B4): the spec and plan routes below stop for a human
-  // today; Phase B sends them back to the specification or planning Stage instead.
+  // Phase B extension point: the spec route below stops for a human until #47 sends
+  // it back to the specification Stage.
   const origins = new Set(input.findings.filter((f) => f.blocking).map((f) => f.faultOrigin));
   if (origins.has('spec')) {
     return {
@@ -162,17 +166,7 @@ export function routeFailedAttempt(input: {
       },
     };
   }
-  if (origins.has('plan')) {
-    return {
-      kind: 'blocked',
-      blocker: {
-        kind: 'human',
-        reason: 'fault_origin_plan',
-        detail: 'a blocking Finding says the Plan is wrong',
-        requiredAction: 'decide on a replan (replanning is not built before Phase B)',
-      },
-    };
-  }
+  if (origins.has('plan')) return { kind: 'replan' };
   if (origins.has('infrastructure')) {
     return {
       kind: 'blocked',
