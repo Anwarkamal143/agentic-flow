@@ -59,7 +59,6 @@ import {
   addWorktree,
   changedPathKinds,
   changedPaths,
-  commitAll,
   commitsBetween,
   fetchRemote,
   resolveCommit,
@@ -109,6 +108,7 @@ import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './re
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
   allocatePortBlock,
+  commitLeftovers,
   excludeResultFile,
   releaseAttemptTokens,
   requireWorktree,
@@ -1901,17 +1901,7 @@ export class TaskScheduler {
  * parsed and checked against git.
  */
 async function inspect(worktree: string, baseSha: string): Promise<Inspection> {
-  const leftovers = await uncommittedPaths(worktree);
-  let wipCommit: string | null = null;
-  if (leftovers.length > 0) {
-    wipCommit = await commitAll(
-      worktree,
-      `wip: uncommitted changes left by the Harness\n\n` +
-        `The factory committed these so nothing is lost. Review them.\n\n` +
-        `Factory-WIP: true\n` +
-        leftovers.map((p) => `Factory-WIP-Path: ${p}`).join('\n'),
-    );
-  }
+  const wipCommit = (await commitLeftovers(worktree))?.sha ?? null;
   const headSha = await resolveCommit(worktree, 'HEAD');
   if (headSha === undefined) throw new Error(`the Worktree ${worktree} has no HEAD`);
   const commits = (await commitsBetween(worktree, baseSha, headSha)).map((c) => c.sha);
