@@ -98,7 +98,10 @@ export function heartbeatTick(opts: HeartbeatOptions): void {
   sweepExpired(opts);
 }
 
-/** Renews every lease this runtime holds (ARCHITECTURE §12 step 4). */
+/**
+ * Renews every lease this runtime holds (ARCHITECTURE §12 step 4). One
+ * statement, so atomic; no event, as a renewal changes no state (ADR-0024).
+ */
 function renewLeases(db: FactoryDb, holder: string): void {
   const now = Date.now();
   db.update(schema.leases)
