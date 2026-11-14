@@ -8,6 +8,7 @@
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import { rmSync } from 'node:fs';
 import {
+  ApprovalKindSchema,
   ApprovalOptionSchema,
   ApprovalSchema,
   AttemptCauseSchema,
@@ -41,6 +42,7 @@ import {
   type AnswerQuestionInput,
   type AnswerRefusal,
   type Approval,
+  type ApprovalKind,
   type AuditEntry,
   type Blocker,
   type CancelJobInput,
@@ -80,6 +82,11 @@ import { grantReplanIn, requestReplanIn } from './replan.js';
 import { applySpecChangeDecision, grantRespecificationIn } from './spec-route.js';
 
 type ApprovalRow = typeof schema.approvals.$inferSelect;
+type Decider = (
+  item: ApprovalRow,
+  input: DecideInput,
+  actor: string,
+) => Approval | Promise<Approval>;
 
 const REFUSAL_STATUS: Readonly<Record<InboxRefusal['code'], 400 | 403 | 409>> = {
   actor_not_allowed: 403,
@@ -159,53 +166,34 @@ export class InboxService {
   /** Decides an item, refused unless it names the open item's version and subject. */
   async decide(id: string, input: DecideInput, actor: string): Promise<Approval> {
     const item = requireItem(this.db, id);
-    if (item.kind === 'blocker') return this.decideBlocker(item, input, actor);
-    if (item.kind === 'question' && input.option === 'replan') {
-      if (input.grant !== undefined) {
-        throw new ApiFailure(400, 'invalid_grant', 'a question item takes no grant size');
-      }
-      return this.replanFromItem(item, input, actor);
+    const kind = ApprovalKindSchema.parse(item.kind);
+    if (kind !== 'blocker' && input.grant !== undefined) {
+      throw new ApiFailure(400, 'invalid_grant', `a ${kind} item takes no grant size`);
     }
-    if (input.grant !== undefined) {
-      throw new ApiFailure(400, 'invalid_grant', `a ${item.kind} item takes no grant size`);
-    }
-    changeJob(this.db, { jobId: item.jobId, expectedVersion: 'current', actor }, (tx, _s, step) => {
-      const row = requireItem(tx, id);
-      if (row.kind === 'question') {
-        throw new ApiFailure(
-          409,
-          'answer_required',
-          'a question item is answered, not decided: POST /v1/inbox/:id/answer (factory inbox answer)',
-        );
-      }
-      refuseUnless(row, { actor, ...input });
-      if (
-        (row.kind === 'plan' || row.kind === 'spec_change') &&
-        input.option === 'request_changes'
-      ) {
-        refuseReplanUnless(tx, row.jobId, input.comment);
-      }
-      const now = new Date().toISOString();
-      const decision = InboxDecisionSchema.parse({
-        option: input.option,
-        comment: input.comment ?? null,
+    return this.deciders[kind](item, input, actor);
+  }
+
+  /** How each kind of item is decided. */
+  private readonly deciders: Readonly<Record<ApprovalKind, Decider>> = {
+    blocker: (item, input, actor) => this.decideBlocker(item, input, actor),
+    question: (item, input, actor) => {
+      if (input.option === 'replan') return this.replanFromItem(item, input, actor);
+      throw new ApiFailure(
+        409,
+        'answer_required',
+        'a question item is answered, not decided: POST /v1/inbox/:id/answer (factory inbox answer)',
+      );
+    },
+    plan: (item, input, actor) => {
+      this.decideOnly(item, input, actor, null, (tx, _state, step, row) => {
+        if (input.option === 'request_changes') refuseReplanUnless(tx, row.jobId, input.comment);
+        applyPlanDecision(tx, row, input.option, step, actor);
       });
-      bumpItem(tx, row, {
-        state: 'decided',
-        decidedBy: actor,
-        decidedAt: now,
-        decisionJson: JSON.stringify(decision),
-      });
-      appendEvent(tx, {
-        entityKind: 'approval',
-        entityId: id,
-        jobId: row.jobId,
-        type: 'approval.decided',
-        actor,
-        payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
-      });
-      if (row.kind === 'plan') applyPlanDecision(tx, row, input.option, step, actor);
-      else if (row.kind === 'spec_change') {
+      return this.get(item.id);
+    },
+    spec_change: (item, input, actor) => {
+      this.decideOnly(item, input, actor, null, (tx, _state, step, row) => {
+        if (input.option === 'request_changes') refuseReplanUnless(tx, row.jobId, input.comment);
         applySpecChangeDecision(
           tx,
           {
@@ -218,12 +206,16 @@ export class InboxService {
           },
           step,
         );
-      } else if (row.kind === 'cleanup') applyCleanupDecision(tx, row, input.option);
-      else throw new ApiFailure(409, 'not_decidable', `no ${row.kind} items are decided yet`);
-    });
-    this.onCommit();
-    return this.get(id);
-  }
+      });
+      return this.get(item.id);
+    },
+    cleanup: (item, input, actor) => {
+      this.decideOnly(item, input, actor, null, (tx, _state, _step, row) => {
+        applyCleanupDecision(tx, row, input.option);
+      });
+      return this.get(item.id);
+    },
+  };
 
   /**
    * `answerQuestion` (ARCHITECTURE §8 step 3): answers each question of an
@@ -258,25 +250,7 @@ export class InboxService {
         if (refusal !== undefined) {
           throw new ApiFailure(ANSWER_STATUS[refusal.code], refusal.code, refusal.message);
         }
-        const decision = InboxDecisionSchema.parse({
-          option: 'answer',
-          comment: null,
-          answers: input.answers,
-        });
-        bumpItem(tx, row, {
-          state: 'decided',
-          decidedBy: actor,
-          decidedAt: new Date().toISOString(),
-          decisionJson: JSON.stringify(decision),
-        });
-        appendEvent(tx, {
-          entityKind: 'approval',
-          entityId: id,
-          jobId: row.jobId,
-          type: 'approval.decided',
-          actor,
-          payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
-        });
+        markDecided(tx, row, actor, { option: 'answer', comment: null, answers: input.answers });
         const task =
           row.taskId === null
             ? undefined
@@ -458,7 +432,7 @@ export class InboxService {
     input: DecideInput,
     actor: string,
     grant: number | null,
-    body: (tx: Tx, state: JobState, step: StageRunStepper) => void,
+    body: (tx: Tx, state: JobState, step: StageRunStepper, row: ApprovalRow) => void,
   ): void {
     changeJob(
       this.db,
@@ -466,26 +440,12 @@ export class InboxService {
       (tx, state, step) => {
         const row = requireItem(tx, item.id);
         refuseUnless(row, { actor, ...input });
-        const decision = InboxDecisionSchema.parse({
+        markDecided(tx, row, actor, {
           option: input.option,
           comment: input.comment ?? null,
           ...(grant === null ? {} : { grant }),
         });
-        bumpItem(tx, row, {
-          state: 'decided',
-          decidedBy: actor,
-          decidedAt: new Date().toISOString(),
-          decisionJson: JSON.stringify(decision),
-        });
-        appendEvent(tx, {
-          entityKind: 'approval',
-          entityId: row.id,
-          jobId: row.jobId,
-          type: 'approval.decided',
-          actor,
-          payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
-        });
-        body(tx, state, step);
+        body(tx, state, step, row);
       },
     );
     this.onCommit();
@@ -1133,6 +1093,30 @@ function refuseUnless(
 }
 
 /** Updates the item, guarded by its version, and bumps it. */
+/** Marks the open item `row` decided by `actor`, with its `approval.decided` event. */
+function markDecided(
+  tx: Tx,
+  row: ApprovalRow,
+  actor: string,
+  input: z.input<typeof InboxDecisionSchema>,
+): void {
+  const decision = InboxDecisionSchema.parse(input);
+  bumpItem(tx, row, {
+    state: 'decided',
+    decidedBy: actor,
+    decidedAt: new Date().toISOString(),
+    decisionJson: JSON.stringify(decision),
+  });
+  appendEvent(tx, {
+    entityKind: 'approval',
+    entityId: row.id,
+    jobId: row.jobId,
+    type: 'approval.decided',
+    actor,
+    payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
+  });
+}
+
 function bumpItem(
   tx: Tx,
   row: ApprovalRow,

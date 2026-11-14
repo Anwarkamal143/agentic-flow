@@ -23,7 +23,7 @@ import {
   type JobBody,
 } from '../support/api.js';
 import { startDashboard, type RunningDashboard } from '../support/dashboard.js';
-import { VALID_SCRIPT } from '../support/scripts.js';
+import { scriptWith, VALID_SCRIPT, validOutput } from '../support/scripts.js';
 
 interface ItemBody {
   id: string;
@@ -62,14 +62,14 @@ interface PlanViewBody {
 }
 
 /** A Job whose Plan waits on its `plan` Inbox Item, and the dashboard over it. */
-async function waitingForPlan(): Promise<{
+async function waitingForPlan(script = VALID_SCRIPT): Promise<{
   rt: RunningRuntime;
   dash: RunningDashboard;
   job: JobBody;
   item: ItemBody;
 }> {
   const home = await initializedHome();
-  useFakeHarness(home, VALID_SCRIPT);
+  useFakeHarness(home, script);
   const rt = await startRuntime(home);
   const repo = await registeredRepo(rt, { planApproval: 'required' });
   const created = await createJob(rt, repo.id, 'Add sum() to math');
@@ -194,6 +194,76 @@ describe('the dashboard Inbox', () => {
     });
     expect((await json<JobBody>(rt.request(`/v1/jobs/${job.id}`))).status).toBe('rejected');
     expect(text(await dash.html('/inbox'))).toContain('Nothing needs you');
+  });
+
+  it('requests changes to a Plan with feedback: the planner re-plans and a new Plan waits', async () => {
+    const first = validOutput('planning') as { tasks: Record<string, unknown>[] };
+    // A changed Task: the carry-over cancels the old one (a Replan), never keeps it.
+    const replanned = { tasks: first.tasks.map((t) => ({ ...t, title: 'Add the sum() helper' })) };
+    const script = scriptWith({
+      planning: [{ output: validOutput('planning') }, { output: replanned }],
+    });
+    const { rt, dash, job, item } = await waitingForPlan(script);
+    const feedback = 'Name the Task after the sum() helper.';
+
+    // The form says the comment is the feedback a "Request changes" needs.
+    const html = await dash.html(`/inbox/${item.id}`);
+    expect(text(html)).toContain(
+      'Comment (optional; required with “Request changes”, as the planner’s feedback)',
+    );
+
+    // Without feedback the runtime refuses, and its message is shown; nothing changes.
+    const bare = await dash.postForm(
+      `/api/inbox/${item.id}/decide`,
+      decision(item, 'request_changes'),
+    );
+    expect(bare.status).toBe(400);
+    expect(text(bare.body)).toContain('request changes needs feedback for the planner');
+    expect(await getItem(rt, item.id)).toMatchObject({ state: 'open', version: item.version });
+
+    const res = await dash.postForm(`/api/inbox/${item.id}/decide`, {
+      ...decision(item, 'request_changes'),
+      comment: feedback,
+    });
+    expect(res.status, res.body).toBe(303);
+    expect(await getItem(rt, item.id)).toMatchObject({
+      state: 'decided',
+      decidedBy: 'user:local',
+      decision: { option: 'request_changes', comment: feedback },
+    });
+
+    // A Replan: planning runs again with the Plan and the feedback, then a new plan item opens.
+    const next = await waitForJob(
+      rt,
+      job.id,
+      (j) =>
+        j.stageRuns.filter((s) => s.stageId === 'plan_approval').at(-1)?.state ===
+          'waiting_human' && j.stageRuns.filter((s) => s.stageId === 'planning').length === 2,
+      30_000,
+    );
+    expect(next.status, rt.output()).toBe('waiting_human');
+    const events = await json<{ type: string; payload: Record<string, unknown> }[]>(
+      rt.request(`/v1/jobs/${job.id}/events`),
+    );
+    const runs = events.filter(
+      (e) => e.type === 'harness_run.started' && e.payload['stageId'] === 'planning',
+    );
+    expect(runs[1]?.payload['replan']).toEqual({ planArtifactId: item.subjectRef, feedback });
+    const [open] = await json<ItemBody[]>(rt.request('/v1/inbox'));
+    expect(open).toMatchObject({ kind: 'plan', state: 'open' });
+    expect(open?.subjectRef).not.toBe(item.subjectRef);
+    expect(await dash.html('/inbox')).toContain(`action="/api/inbox/${String(open?.id)}/decide"`);
+    // The replaced Plan's Task shows as cancelled, and why; the new Plan's does not.
+    const cards = [
+      ...(await dash.html(`/jobs/${job.id}`)).matchAll(/<[^>]*data-testid="task"[\s\S]*?<\/dl>/g),
+    ].map((m) => text(m[0]));
+    expect(cards.map((c) => /Cancelled by \w+/.exec(c)?.[0] ?? null).sort()).toEqual([
+      'Cancelled by replan',
+      null,
+    ]);
+    expect(cards.find((c) => c.includes('Cancelled by'))).toMatch(
+      / cancelled Cancelled by replan /,
+    );
   });
 
   it('defers an item out of the default view and undefers it back', async () => {

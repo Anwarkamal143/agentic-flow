@@ -273,7 +273,7 @@ function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
     lines.push('Tasks:');
     for (const t of tasks) {
       lines.push(
-        `  ${t.key.padEnd(14)} ${t.state.padEnd(10)} ${t.title}`,
+        `  ${t.key.padEnd(14)} ${(t.cancelReason === null ? t.state : `${t.state} (${t.cancelReason})`).padEnd(10)} ${t.title}`,
         `    writable:  ${t.scope.writable.join(', ')}`,
         `    forbidden: ${t.scope.forbidden.join(', ') || '(none)'}`,
         `    verify:    ${t.verification.map((v) => `${v.key}: ${v.command}`).join('; ')}`,

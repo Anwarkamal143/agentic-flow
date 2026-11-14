@@ -5,6 +5,7 @@
 ## The tick
 
 - **The heartbeat tick is the sweeper's clock.** `heartbeatTick` (`apps/runtime/src/sweeper.ts`) runs on every Task-scheduler heartbeat (`renewLeases` in `execution.ts` now only calls it): it renews every lease this runtime holds (holder `runtime:<pid>` or `runtime:<pid>/<attempt>`), then sweeps. The renewal moved into `sweeper.ts` unchanged.
+- **A renewal is not a state change, so it writes no event.** It moves only a lease's `heartbeat_at` and `expires_at`, which are liveness bookkeeping: no Task, Attempt, Worktree or Stage Run changes, and nothing a reader of the state tables decides on except the sweeper's own expiry check. CLAUDE.md §2's outbox rule (an event in the same transaction as each state change) therefore doesn't apply. An event per lease every 15 s would also bury the log (ARCHITECTURE §12 step 4 asks for the heartbeat, not a record of it). The renewal is one `UPDATE` statement, which SQLite runs atomically on its own, so every lease of this runtime moves together and no explicit transaction is needed. What a lease's expiry leads to (the sweep) is a state change, and it is recorded with its events in one transaction (below).
 - **What expires:** a `task` lease whose `expires_at` is in the past. Capacity tokens and port blocks share the Task lease's fate (ADR-0020); they are never swept on their own.
 - **One sweep per Task at a time.** A Task being swept is skipped by later ticks until its sweep ends.
 

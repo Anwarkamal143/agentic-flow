@@ -2,7 +2,8 @@
  * The claim race (#40, ROADMAP exit test B2, ADR-0020, ADR-0025): two real
  * dispatcher processes race the runtime's exported `claimNextTask` against one
  * real SQLite file in WAL mode, 100 rounds each, no mocks. Every ready Task is
- * claimed exactly once, and no capacity token is ever held twice.
+ * claimed exactly once (also when a single ready Task is all both contend
+ * for), and no capacity token is ever held twice.
  *
  * This tier is test-only. The test process seeds each round's ready Tasks
  * straight into the database and releases the claims after it; two processes
@@ -146,6 +147,24 @@ describe('two dispatchers racing for ready Tasks', () => {
       releaseAll(claims);
     }
     // The race is real: each process won some of the Tasks.
+    expect([...winners].sort()).toEqual(['runtime:race-a', 'runtime:race-b']);
+  });
+
+  it(`one ready Task, both dispatchers contend: exactly one claim succeeds, ${String(ROUNDS)} rounds`, async () => {
+    const winners = new Set<string>();
+    for (let round = 2 * ROUNDS; round < 3 * ROUNDS; round++) {
+      // Room for both: only the single ready Task limits the claims.
+      const { jobId, taskIds } = seedReadyJob(handle, round, 1, { perRepository: 3, perJob: 3 });
+      const claims = await race(round, 3);
+
+      expect(claims).toHaveLength(1);
+      expect(claims[0]?.taskId).toBe(taskIds[0]);
+      for (const claim of claims) winners.add(claim.holder);
+      expectClaimsRecorded(jobId, claims);
+      expectNoTokenHeldTwice(claims);
+      releaseAll(claims);
+    }
+    // The race is real: each process won the Task in some rounds.
     expect([...winners].sort()).toEqual(['runtime:race-a', 'runtime:race-b']);
   });
 

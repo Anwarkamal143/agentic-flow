@@ -33,6 +33,7 @@ interface TaskBody {
   key: string;
   title: string;
   state: string;
+  cancelReason: string | null;
   planArtifactId: string;
 }
 interface ItemBody {
@@ -198,8 +199,19 @@ describe('the plan Fault Origin route', () => {
     );
     const id = (key: string) => byKey(cancelled, key)[0]?.id;
     expect(byKey(cancelled, 'c')[0]?.state).toBe('running');
+    // The Tasks API says why each was cancelled; the CLI shows it beside the state.
+    expect(cancelled.map((t) => [t.key, t.cancelReason])).toEqual([
+      ['a', 'replan'],
+      ['b', 'replan'],
+      ['c', null],
+    ]);
+    const shownTasks = await rt.home.cli(['job', 'show', job.id]);
+    expect(shownTasks.stdout).toMatch(/^ {2}a +cancelled \(replan\) /m);
+    expect(shownTasks.stdout).toMatch(/^ {2}c +running +Write docs\/c\.md/m);
     const waiting = await jobOf(rt, job.id);
     expect(waiting).toMatchObject({ replanRequested: true, replans: { used: 1, max: 2 } });
+    // Planning waits for c: the Job is still active in execution.
+    expect([waiting.status, waiting.currentStage]).toEqual(['active', 'execution']);
     expect(waiting.stageRuns.filter((s) => s.stageId === 'planning')).toHaveLength(1);
     const worktrees = await json<WorktreeBody[]>(rt.request(`/v1/jobs/${job.id}/worktrees`));
     const oldTree = worktrees.find((w) => w.taskId === id('a'));
@@ -230,6 +242,38 @@ describe('the plan Fault Origin route', () => {
 
     // c ends: nothing is in flight, so planning runs with the Finding as feedback.
     writeFileSync(join(gate, 'c'), '');
+    const replanned = await until(
+      () => eventsOf(rt, job.id),
+      (es) => es.some((e) => e.type === 'job.replanning'),
+      'planning to start again',
+    );
+    // The Job returns to planning: in the transaction that starts it, execution is
+    // superseded and a new planning Stage Run queued, so planning is the current Stage.
+    const started = replanned.find((e) => e.type === 'job.replanning');
+    const execRun = waiting.stageRuns.filter((s) => s.stageId === 'execution').at(-1);
+    const moves = replanned.filter(
+      (e) =>
+        e.entityKind === 'stage_run' &&
+        e.type !== 'stage_run.created' &&
+        e.seq > (asked?.seq ?? Number.NaN) &&
+        e.seq < (started?.seq ?? Number.NaN),
+    );
+    expect(moves.map((e) => [e.type, e.payload['stageId']])).toEqual([
+      ['stage_run.superseded', 'execution'],
+      ['stage_run.queued', 'planning'],
+    ]);
+    expect(moves[0]?.entityId).toBe(execRun?.id);
+    // Planning ran again, so the Job now waits on the new Plan's approval.
+    const awaiting = await until(
+      () => jobOf(rt, job.id),
+      (j) => j.currentStage === 'plan_approval',
+      'the Job to wait on its new Plan',
+    );
+    expect(awaiting.status).toBe('waiting_human');
+    expect(awaiting.stageRuns.filter((s) => s.stageId === 'planning').map((s) => s.state)).toEqual([
+      'succeeded',
+      'succeeded',
+    ]);
     const plan2 = await approveOpenPlan(rt, job.id, 2);
     expect(plan2).not.toBe(plan1);
     const done = await waitForJob(rt, job.id, jobSettled, 30_000);
