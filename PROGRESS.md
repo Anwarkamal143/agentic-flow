@@ -95,7 +95,6 @@ Phase B (#33) on integration branch `phase-b/integration`, one worktree per tick
 - #44 (keep-going, dependency_failed, base_merge_conflict, Delivery Report v3) → `apps/runtime/src/{engine,delivery,dependency-base}.ts`, the Job status derivation in `packages/domain/**`, new modules for its own logic, ADR-0028; writes `tasks.cancel_reason`; no schema change
 - #45 (Requested Replan and carry-over) → `apps/runtime/src/{proposals,plans,plan-approval,scheduler,inbox}.ts`, `apps/runtime/src/jobs.ts` (`requestReplan`), new carry-over module in `packages/domain/src/`, the Blocker option sets (adds the replan options), `apps/cli/src/commands/job.ts`, ADR-0029; writes `jobs.replan_requested`; no schema change; doesn't edit the Job status derivation (#44's)
 - Schema: `jobs.replan_requested` and `tasks.cancel_reason` already added on the integration branch (migration 0013); no schema owner this round
-- #48 (cancel cleanup) → `apps/runtime/src/jobs.ts` (cancel), `apps/runtime/src/worktree.ts`, new cleanup module, `apps/cli/src/commands/job.ts`, B7 scenarios, ADR-0027; in `inbox.ts` only the one dispatch line for `cleanup` items; no schema change, no dashboard code (the Inbox renders options generically; a dashboard scenario is fine)
 
 ## Human decisions (outside CLAUDE.md §7)
 
