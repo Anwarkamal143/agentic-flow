@@ -18,6 +18,7 @@ import {
   BillingSchema,
   DEFAULT_GITHUB_API_BASE_URL,
   DEFAULT_GLOBAL_CONCURRENCY,
+  GitHubApiBaseUrlSchema,
   PriceTableSchema,
   TokenReferenceTextSchema,
   tokenReferenceOf,
@@ -128,7 +129,7 @@ export const FactoryConfigSchema = z.object({
   github: z
     .object({
       token: TokenReferenceTextSchema.optional(),
-      apiBaseUrl: z.url({ protocol: /^https?$/ }).optional(),
+      apiBaseUrl: GitHubApiBaseUrlSchema.optional(),
     })
     .strict()
     .optional(),
@@ -153,10 +154,31 @@ export function globalConcurrency(config: FactoryConfig): number {
   return config.concurrency?.global ?? DEFAULT_GLOBAL_CONCURRENCY;
 }
 
+/**
+ * Throws a {@link ConfigError} naming each invalid field and why. Values are
+ * never quoted in it: a field may hold a secret by mistake.
+ */
 export function readConfig(home: FactoryHome): FactoryConfig | undefined {
   const raw = readIfExists(home.configPath);
   if (raw === undefined) return undefined;
-  return FactoryConfigSchema.parse(JSON.parse(raw));
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    throw new ConfigError(`${home.configPath} is not valid JSON`);
+  }
+  const parsed = FactoryConfigSchema.safeParse(json);
+  if (!parsed.success) {
+    const problems = parsed.error.issues.map(
+      (i) => `${i.path.length === 0 ? '(top level)' : i.path.join('.')}: ${i.message}`,
+    );
+    throw new ConfigError(`${home.configPath} is invalid: ${problems.join('; ')}`);
+  }
+  return parsed.data;
+}
+
+export class ConfigError extends Error {
+  override name = 'ConfigError';
 }
 
 export function writeConfig(home: FactoryHome, config: FactoryConfig): void {

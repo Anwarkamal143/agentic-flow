@@ -87,6 +87,27 @@ function isGitHubHost(host: string | undefined): boolean {
 /** GitHub's REST API for github.com; `config.json` `github.apiBaseUrl` overrides it. */
 export const DEFAULT_GITHUB_API_BASE_URL = 'https://api.github.com';
 
+/**
+ * `config.json` `github.apiBaseUrl`: an http(s) URL with no username or
+ * password. Credentials in it would be a secret in config that doctor and
+ * every error message show, so the URL is refused, and the error never
+ * echoes it. The token always comes from the token reference.
+ */
+export const GitHubApiBaseUrlSchema = z
+  .url({ protocol: /^https?$/, error: 'must be an http or https URL' })
+  .refine(
+    (url) => {
+      // Zod runs this even when `z.url` failed; that failure is the one to report.
+      if (!URL.canParse(url)) return true;
+      const parsed = new URL(url);
+      return parsed.username === '' && parsed.password === '';
+    },
+    {
+      message:
+        'must not contain a username or password; set the token with github.token (gh or env:NAME)',
+    },
+  );
+
 /** Where the GitHub token comes from. Never the token. */
 export type TokenReference = { kind: 'gh' } | { kind: 'env'; name: string };
 

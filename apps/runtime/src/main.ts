@@ -10,6 +10,7 @@ import type { Server } from 'node:http';
 import { serve } from '@hono/node-server';
 import { appendEvent, openDatabase } from '@factory/db';
 import {
+  ConfigError,
   RUNTIME_HOST,
   ensureHomeDirs,
   githubSettings,
@@ -70,7 +71,14 @@ if (!leaseKnobs.ok) fail(leaseKnobs.error);
 applyLeaseKnobs(leaseKnobs.knobs);
 
 const home = resolveHome();
-const config = readConfig(home);
+const config = (() => {
+  try {
+    return readConfig(home);
+  } catch (err) {
+    if (err instanceof ConfigError) fail(err.message);
+    throw err;
+  }
+})();
 const token = readToken(home);
 if (config === undefined || token === undefined) {
   fail(`factory home ${home.root} is not initialized. Run: factory init`);

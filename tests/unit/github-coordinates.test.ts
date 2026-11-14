@@ -5,6 +5,7 @@
  */
 import {
   coordinatesFromRemoteUrl,
+  GitHubApiBaseUrlSchema,
   formatCoordinates,
   parseCoordinates,
   parseTokenReference,
@@ -79,4 +80,30 @@ describe('parseTokenReference', () => {
       expect(parseTokenReference(text).ok).toBe(false);
     },
   );
+});
+
+describe('GitHubApiBaseUrlSchema', () => {
+  it.each(['https://api.github.com', 'https://ghe.acme.internal/api/v3', 'http://127.0.0.1:9/api'])(
+    'accepts %s',
+    (url) => {
+      expect(GitHubApiBaseUrlSchema.safeParse(url).success).toBe(true);
+    },
+  );
+
+  it.each([
+    ['a username and password', 'https://user:s3cret-value@api.github.com'],
+    ['a token as the username', 'https://ghp_abcdefghijklmnop@api.github.com'],
+    ['only a password', 'https://:s3cret-value@api.github.com'],
+  ])('refuses a URL with %s, never echoing it', (_what, url) => {
+    const parsed = GitHubApiBaseUrlSchema.safeParse(url);
+    expect(parsed.success).toBe(false);
+    const text = JSON.stringify(parsed.error?.issues);
+    expect(text).toContain('must not contain a username or password');
+    expect(text).not.toContain('s3cret-value');
+    expect(text).not.toContain('ghp_abcdefghijklmnop');
+  });
+
+  it.each(['ftp://api.github.com', 'not a url', 'file:///etc/passwd'])('refuses %s', (url) => {
+    expect(GitHubApiBaseUrlSchema.safeParse(url).success).toBe(false);
+  });
 });

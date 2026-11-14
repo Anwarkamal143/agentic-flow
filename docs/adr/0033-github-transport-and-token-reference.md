@@ -18,6 +18,8 @@
 - **Lists are one page of 100.** A PR with more than 100 check runs, statuses, reviews or comments is read truncated. Following `Link: rel="next"` is deferred until a case needs it (it is noted under Known limitations).
 - **The package is `packages/github`, not `adapters/git-github`.** It follows the existing layout: the Claude Code adapter lives in `packages/harness`, and there is no `adapters/` directory.
 
+- **No credentials in the API base URL.** `github.apiBaseUrl` must be an http(s) URL with no username or password (`GitHubApiBaseUrlSchema`). A URL like `https://user:secret@host` would put a secret in config that doctor prints, which breaks CLAUDE.md §2 (Secrets). The token always comes from the token reference. The runtime refuses to start with such a config, and the error names the field and the rule without quoting the value. `readConfig` reports every invalid field that way (`ConfigError`).
+
 ### The token reference
 
 `config.json` `github.token` is a **token reference**, never a token. It is either `gh` (the default: the `gh` login, read with `gh auth token`) or `env:NAME` (a variable in the runtime's environment). Any other value is refused by the config schema, and the error never echoes the value, in case someone pasted a token.

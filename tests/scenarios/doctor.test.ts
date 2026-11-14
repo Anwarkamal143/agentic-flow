@@ -140,6 +140,21 @@ describe('factory doctor', () => {
     );
   });
 
+  it('refuses to start with credentials in github.apiBaseUrl, never printing them', async () => {
+    const secret = `s3cret-${'w'.repeat(16)}`;
+    const home = await initializedHome();
+    patchFactoryConfig(home, { github: { apiBaseUrl: `https://user:${secret}@api.github.com` } });
+
+    const started = await startRuntime(home).then(
+      () => 'started',
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+
+    expect(started).toContain('github.apiBaseUrl');
+    expect(started).toContain('must not contain a username or password');
+    expect(started).not.toContain(secret);
+  });
+
   it('resolves the default gh reference with `gh auth token`, never showing it', async () => {
     const token = `gho_${'q'.repeat(36)}`;
     const bin = fakeBin({
