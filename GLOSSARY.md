@@ -49,7 +49,7 @@ One numbered, testable condition in a Specification, either mandatory or optiona
 _Avoid_: Test case, Definition of Done item, requirement
 
 **Task**:
-A unit of work within a Job's plan. Its scope is one Repository, and it can depend on other Tasks.
+A unit of work within a Job. Its scope is one Repository, and it can depend on other Tasks. Most Tasks come from the Plan; the factory adds an Integration Task of its own.
 _Avoid_: Subtask, ticket, step
 
 **Plan**:
@@ -137,8 +137,12 @@ The recorded verdict of a Gate or an acceptance criterion, valid only for the ex
 _Avoid_: Gate result, proof, test result
 
 **Review**:
-An independent judgement of one Task's change by a reviewer Harness Run in a fresh Session, which sees only the Review Packet. It approves the change or requests changes, carries Findings and a verdict per acceptance criterion, and is valid only for the `(head_sha, base_sha)` it reviewed. It is a Gate, stored once and never regenerated.
+An independent judgement of one Task's change by a reviewer Harness Run in a fresh Session, which sees only the Review Packet. It approves the change or requests changes, carries Findings and a verdict per acceptance criterion, and is valid only for the `(head_sha, base_sha)` it reviewed. It is a Gate, stored once and never regenerated. When merging in a moved base leaves the reviewed diff unchanged, the Review is re-anchored to the new code version instead of run again, and the re-anchoring is recorded.
 _Avoid_: Code review (on its own), QA, check
+
+**Merge Gate**:
+The Gate a Job's pull request must pass before it may be merged: the reviewed code is the pull request's head, its checks are green, no blocking Findings or unresolved change requests remain, it has no conflicts, branch protection is satisfied, and the Merge Policy is met.
+_Avoid_: Merge check, merge conditions
 
 **Review Packet**:
 What a reviewer is sent: the specification, the acceptance criteria the Task covers, the diff of the Task Branch, and the factory's own Evidence. Never the implementer's transcript or its claims.
@@ -163,8 +167,12 @@ The branch a single Task's work is committed to, inside its Worktree.
 _Avoid_: Feature branch, work branch
 
 **Integration Branch**:
-The per-Job, per-Repository branch where a Job's approved Task Branches are combined before delivery.
+The per-Job, per-Repository branch where a Job's approved Task Branches are combined before delivery. It is the Integration Task's branch and the head of the Job's pull request. When the base branch moves, the base is merged into it. Once it is a pull request's head it is rewritten only with a human's Approval.
 _Avoid_: Job branch, release branch
+
+**Integration Task**:
+The Task the factory itself creates for each Repository a Job delivers to, not the planner. Its work is the Integration Branch: combining the approved Task Branches, verifying and reviewing the combined change, and any Rework that review or pull-request feedback asks for. It is not part of the Plan and is never replanned.
+_Avoid_: Merge task, integration job
 
 **Integration Review**:
 An independent review of a Job's combined change against its whole Specification, done after Task Branches are integrated and before delivery. It catches problems that no single Task's review can see.
@@ -183,6 +191,10 @@ _Avoid_: Summary, completion report
 **Policy**:
 A rule that limits what the factory may do on its own, such as when it may merge, which paths may change, or which actions need an Approval.
 _Avoid_: Setting, rule set, permission
+
+**Merge Policy**:
+The Policy that says who merges a Repository's pull requests: never the factory (a human merges on GitHub), or the factory after a human's Approval. A Job may only make it stricter.
+_Avoid_: Auto-merge setting, merge rule
 
 **Immutable Invariant**:
 A safety rule that no level of configuration can loosen. Lower levels may only narrow permissions, never widen them.

@@ -9,6 +9,7 @@ import {
   emptyHome,
   initializedHome,
   startRuntime,
+  tempDir,
   type RunningRuntime,
 } from '../support/factory.js';
 import {
@@ -163,6 +164,35 @@ describe('the Claude Code Harness adapter', () => {
     expect(show.stdout).toContain(
       'tier:      Tier 0 · local guardrail (Guardrails only: the Harness runs as your user',
     );
+  });
+
+  it('locks every Harness Run out of GitHub: `gh` denied, the gh credentials not in its env', async () => {
+    const stub = claudeStub();
+    const home = await initializedHome();
+    useClaudeCode(home, stub.command);
+    const rt = await startRuntime(home, {
+      env: {
+        GH_TOKEN: 'gh-token-for-the-lockout-test-not-real',
+        GITHUB_TOKEN: 'github-token-for-the-lockout-test-not-real',
+        GH_CONFIG_DIR: tempDir('factory-gh-config-'),
+      },
+    });
+    killGroupsOnFinish(rt);
+    const repo = await registeredRepo(rt);
+    const created = await createJob(rt, repo.id);
+    const job = await waitForJob(rt, created.id, settled, 30_000);
+    expect(job.status, rt.output()).toBe('completed');
+
+    const runs = stub.invocations();
+    expect(runs.map((r) => r.role)).toEqual(
+      expect.arrayContaining(['triager', 'planner', 'developer', 'reviewer']),
+    );
+    for (const run of runs) {
+      for (const name of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_CONFIG_DIR']) {
+        expect(run.env, `${run.role}: ${name}`).not.toContain(name);
+      }
+      expect(flagValues(run.argv, '--disallowed-tools'), run.role).toContain('Bash(gh:*)');
+    }
   });
 
   it('records the reason the CLI gave when a Harness Run fails, not only its exit code', async () => {

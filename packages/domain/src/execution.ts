@@ -392,7 +392,8 @@ export const SECURITY_TIER_LABELS: Readonly<
 > = {
   local: {
     label: 'Tier 0 · local guardrail',
-    detail: 'Guardrails only: the Harness runs as your user, without isolation.',
+    detail:
+      'Guardrails only: the Harness runs as your user, without isolation. It is denied `gh` and the GitHub tokens, but your `gh` login on disk stays readable.',
   },
 };
 

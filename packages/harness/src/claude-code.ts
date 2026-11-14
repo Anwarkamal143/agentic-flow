@@ -37,6 +37,9 @@
  *   environment never reaches it. Under `api_key` billing, exactly that key is
  *   added to each Harness Run's env, so the Harness and every command it runs
  *   can read it (ADR-0015).
+ * - **GitHub.** Locked out (ADR-0032): every Role denies `Bash(gh:*)`, and
+ *   the guarded env never has the GitHub credentials (`ENV_SCRUBBED`). A
+ *   guardrail: the `gh` login on disk stays readable under Tier 0.
  *
  * Everything the CLI prints is untrusted: the runtime validates the output,
  * and the reason text only explains a failure.

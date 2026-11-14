@@ -58,8 +58,8 @@ Exit tests:
 Scope: the GitHub adapter (auth via `gh` or a token reference, push, PR create and update, check polling with ETags, review and comment polling); the integration branch with re-verification; the staleness policy and gate invalidation; the merge gate and merge policies; the PR feedback → rework loop; a PR body template (summary, ACs + evidence, tests run, risks, rollback notes); the delivery report with PR links.
 
 Exit tests (a fake GitHub adapter by default, plus `[real]` against the test repo):
-1. **C1** A job opens a PR from `factory/<job>` with the correct base, head and body. The PR head SHA equals the reviewed SHA.
-2. **C2** The base branch moves after review → the gates are marked stale → a rebase → verification and CI re-run → the merge gate re-evaluates.
+1. **C1** A job opens a PR from `factory/<job>/integration` with the correct base, head and body. The PR head SHA equals the reviewed SHA.
+2. **C2** The base branch moves after review → the gates are marked stale → the base is merged into the integration branch (never rebased) → verification and CI re-run → the merge gate re-evaluates.
 3. **C3** A policy of `human_approval`: the merge is blocked until approved, the approval is audited, then merged.
 4. **C4** A required check fails → the merge is blocked and the job shows the CI failure with a link.
 5. **C5** A human "changes requested" review on the PR → a rework attempt → the PR is updated in place → it is re-reviewed.

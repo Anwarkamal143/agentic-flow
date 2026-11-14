@@ -9,6 +9,7 @@ import { BlockerSchema } from './rework.js';
 import {
   DEFAULT_TOOL_POLICIES,
   ToolPoliciesSchema,
+  withInvariants,
   type HarnessRole,
   type ToolPolicy,
 } from './tool-policy.js';
@@ -370,9 +371,14 @@ export const RECIPE_DEFAULTS: {
   concurrency: { perRepository: 2, perJob: 2 },
 };
 
-/** The Tier 0 tool policy of `role` in a Job's frozen Effective Configuration (its JSON). Pure. */
+/**
+ * The Tier 0 tool policy of `role` in a Job's frozen Effective Configuration
+ * (its JSON), with the invariant denials added (`withInvariants`). Pure.
+ */
 export function toolPolicyOf(configSnapshotJson: string, role: HarnessRole): ToolPolicy {
-  return EffectiveConfigSchema.parse(JSON.parse(configSnapshotJson)).toolPolicies.value[role];
+  return withInvariants(
+    EffectiveConfigSchema.parse(JSON.parse(configSnapshotJson)).toolPolicies.value[role],
+  );
 }
 
 /** Resolves the Effective Configuration. Pure; frozen onto the Job at creation. */

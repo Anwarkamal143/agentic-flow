@@ -187,7 +187,7 @@ Agent analytics never rank agents on raw counts. They show sample size and mark 
 
 Cancelling a job: stop the running attempts (graceful, then forced), release the leases, set the worktrees to `preserved`, and mark open approvals `cancelled`. **Then ask the human** about each external side effect: close the PRs? delete the remote branches? Never delete local unreviewed work automatically.
 
-In Phase B (no PRs yet) this is one cleanup approval per Job, created after the steps above: "discard the N preserved worktrees?", default keep. Discard happens only on that explicit decision, and task branches are always kept. Phase C adds the PR and remote-branch questions to the same item.
+In Phase B (no PRs yet) this is one cleanup approval per Job, created after the steps above: "discard the N preserved worktrees?", default keep. Discard happens only on that explicit decision, and task branches are always kept. Phase C adds the PR and remote-branch questions to the same item, so it asks three separate questions, each defaulting to keep: discard the preserved worktrees? close the PR? delete the remote branch? A PR kept or closed gets a marked comment, polling stops either way, and the remote branch is deleted only on an explicit yes.
 
 ## 13. Onboarding [v1; MVP = `factory init` + `factory doctor`]
 

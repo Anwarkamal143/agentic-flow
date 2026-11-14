@@ -6,7 +6,8 @@
  *
  * - the environment is built from an explicit allowlist plus the factory's own
  *   variables, never inherited (`env -i` semantics), so secrets in the
- *   runtime's environment don't reach it;
+ *   runtime's environment don't reach it, and the GitHub credentials
+ *   (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_CONFIG_DIR`) never do;
  * - stdin is closed (`/dev/null`), or a file the factory wrote (the prompt),
  *   so nothing can wait on a prompt;
  * - the working directory is the given Worktree;
@@ -51,8 +52,24 @@ export const ENV_ALLOWLIST: readonly string[] = [
 ];
 
 /**
+ * Variables no guarded process ever gets, whoever adds them: the GitHub
+ * credentials and `gh`'s config location (the Harness lock-out from GitHub,
+ * ADR-0032). The allowlist already leaves them out; {@link spawnGuarded}
+ * removes them again from the final environment, so this holds even if the
+ * allowlist, the factory's own variables or a Harness's additions grow. A
+ * guardrail only: the `gh` login on disk (under `HOME`) stays readable under
+ * Tier 0.
+ */
+export const ENV_SCRUBBED: readonly string[] = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_CONFIG_DIR'];
+
+function scrubbed(env: Readonly<Record<string, string>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter(([key]) => !ENV_SCRUBBED.includes(key)));
+}
+
+/**
  * The complete environment of a guarded process: the allowlisted variables of
- * `source`, then `factory` (the factory's own, e.g. ports and ids) on top.
+ * `source`, then `factory` (the factory's own, e.g. ports and ids) on top, less
+ * {@link ENV_SCRUBBED}.
  */
 export function guardrailEnv(
   source: NodeJS.ProcessEnv,
@@ -63,14 +80,14 @@ export function guardrailEnv(
     const value = source[key];
     if (value !== undefined) env[key] = value;
   }
-  return { ...env, ...factory };
+  return scrubbed({ ...env, ...factory });
 }
 
 export interface GuardedOptions {
   command: string;
   args: readonly string[];
   cwd: string;
-  /** The complete environment (see {@link guardrailEnv}). */
+  /** The complete environment (see {@link guardrailEnv}), less {@link ENV_SCRUBBED}. */
   env: Readonly<Record<string, string>>;
   timeoutMs: number;
   /** A directory for this process alone (created if missing); see the module comment. */
@@ -137,7 +154,7 @@ export function spawnGuarded(opts: GuardedOptions): GuardedProcess {
     ['-c', WRAPPER, 'factory-guard', opts.spool, opts.command, ...opts.args],
     {
       cwd: opts.cwd,
-      env: { ...opts.env },
+      env: scrubbed(opts.env),
       stdio: 'ignore',
       // Its own process group, so the whole tree can be signalled, and so it outlives the runtime.
       detached: true,

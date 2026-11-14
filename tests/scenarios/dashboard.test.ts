@@ -118,6 +118,7 @@ describe("the dashboard's read views", () => {
     expect(page).toContain('Cost unknown (subscription)');
     expect(page).toContain('Tier 0 · local guardrail');
     expect(page).toContain('without isolation');
+    expect(page).toContain('login on disk stays readable');
     expect(page.toLowerCase()).not.toContain('sandbox');
   });
 
