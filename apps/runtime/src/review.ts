@@ -42,7 +42,7 @@ import { describeHarnessExit, type HarnessRawResult } from '@factory/harness';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
-import { criteriaCoveredBy } from './criteria.js';
+import { criteriaCoveredBy, currentSpec } from './criteria.js';
 import { changeJob, type JobState, type StageRunStepper } from './engine.js';
 import { gateFinding } from './findings.js';
 import { newId } from './ids.js';
@@ -313,7 +313,7 @@ export async function runReview(
   const { db, artifacts } = deps;
   const { jobId } = input.subject;
   const { runs } = input;
-  const spec = artifacts.listForJob(jobId).find((a) => a.kind === 'spec' && a.stageRunId !== null);
+  const spec = currentSpec(db, jobId);
   if (spec === undefined) throw new Error(`Job ${jobId} has no Specification to review against`);
   const criteria = criteriaCoveredBy(db, jobId, input.definition.acceptance);
   const packet = await buildReviewPacket({

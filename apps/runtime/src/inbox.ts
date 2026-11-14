@@ -59,8 +59,9 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
 import { inspectSpool } from '@factory/harness';
-import { raiseCap, replaceBlocker } from './blocker-approvals.js';
+import { openBlockerItem, raiseCap, replaceBlocker } from './blocker-approvals.js';
 import { applyCleanupDecision } from './cleanup.js';
+import { currentSpec } from './criteria.js';
 import {
   changeJob,
   stepTask,
@@ -76,6 +77,7 @@ import { requireWorktree } from './worktree.js';
 import { latestArtifact, openPlanItem, queueNextStage, startReplan } from './plan-approval.js';
 import { cancelPlanTasks, persistPlanTasks, planContextOf, repositoriesOf } from './plans.js';
 import { grantReplanIn, requestReplanIn } from './replan.js';
+import { applySpecChangeDecision, grantRespecificationIn } from './spec-route.js';
 
 type ApprovalRow = typeof schema.approvals.$inferSelect;
 
@@ -177,7 +179,10 @@ export class InboxService {
         );
       }
       refuseUnless(row, { actor, ...input });
-      if (row.kind === 'plan' && input.option === 'request_changes') {
+      if (
+        (row.kind === 'plan' || row.kind === 'spec_change') &&
+        input.option === 'request_changes'
+      ) {
         refuseReplanUnless(tx, row.jobId, input.comment);
       }
       const now = new Date().toISOString();
@@ -200,7 +205,20 @@ export class InboxService {
         payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
       });
       if (row.kind === 'plan') applyPlanDecision(tx, row, input.option, step, actor);
-      else if (row.kind === 'cleanup') applyCleanupDecision(tx, row, input.option);
+      else if (row.kind === 'spec_change') {
+        applySpecChangeDecision(
+          tx,
+          {
+            item: row,
+            option: input.option,
+            comment: input.comment,
+            actor,
+            artifacts: this.artifacts,
+            readJson: (artifactId) => this.artifacts.readJson(artifactId),
+          },
+          step,
+        );
+      } else if (row.kind === 'cleanup') applyCleanupDecision(tx, row, input.option);
       else throw new ApiFailure(409, 'not_decidable', `no ${row.kind} items are decided yet`);
     });
     this.onCommit();
@@ -317,6 +335,13 @@ export class InboxService {
     if (input.option === 'replan') return this.replanFromItem(item, input, actor);
 
     if (input.option === 'grant_replan') {
+      // The held request is a Replan's, or a re-specification's (ADR-0031).
+      if (this.artifacts.get(item.subjectRef).kind === 'respec_request') {
+        this.decideOnly(item, input, actor, null, (tx, _state, step) => {
+          grantRespecificationIn(tx, item, actor, (id) => this.artifacts.readJson(id), step);
+        });
+        return this.get(item.id);
+      }
       this.decideOnly(item, input, actor, null, (tx, _state, step) => {
         grantReplanIn(
           tx,
@@ -325,6 +350,13 @@ export class InboxService {
           (artifactId) => ReplanRequestContentSchema.parse(this.artifacts.readJson(artifactId)),
           step,
         );
+      });
+      return this.get(item.id);
+    }
+
+    if (input.option === 'rework') {
+      this.decideOnly(item, input, actor, null, (tx, state, step) => {
+        applyRework(tx, { item, actor }, state, step);
       });
       return this.get(item.id);
     }
@@ -659,7 +691,7 @@ export class InboxService {
     const job = requireJob(this.db, jobId);
     const plan = latestArtifact(this.db, jobId, 'plan');
     if (plan === undefined) throw new ApiFailure(404, 'no_plan', `Job ${jobId} has no Plan yet`);
-    const spec = latestArtifact(this.db, jobId, 'spec');
+    const spec = currentSpec(this.db, jobId);
     const triage = latestArtifact(this.db, jobId, 'triage');
     const config = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson));
     const tasks = this.db
@@ -915,6 +947,56 @@ function applyGrant(
     attemptId: asking.id,
     createdAt: new Date().toISOString(),
   });
+}
+
+/**
+ * "Rework with guidance" on a `spec_finding_unresolved` Blocker (ADR-0031):
+ * the current Specification stays and the Task goes `ready` for a Rework
+ * Attempt carrying the comment as guidance (`guidanceAfter`). It counts
+ * against `maxAttempts`: with no Attempt left, the Task waits on a
+ * `rework_cap_reached` Blocker (and its Approval) instead, so no option
+ * escapes a cap.
+ */
+function applyRework(
+  tx: Tx,
+  input: { item: ApprovalRow; actor: string },
+  state: JobState,
+  step: StageRunStepper,
+): void {
+  const { item, actor } = input;
+  const { task, blocker } = blockedTaskOf(tx, item);
+  if (blocker.reason !== 'spec_finding_unresolved') {
+    throw new Error(`a ${blocker.reason} Blocker offers no Rework`);
+  }
+  const op = { jobId: item.jobId, actor };
+  const used = attemptsCountedForRework(
+    tx
+      .select({ cause: schema.attempts.cause })
+      .from(schema.attempts)
+      .where(eq(schema.attempts.taskId, task.id))
+      .all()
+      .map((a) => ({ cause: AttemptCauseSchema.parse(a.cause) })),
+  );
+  if (used >= task.maxAttempts) {
+    const capped: Blocker = {
+      kind: 'human',
+      reason: 'rework_cap_reached',
+      detail: `${actor} chose Rework in Inbox Item ${item.id}, but Attempt ${String(used)} of at most ${String(task.maxAttempts)} was the last allowed, so no Rework starts`,
+      requiredAction:
+        'decide the Blocker Approval in the Inbox: grant more Attempts (with guidance), replan, or cancel the Job',
+      taskId: task.id,
+      attemptId: blocker.attemptId,
+      createdAt: new Date().toISOString(),
+    };
+    replaceBlocker(tx, op, task, capped);
+    openBlockerItem(tx, op, task, capped);
+    return;
+  }
+  stepTask(tx, op, task, 'ready', {
+    reason: 'rework_with_guidance',
+    payload: { approvalId: item.id, attemptId: blocker.attemptId, nextAttempt: used + 1 },
+  });
+  requeueExecution(state, step, `Blocker Approval ${item.id}: ${actor} chose Rework with guidance`);
 }
 
 /**

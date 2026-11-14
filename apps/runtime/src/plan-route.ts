@@ -20,8 +20,15 @@ import { requestReplanIn } from './replan.js';
 
 type TaskRow = typeof schema.tasks.$inferSelect;
 
-/** A Replan already pending covers this one: requested and waiting, or held at the cap. */
-const ALREADY_PENDING = ['replan_already_requested', 'replan_cap_pending'];
+/**
+ * A Replan already pending covers this one: requested and waiting, or held at
+ * the cap; so does a pending re-specification, whose approval replans (ADR-0031).
+ */
+const ALREADY_PENDING = [
+  'replan_already_requested',
+  'replan_cap_pending',
+  'respecification_pending',
+];
 
 /**
  * Cancels `task` (just failed its review in `attemptId`) and its dependents,

@@ -37,6 +37,7 @@ import type { ArtifactStore } from './artifacts.js';
 import { changeJob, readJobState, stepTask, type JobState } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
+import { currentSpec } from './criteria.js';
 import { queueNextStage } from './plan-approval.js';
 import {
   persistPlanTasks,
@@ -55,6 +56,12 @@ import {
   renderPrompt,
   type ProposalStage,
 } from './proposals.js';
+import {
+  awaitSpecChange,
+  respecificationFailed,
+  respecRequestOf,
+  type RespecRequest,
+} from './spec-route.js';
 
 const ACTOR = 'system:scheduler';
 const POLL_MS = 1_000;
@@ -218,10 +225,13 @@ export class StageScheduler {
     const repositories = this.repositoriesOf(job.id);
     const [cwd] = repositories.map((r) => r.clonePath);
     if (cwd === undefined) throw new Error(`Job ${job.id} has no Repository`);
-    // A replan request reaches the planner as its Replan section below, not as an input.
+    // A replan or re-specification request reaches its Stage as a section below, not as an
+    // input; of the spec Artifacts only the current Specification is one (ADR-0031).
+    const spec = currentSpec(this.opts.db, job.id)?.id;
     const inputs = this.opts.artifacts
       .listForJob(job.id)
-      .filter((a) => a.kind !== 'replan_request')
+      .filter((a) => a.kind !== 'replan_request' && a.kind !== 'respec_request')
+      .filter((a) => a.kind !== 'spec' || a.id === spec)
       .map((a) => ({ kind: a.kind, content: this.opts.artifacts.readJson(a.id) }));
 
     // A Replan (ADR-0019): the planner re-plans from the current Plan and the human's feedback.
@@ -233,6 +243,16 @@ export class StageScheduler {
       replan === undefined
         ? undefined
         : { ...replan, plan: this.opts.artifacts.readJson(replan.planArtifactId) };
+    // A re-specification (ADR-0031): the specifier revises a Specification from the feedback.
+    const respec = respecRequestOf(this.opts.db, run, (id) => this.opts.artifacts.readJson(id));
+    const respecInput =
+      respec === undefined
+        ? undefined
+        : {
+            specArtifactId: respec.specArtifactId,
+            feedback: respec.feedback,
+            spec: this.opts.artifacts.readJson(respec.specArtifactId),
+          };
 
     let rejected: RuleIssue[] | undefined;
     for (let n = 1; n <= MAX_RUNS; n++) {
@@ -242,6 +262,7 @@ export class StageScheduler {
         inputs,
         ...(rejected === undefined ? {} : { rejected }),
         ...(replanInput === undefined ? {} : { replan: replanInput }),
+        ...(respecInput === undefined ? {} : { respec: respecInput }),
       });
       const outcome = await this.harnessRun(harness, stage, run, {
         n,
@@ -251,11 +272,12 @@ export class StageScheduler {
         repositories,
         rejected,
         replan,
+        respec,
       });
       if (this.closed) return; // shutdown: left running, resumed at the next start
       if (this.stageRun(stageRunId).state !== 'running') return; // the Job was cancelled
       if (outcome.kind === 'valid') {
-        this.succeed(run, stage, outcome.value);
+        this.succeed(run, stage, outcome.value, respec);
         return;
       }
       if (outcome.kind === 'harness_failed') {
@@ -284,6 +306,7 @@ export class StageScheduler {
       repositories: readonly JobRepository[];
       rejected: RuleIssue[] | undefined;
       replan: ReplanRequest | undefined;
+      respec: RespecRequest | undefined;
     },
   ): Promise<Outcome> {
     // A proposal Run is never re-attached: a Stage Run left running starts again.
@@ -318,6 +341,15 @@ export class StageScheduler {
       ...(started.sessionRef === undefined ? {} : { sessionRef: started.sessionRef }),
       ...(input.rejected === undefined ? {} : { reprompt: { issues: input.rejected } }),
       ...(input.replan === undefined ? {} : { replan: input.replan }),
+      ...(input.respec === undefined
+        ? {}
+        : {
+            respec: {
+              specArtifactId: input.respec.specArtifactId,
+              feedback: input.respec.feedback,
+              requestArtifactId: input.respec.requestArtifactId,
+            },
+          }),
     });
     // Progress isn't stored yet, only counted; draining keeps the stream from backing up.
     const drained = (async () => {
@@ -400,9 +432,15 @@ export class StageScheduler {
 
   /**
    * Stores the proposal and everything taken from it, completes the Stage Run
-   * and queues the next Stage. One transaction.
+   * and queues the next Stage. One transaction. A re-specification's spec
+   * instead waits on its `spec_change` Approval (ADR-0031).
    */
-  private succeed(run: StageRunRow, stage: ProposalStage, value: unknown): void {
+  private succeed(
+    run: StageRunRow,
+    stage: ProposalStage,
+    value: unknown,
+    respec: RespecRequest | undefined,
+  ): void {
     const content = this.opts.artifacts.writeContent(value);
     changeJob(
       this.opts.db,
@@ -415,6 +453,14 @@ export class StageScheduler {
           ACTOR,
         );
         this.persist(tx, stage.kind, value, { jobId: run.jobId, artifactId: artifact.id });
+        if (respec !== undefined) {
+          awaitSpecChange(
+            tx,
+            { run: current, specArtifactId: artifact.id, request: respec, actor: ACTOR },
+            step,
+          );
+          return;
+        }
         step(current, 'succeeded');
         queueNextStage(tx, run.jobId, step, current.position, ACTOR);
       },
@@ -459,6 +505,16 @@ export class StageScheduler {
       this.opts.db,
       { jobId: run.jobId, expectedVersion: 'current', actor: ACTOR },
       (tx, state, step) => {
+        // A failed re-specification leaves the Finding to the operator, and the Job goes on
+        // under its current Specification: the Stage Run no longer counts (ADR-0031).
+        const respec = respecRequestOf(tx, run, (id) => this.opts.artifacts.readJson(id));
+        if (respec !== undefined) {
+          step(requireStageRun(state, run.id, 'running'), 'superseded', {
+            reason: `the re-specification failed (${failure.reason}: ${failure.message}); the current Specification stays`,
+          });
+          respecificationFailed(tx, { jobId: run.jobId, actor: ACTOR }, respec, failure);
+          return;
+        }
         step(requireStageRun(state, run.id, 'running'), 'failed', { failure });
         // A failed Replan ends the Job: the Tasks it would have carried over or cancelled
         // are cancelled now, with their open Inbox Items (ADR-0029).

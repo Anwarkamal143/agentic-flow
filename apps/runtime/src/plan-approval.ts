@@ -15,6 +15,7 @@ import {
 } from '@factory/domain';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { readJobState, type JobState, type StageRunStepper } from './engine.js';
+import { currentSpec } from './criteria.js';
 import { newId } from './ids.js';
 import { settleExecution } from './execution.js';
 
@@ -81,7 +82,7 @@ function settleIfNothingToClaim(tx: Tx, jobId: string, step: StageRunStepper, ru
 export function openPlanItem(tx: Tx, jobId: string, stageRunId: string, actor: string): string {
   const plan = latestArtifact(tx, jobId, 'plan');
   if (plan === undefined) throw new Error(`Job ${jobId} reached plan_approval without a Plan`);
-  const spec = latestArtifact(tx, jobId, 'spec');
+  const spec = currentSpec(tx, jobId);
   const id = newId('apr');
   const kind: ApprovalKind = 'plan';
   const expiresPolicy: ExpiresPolicy = 'remain_pending';

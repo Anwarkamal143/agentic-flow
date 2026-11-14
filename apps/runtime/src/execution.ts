@@ -80,7 +80,7 @@ import { z } from 'zod';
 import type { ArtifactStore, StoredContent } from './artifacts.js';
 import { claimNextTask, heartbeatIntervalMs, leaseExpiry } from './claim.js';
 import { heartbeatTick, sweptAttempt } from './sweeper.js';
-import { criteriaCoveredBy } from './criteria.js';
+import { criteriaCoveredBy, currentSpec } from './criteria.js';
 import { blockOnBaseConflict, makeDependencyBase } from './dependency-base.js';
 import { settleExecution } from './keep-going.js';
 import {
@@ -103,6 +103,7 @@ import {
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
 import { routeToPlanning } from './plan-route.js';
+import { routeToSpecification } from './spec-route.js';
 import { answersAfter, openQuestionItem } from './questions.js';
 import { guidanceAfter } from './blocker-approvals.js';
 import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
@@ -1125,7 +1126,7 @@ export class TaskScheduler {
   }): TaskPacket {
     const { job, task, definition, repo } = input;
     const artifacts = this.opts.artifacts.listForJob(job.id).filter((a) => a.stageRunId !== null);
-    const spec = artifacts.find((a) => a.kind === 'spec');
+    const spec = currentSpec(this.opts.db, job.id);
     const discovery = artifacts.find((a) => a.kind === 'discovery');
     const objective =
       spec === undefined
@@ -2064,8 +2065,9 @@ function commandCriteriaFailures(
  * Ends the Attempt with `outcome`, releases its leases, preserves the Worktree,
  * and moves the Task: `approved`; or, after a failure, where Rework routing
  * sends it (ARCHITECTURE §4.6): back to `ready` for a Rework Attempt (through
- * `changes_requested`), `blocked` with a Blocker (the cap is reached, or a
- * blocking Finding blames the Specification or the infrastructure),
+ * `changes_requested`), `blocked` with a Blocker (the cap is reached, a
+ * blocking Finding blames the infrastructure, or it blames the Specification,
+ * which re-runs, ADR-0031),
  * `cancelled` with its dependents and a Replan asked for (a blocking Finding
  * blames the Plan, ADR-0030), or `failed`. Then settles `execution`.
  */
@@ -2137,6 +2139,21 @@ function endAttempt(
       stepTask(tx, op, task, 'failed', { reason, payload });
     } else if (route.kind === 'replan') {
       routeToPlanning(
+        tx,
+        input.artifacts,
+        op,
+        {
+          task,
+          attemptId,
+          attemptN: attempt.n,
+          headSha: inspection.headSha,
+          findings: attemptFindings(tx, attempt),
+        },
+        step,
+      );
+      replanned = true;
+    } else if (route.kind === 'respecify') {
+      routeToSpecification(
         tx,
         input.artifacts,
         op,

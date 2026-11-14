@@ -43,6 +43,7 @@ import { ApiFailure } from './errors.js';
 import { attemptFindings } from './findings.js';
 import type { ArtifactStore } from './artifacts.js';
 import { openCleanupItem } from './cleanup.js';
+import { currentCriteria } from './criteria.js';
 import { cancelOpenItems } from './inbox.js';
 import { requestReplanIn } from './replan.js';
 import { newId } from './ids.js';
@@ -276,14 +277,10 @@ export class JobService {
     return this.get(id);
   }
 
+  /** The current Specification's criteria (a spec waiting on its `spec_change` Approval is not, ADR-0031). */
   acceptanceCriteria(jobId: string): AcceptanceCriterion[] {
     this.get(jobId); // 404 for an unknown Job
-    return this.db
-      .select()
-      .from(schema.acceptanceCriteria)
-      .where(eq(schema.acceptanceCriteria.jobId, jobId))
-      .orderBy(asc(sql`rowid`))
-      .all();
+    return currentCriteria(this.db, jobId);
   }
 
   tasks(jobId: string): Task[] {

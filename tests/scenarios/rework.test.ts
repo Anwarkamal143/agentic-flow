@@ -367,19 +367,6 @@ describe('The path-scope Gate and Rework', () => {
     expect((await tasksOf(rt, job.id))[0]?.state).toBe('cancelled');
   });
 
-  // A blocking `plan` Finding replans instead (B4): tests/scenarios/plan-route.test.ts.
-  it('routes a blocking Finding with Fault Origin spec to a human', async () => {
-    const spec = await runWith(scriptWith({}, {}, { 'add-sum': [blockingReview('spec')] }));
-
-    for (const [{ rt, job }, reason] of [[spec, 'fault_origin_spec']] as const) {
-      expect(job.status).toBe('waiting_human');
-      const attempts = await attemptsOf(rt, job.id);
-      expect(attempts.map((a) => [a.n, a.state, a.exitReason])).toEqual([
-        [1, 'failed', 'changes_requested'],
-      ]);
-      const [task] = (await tasksOf(rt, job.id)) as [TaskBody];
-      expect(task).toMatchObject({ state: 'blocked', blocker: { kind: 'human', reason } });
-      expect(job.stageRuns.find((s) => s.stageId === 'execution')?.state).toBe('waiting_human');
-    }
-  });
+  // A blocking `plan` Finding replans instead (B4): tests/scenarios/plan-route.test.ts;
+  // a blocking `spec` Finding re-specifies (#47): tests/scenarios/spec-route.test.ts.
 });
