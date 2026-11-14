@@ -83,14 +83,30 @@ export type BlockerKind = z.infer<typeof BlockerKindSchema>;
  * `recovery_uncertain`: after a crash the factory can't safely go on (the
  * interrupted Attempt left uncommitted changes, or its Worktree's state is
  * unknown). `retry_cap_reached`: an interrupted Attempt has no Retry left.
+ * `awaiting_human`: the developer asked a Question; the Task waits for the
+ * answer in the Inbox (ADR-0023). `question_cap_reached`: it asked again with
+ * no answer Attempt left (`max_questions`). `replan_cap_reached`: a Replan was
+ * asked for with none left (`max_replans`, ADR-0029); a Job-level Blocker
+ * whose Approval holds the request. `base_merge_conflict`: merging its
+ * dependencies' approved heads into its Dependency Base conflicts, so it
+ * can't start (ADR-0028); never an automatic replan.
+ * `spec_finding_unresolved`: a blocking Finding blames the Specification and
+ * no Specification change resolves it (the operator rejected the change, or
+ * none could start); its Approval offers Rework with guidance, a Replan under
+ * the current Specification, or cancelling the Job (#47).
  */
 export const BlockerReasonSchema = z.enum([
+  'awaiting_human',
+  'question_cap_reached',
   'rework_cap_reached',
   'fault_origin_plan',
   'fault_origin_spec',
   'fault_origin_infrastructure',
   'recovery_uncertain',
   'retry_cap_reached',
+  'replan_cap_reached',
+  'base_merge_conflict',
+  'spec_finding_unresolved',
 ]);
 export type BlockerReason = z.infer<typeof BlockerReasonSchema>;
 
@@ -101,7 +117,11 @@ export const BlockerSchema = z.object({
   detail: z.string(),
   requiredAction: z.string(),
   taskId: z.string(),
-  /** The Attempt whose end raised it. */
+  /**
+   * The Attempt whose end raised it: the subject of its Blocker Approval. A
+   * `base_merge_conflict` arises before its Task has any Attempt, so it holds
+   * the Task's id instead (ADR-0028).
+   */
   attemptId: z.string(),
   createdAt: z.string(),
 });
@@ -110,6 +130,10 @@ export type Blocker = z.infer<typeof BlockerSchema>;
 export type ReworkRoute =
   | { kind: 'rework' }
   | { kind: 'fail' }
+  /** A blocking Finding blames the Plan: back to `planning` (ARCHITECTURE §4.6, B4). */
+  | { kind: 'replan' }
+  /** A blocking Finding blames the Specification: `specification` re-runs (§4.6, #47). */
+  | { kind: 'respecify' }
   | { kind: 'blocked'; blocker: Pick<Blocker, 'kind' | 'reason' | 'detail' | 'requiredAction'> };
 
 /** Exit reasons that are a verdict on the work, and so route to Rework. */
@@ -119,9 +143,11 @@ const REWORKABLE: readonly AttemptExitReason[] = ['gates_failed', 'changes_reque
  * Where a failed Attempt goes next. Only a verdict on the work (a failed Gate,
  * a review that requested changes) routes anywhere; anything else fails the
  * Task. A blocking Finding whose Fault Origin is the Specification, the Plan
- * or the infrastructure (in that precedence) stops for that; otherwise a new
- * Attempt follows, unless this one was the last allowed (`n >= maxAttempts`).
- * Pure.
+ * or the infrastructure (in that precedence) routes there: the Specification
+ * is re-specified (`respecify`, #47) and the Plan goes back to planning
+ * (`replan`), both counted against `max_replans`, not `max_attempts`; the
+ * infrastructure blocks; otherwise a new Attempt follows, unless this one was the last
+ * allowed (`n >= maxAttempts`). Pure.
  */
 export function routeFailedAttempt(input: {
   exitReason: AttemptExitReason;
@@ -132,32 +158,9 @@ export function routeFailedAttempt(input: {
 }): ReworkRoute {
   if (!REWORKABLE.includes(input.exitReason)) return { kind: 'fail' };
   // Only blocking Findings route; a non-blocking one is advice (ARCHITECTURE §4.6).
-  // Phase B extension point (B4): the spec and plan routes below stop for a human
-  // today; Phase B sends them back to the specification or planning Stage instead.
   const origins = new Set(input.findings.filter((f) => f.blocking).map((f) => f.faultOrigin));
-  if (origins.has('spec')) {
-    return {
-      kind: 'blocked',
-      blocker: {
-        kind: 'human',
-        reason: 'fault_origin_spec',
-        detail: 'a blocking Finding says the Specification is wrong',
-        requiredAction:
-          'decide on the Specification change (re-specification is not built before Phase B)',
-      },
-    };
-  }
-  if (origins.has('plan')) {
-    return {
-      kind: 'blocked',
-      blocker: {
-        kind: 'human',
-        reason: 'fault_origin_plan',
-        detail: 'a blocking Finding says the Plan is wrong',
-        requiredAction: 'decide on a replan (replanning is not built before Phase B)',
-      },
-    };
-  }
+  if (origins.has('spec')) return { kind: 'respecify' };
+  if (origins.has('plan')) return { kind: 'replan' };
   if (origins.has('infrastructure')) {
     return {
       kind: 'blocked',
@@ -176,7 +179,8 @@ export function routeFailedAttempt(input: {
         kind: 'human',
         reason: 'rework_cap_reached',
         detail: `Attempt ${String(input.n)} of at most ${String(input.maxAttempts)} failed, so no further Rework starts`,
-        requiredAction: 'look at the Attempts and decide how the Task goes on',
+        requiredAction:
+          'look at the Attempts, then decide the Blocker Approval in the Inbox: grant more Attempts (with guidance) or cancel the Job',
       },
     };
   }

@@ -14,18 +14,14 @@ import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
-  EffectiveConfigSchema,
-  initialTaskState,
   PlanProposalSchema,
   schemaIssues,
   SpecificationProposalSchema,
-  TaskDefinitionSchema,
   type ArtifactKind,
   type PlanContext,
   type RuleIssue,
   type StageFailure,
   type StageRunState,
-  type TaskDefinition,
   toolPolicyOf,
   type ToolPolicy,
 } from '@factory/domain';
@@ -38,9 +34,20 @@ import {
 } from '@factory/harness';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
-import { changeJob, readJobState, type JobState } from './engine.js';
+import { changeJob, readJobState, stepTask, type JobState } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
+import { currentSpec } from './criteria.js';
+import { queueNextStage } from './plan-approval.js';
+import {
+  persistPlanTasks,
+  planContextOf,
+  replanRequestOf,
+  repositoriesOf,
+  type JobRepository,
+  type ReplanRequest,
+  cancelTaskItems,
+} from './plans.js';
 import {
   PROMPT_TEMPLATE_HASH,
   PROMPT_TEMPLATE_ID,
@@ -49,6 +56,12 @@ import {
   renderPrompt,
   type ProposalStage,
 } from './proposals.js';
+import {
+  awaitSpecChange,
+  respecificationFailed,
+  respecRequestOf,
+  type RespecRequest,
+} from './spec-route.js';
 
 const ACTOR = 'system:scheduler';
 const POLL_MS = 1_000;
@@ -78,6 +91,17 @@ type Outcome =
   | { kind: 'valid'; value: unknown }
   | { kind: 'invalid'; issues: RuleIssue[] }
   | { kind: 'harness_failed'; message: string };
+
+/**
+ * What a proposal Harness Run is asked besides its Stage: why the previous
+ * output was rejected (a re-prompt), and the Replan or re-specification
+ * request it answers. Each is recorded on `harness_run.started`.
+ */
+interface StageRunContext {
+  rejected: RuleIssue[] | undefined;
+  replan: ReplanRequest | undefined;
+  respec: RespecRequest | undefined;
+}
 
 export class StageScheduler {
   private readonly loop = new PassLoop(() => this.pass(), POLL_MS);
@@ -212,9 +236,34 @@ export class StageScheduler {
     const repositories = this.repositoriesOf(job.id);
     const [cwd] = repositories.map((r) => r.clonePath);
     if (cwd === undefined) throw new Error(`Job ${job.id} has no Repository`);
+    // A replan or re-specification request reaches its Stage as a section below, not as an
+    // input; of the spec Artifacts only the current Specification is one (ADR-0031).
+    const spec = currentSpec(this.opts.db, job.id)?.id;
     const inputs = this.opts.artifacts
       .listForJob(job.id)
+      .filter((a) => a.kind !== 'replan_request' && a.kind !== 'respec_request')
+      .filter((a) => a.kind !== 'spec' || a.id === spec)
       .map((a) => ({ kind: a.kind, content: this.opts.artifacts.readJson(a.id) }));
+
+    // A Replan (ADR-0019): the planner re-plans from the current Plan and the human's feedback.
+    const replan =
+      stage.stageId === 'planning'
+        ? replanRequestOf(this.opts.db, job.id, (id) => this.opts.artifacts.readJson(id))
+        : undefined;
+    const replanInput =
+      replan === undefined
+        ? undefined
+        : { ...replan, plan: this.opts.artifacts.readJson(replan.planArtifactId) };
+    // A re-specification (ADR-0031): the specifier revises a Specification from the feedback.
+    const respec = respecRequestOf(this.opts.db, run, (id) => this.opts.artifacts.readJson(id));
+    const respecInput =
+      respec === undefined
+        ? undefined
+        : {
+            specArtifactId: respec.specArtifactId,
+            feedback: respec.feedback,
+            spec: this.opts.artifacts.readJson(respec.specArtifactId),
+          };
 
     let rejected: RuleIssue[] | undefined;
     for (let n = 1; n <= MAX_RUNS; n++) {
@@ -223,6 +272,8 @@ export class StageScheduler {
         repositories,
         inputs,
         ...(rejected === undefined ? {} : { rejected }),
+        ...(replanInput === undefined ? {} : { replan: replanInput }),
+        ...(respecInput === undefined ? {} : { respec: respecInput }),
       });
       const outcome = await this.harnessRun(harness, stage, run, {
         n,
@@ -230,12 +281,12 @@ export class StageScheduler {
         cwd,
         policy: toolPolicyOf(job.configSnapshotJson, stage.role),
         repositories,
-        rejected,
+        context: { rejected, replan, respec },
       });
       if (this.closed) return; // shutdown: left running, resumed at the next start
       if (this.stageRun(stageRunId).state !== 'running') return; // the Job was cancelled
       if (outcome.kind === 'valid') {
-        this.succeed(run, stage, outcome.value);
+        this.succeed(run, stage, outcome.value, respec);
         return;
       }
       if (outcome.kind === 'harness_failed') {
@@ -261,10 +312,11 @@ export class StageScheduler {
       prompt: string;
       cwd: string;
       policy: ToolPolicy;
-      repositories: PlanContext['repositories'];
-      rejected: RuleIssue[] | undefined;
+      repositories: readonly JobRepository[];
+      context: StageRunContext;
     },
   ): Promise<Outcome> {
+    const { rejected, replan, respec } = input.context;
     // A proposal Run is never re-attached: a Stage Run left running starts again.
     const spool = join(this.opts.spoolRoot, `${run.id}-${String(input.n)}`);
     rmSync(spool, { recursive: true, force: true });
@@ -295,7 +347,17 @@ export class StageScheduler {
       n: input.n,
       template: { id: PROMPT_TEMPLATE_ID, hash: PROMPT_TEMPLATE_HASH },
       ...(started.sessionRef === undefined ? {} : { sessionRef: started.sessionRef }),
-      ...(input.rejected === undefined ? {} : { reprompt: { issues: input.rejected } }),
+      ...(rejected === undefined ? {} : { reprompt: { issues: rejected } }),
+      ...(replan === undefined ? {} : { replan }),
+      ...(respec === undefined
+        ? {}
+        : {
+            respec: {
+              specArtifactId: respec.specArtifactId,
+              feedback: respec.feedback,
+              requestArtifactId: respec.requestArtifactId,
+            },
+          }),
     });
     // Progress isn't stored yet, only counted; draining keeps the stream from backing up.
     const drained = (async () => {
@@ -307,15 +369,11 @@ export class StageScheduler {
     const eventCount = await drained;
     this.current = undefined;
     rmSync(spool, { recursive: true, force: true });
-    const outcome = this.evaluate(stage, result, {
-      repositories: input.repositories,
-      // Read after the Run: the Specification's criteria, for planning.
-      criteria: this.opts.db
-        .select()
-        .from(schema.acceptanceCriteria)
-        .where(eq(schema.acceptanceCriteria.jobId, run.jobId))
-        .all(),
-    });
+    const outcome = this.evaluate(
+      stage,
+      result,
+      await this.planContext(stage, run, input.repositories),
+    );
     this.event(run, started.executionId, 'harness_run.finished', {
       stageRunId: run.id,
       stageId: run.stageId,
@@ -329,6 +387,21 @@ export class StageScheduler {
       ...(outcome.kind === 'invalid' ? { issues: outcome.issues } : {}),
     });
     return outcome;
+  }
+
+  /**
+   * What the validators check a proposal against, read after the Run: the
+   * Specification's criteria, the Effective Configuration's `maxAttempts`,
+   * and, for planning only, the tracked files at the planning base.
+   */
+  private planContext(
+    stage: ProposalStage,
+    run: StageRunRow,
+    repositories: readonly JobRepository[],
+  ): Promise<PlanContext> {
+    return planContextOf(this.opts.db, run.jobId, repositories, {
+      trackedFiles: stage.stageId === 'planning',
+    });
   }
 
   /** Decides what a Harness Run's output is worth. The exit code alone proves nothing. */
@@ -367,9 +440,15 @@ export class StageScheduler {
 
   /**
    * Stores the proposal and everything taken from it, completes the Stage Run
-   * and queues the next Stage. One transaction.
+   * and queues the next Stage. One transaction. A re-specification's spec
+   * instead waits on its `spec_change` Approval (ADR-0031).
    */
-  private succeed(run: StageRunRow, stage: ProposalStage, value: unknown): void {
+  private succeed(
+    run: StageRunRow,
+    stage: ProposalStage,
+    value: unknown,
+    respec: RespecRequest | undefined,
+  ): void {
     const content = this.opts.artifacts.writeContent(value);
     changeJob(
       this.opts.db,
@@ -381,16 +460,17 @@ export class StageScheduler {
           { jobId: run.jobId, stageRunId: run.id, kind: stage.kind, content },
           ACTOR,
         );
-        this.persist(tx, stage.kind, value, {
-          jobId: run.jobId,
-          artifactId: artifact.id,
-          config: state.job.configSnapshotJson,
-        });
+        this.persist(tx, stage.kind, value, { jobId: run.jobId, artifactId: artifact.id });
+        if (respec !== undefined) {
+          awaitSpecChange(
+            tx,
+            { run: current, specArtifactId: artifact.id, request: respec, actor: ACTOR },
+            step,
+          );
+          return;
+        }
         step(current, 'succeeded');
-        const next = state.stageRuns.find(
-          (r) => r.position > current.position && r.state === 'pending',
-        );
-        if (next !== undefined) step(next, 'queued');
+        queueNextStage(tx, run.jobId, step, current.position, ACTOR);
       },
     );
     this.opts.onCommit();
@@ -401,7 +481,7 @@ export class StageScheduler {
     tx: Tx,
     kind: ArtifactKind,
     value: unknown,
-    ctx: { jobId: string; artifactId: string; config: string },
+    ctx: { jobId: string; artifactId: string },
   ): void {
     if (kind === 'spec') {
       const spec = SpecificationProposalSchema.parse(value);
@@ -420,59 +500,11 @@ export class StageScheduler {
         .run();
     }
     if (kind === 'plan') {
-      const plan = PlanProposalSchema.parse(value);
-      const config = EffectiveConfigSchema.parse(JSON.parse(ctx.config));
-      const repositories = this.repositoriesOf(ctx.jobId, tx);
-      const ids = new Map(plan.tasks.map((t) => [t.key, newId('tsk')]));
-      for (const task of plan.tasks) {
-        const repo = repositories.find(
-          (r) => r.id === task.repository || r.name === task.repository,
-        );
-        if (repo === undefined) throw new Error(`validated Task ${task.key} has no Repository`);
-        const id = taskId(ids, task.key);
-        const state = initialTaskState(task.dependsOn);
-        tx.insert(schema.tasks)
-          .values({
-            id,
-            jobId: ctx.jobId,
-            repositoryId: repo.id,
-            planArtifactId: ctx.artifactId,
-            key: task.key,
-            title: task.title,
-            definitionJson: JSON.stringify(
-              TaskDefinitionSchema.parse({
-                objective: task.objective,
-                role: task.role,
-                risk: task.risk,
-                scope: task.scope,
-                dependsOn: task.dependsOn,
-                acceptance: task.acceptance,
-                verification: task.verification,
-              } satisfies TaskDefinition),
-            ),
-            state,
-            priority: 0,
-            maxAttempts: config.maxAttempts.value,
-            maxRetries: config.maxRetries.value,
-            version: 0,
-          })
-          .run();
-        appendEvent(tx, {
-          entityKind: 'task',
-          entityId: id,
-          jobId: ctx.jobId,
-          type: 'task.created',
-          actor: ACTOR,
-          payload: { key: task.key, state, repositoryId: repo.id, planArtifactId: ctx.artifactId },
-        });
-      }
-      for (const task of plan.tasks) {
-        for (const dep of task.dependsOn) {
-          tx.insert(schema.taskDependencies)
-            .values({ taskId: taskId(ids, task.key), dependsOnTaskId: taskId(ids, dep) })
-            .run();
-        }
-      }
+      persistPlanTasks(tx, PlanProposalSchema.parse(value), {
+        ...ctx,
+        actor: ACTOR,
+        readPlan: (id) => PlanProposalSchema.parse(this.opts.artifacts.readJson(id)),
+      });
     }
   }
 
@@ -480,8 +512,21 @@ export class StageScheduler {
     changeJob(
       this.opts.db,
       { jobId: run.jobId, expectedVersion: 'current', actor: ACTOR },
-      (_, state, step) => {
+      (tx, state, step) => {
+        // A failed re-specification leaves the Finding to the operator, and the Job goes on
+        // under its current Specification: the Stage Run no longer counts (ADR-0031).
+        const respec = respecRequestOf(tx, run, (id) => this.opts.artifacts.readJson(id));
+        if (respec !== undefined) {
+          step(requireStageRun(state, run.id, 'running'), 'superseded', {
+            reason: `the re-specification failed (${failure.reason}: ${failure.message}); the current Specification stays`,
+          });
+          respecificationFailed(tx, { jobId: run.jobId, actor: ACTOR }, respec, failure);
+          return;
+        }
         step(requireStageRun(state, run.id, 'running'), 'failed', { failure });
+        // A failed Replan ends the Job: the Tasks it would have carried over or cancelled
+        // are cancelled now, with their open Inbox Items (ADR-0029).
+        if (run.stageId === 'planning') cancelUnfinishedTasks(tx, run.jobId, ACTOR);
       },
     );
     this.opts.onCommit();
@@ -516,20 +561,8 @@ export class StageScheduler {
     return run;
   }
 
-  private repositoriesOf(jobId: string, db: FactoryDb | Tx = this.opts.db) {
-    return db
-      .select({
-        id: schema.repositories.id,
-        name: schema.repositories.name,
-        clonePath: schema.repositories.clonePath,
-      })
-      .from(schema.jobRepositories)
-      .innerJoin(
-        schema.repositories,
-        eq(schema.repositories.id, schema.jobRepositories.repositoryId),
-      )
-      .where(eq(schema.jobRepositories.jobId, jobId))
-      .all();
+  private repositoriesOf(jobId: string): JobRepository[] {
+    return repositoriesOf(this.opts.db, jobId);
   }
 }
 
@@ -542,9 +575,23 @@ function requireStageRun(state: JobState, id: string, expected: StageRunState): 
   return run;
 }
 
-/** The id given to a validated Plan's Task key (the validator guarantees it exists). */
-function taskId(ids: ReadonlyMap<string, string>, key: string): string {
-  const id = ids.get(key);
-  if (id === undefined) throw new Error(`the validated Plan has no Task ${key}`);
-  return id;
+/** Cancels the Job's Tasks that are not finished (none is in flight while planning runs). */
+function cancelUnfinishedTasks(tx: Tx, jobId: string, actor: string): void {
+  const open = tx
+    .select()
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.jobId, jobId),
+        inArray(schema.tasks.state, ['pending', 'ready', 'blocked', 'changes_requested']),
+      ),
+    )
+    .all();
+  for (const task of open) {
+    stepTask(tx, { jobId, actor }, task, 'cancelled', {
+      reason: 'planning_failed',
+      cancelReason: 'replan',
+    });
+    cancelTaskItems(tx, { jobId, actor }, task.id);
+  }
 }

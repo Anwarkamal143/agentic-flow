@@ -88,6 +88,13 @@ export const jobs = sqliteTable(
     createdBy: text('created_by').notNull(),
     createdAt: text('created_at').notNull(),
     version: integer('version').notNull(),
+    /** Replans used, against `maxReplans` (ARCHITECTURE §4.7). A Plan Edit is not one (ADR-0019). */
+    replansUsed: integer('replans_used').notNull().default(0),
+    /**
+     * A Replan was requested and waits for in-flight Attempts to settle (ARCHITECTURE §4.7).
+     * State, not only an event, so the UI shows persisted state (spec #33 story 79).
+     */
+    replanRequested: integer('replan_requested', { mode: 'boolean' }).notNull().default(false),
   },
   (t) => [index('jobs_project').on(t.projectId), index('jobs_status').on(t.status)],
 );
@@ -156,7 +163,11 @@ export const artifacts = sqliteTable(
   (t) => [index('artifacts_job').on(t.jobId), uniqueIndex('artifacts_stage_run').on(t.stageRunId)],
 );
 
-/** The numbered Acceptance Criteria of a Job's Specification. */
+/**
+ * The numbered Acceptance Criteria of each of a Job's Specifications: a
+ * re-specification adds a new spec Artifact with its own criteria, and the
+ * old ones stay (ADR-0031), so codes are unique per Artifact.
+ */
 export const acceptanceCriteria = sqliteTable(
   'acceptance_criteria',
   {
@@ -172,7 +183,10 @@ export const acceptanceCriteria = sqliteTable(
     mandatory: integer('mandatory', { mode: 'boolean' }).notNull(),
     verification: text('verification').notNull(),
   },
-  (t) => [uniqueIndex('acceptance_criteria_job_code').on(t.jobId, t.code)],
+  (t) => [
+    uniqueIndex('acceptance_criteria_artifact_code').on(t.artifactId, t.code),
+    index('acceptance_criteria_job').on(t.jobId),
+  ],
 );
 
 /**
@@ -200,11 +214,20 @@ export const tasks = sqliteTable(
     maxAttempts: integer('max_attempts').notNull(),
     /** Retries after interrupted Attempts; they don't count toward `max_attempts`. */
     maxRetries: integer('max_retries').notNull().default(2),
+    /** Answer Attempts after Questions (ADR-0023); they count toward neither cap above. */
+    maxQuestions: integer('max_questions').notNull().default(3),
     /** Why a `blocked` Task can't go on (`Blocker`), while it is blocked. */
     blockerJson: text('blocker_json'),
+    /** Why a `cancelled` Task was cancelled (`TaskCancelReason`); null in every other state. */
+    cancelReason: text('cancel_reason'),
     version: integer('version').notNull(),
   },
-  (t) => [uniqueIndex('tasks_job_key').on(t.jobId, t.key), index('tasks_state').on(t.state)],
+  // A key is unique within its Plan: a replaced Plan's Task may share a key with the new one (ADR-0019).
+  (t) => [
+    uniqueIndex('tasks_plan_key').on(t.planArtifactId, t.key),
+    index('tasks_job').on(t.jobId),
+    index('tasks_state').on(t.state),
+  ],
 );
 
 export const taskDependencies = sqliteTable(
@@ -233,7 +256,7 @@ export const attempts = sqliteTable(
       .notNull()
       .references(() => tasks.id),
     n: integer('n').notNull(),
-    /** `initial`, `rework` or `retry` (`AttemptCause`). */
+    /** `initial`, `rework`, `retry` or `answer` (`AttemptCause`). */
     cause: text('cause').notNull().default('initial'),
     state: text('state').notNull(),
     harnessId: text('harness_id').notNull(),
@@ -256,6 +279,11 @@ export const attempts = sqliteTable(
     protocolViolationsJson: text('protocol_violations_json').notNull(),
     /** JSON array of `AttemptFinding`: what the factory's Gates found (the review's are in `review_findings`). */
     gateFindingsJson: text('gate_findings_json').notNull().default('[]'),
+    /**
+     * JSON array of `InboxQuestion`: the questions its Task Result asked (agent
+     * output, redacted on write like every binding, ADR-0011).
+     */
+    questionsJson: text('questions_json').notNull().default('[]'),
     startedAt: text('started_at').notNull(),
     finishedAt: text('finished_at'),
     exitReason: text('exit_reason'),
@@ -421,4 +449,74 @@ export const reviewFindings = sqliteTable(
     blocking: integer('blocking', { mode: 'boolean' }).notNull(),
   },
   (t) => [uniqueIndex('review_findings_review_position').on(t.reviewId, t.position)],
+);
+
+/**
+ * An Inbox Item (ARCHITECTURE §5, ADR-0016): a decision only a human makes.
+ * `subject_ref` is what is decided on (for `plan`, the plan Artifact id);
+ * `version` is bumped by every change, and a decision names both. Items stay
+ * pending (`expires_policy: remain_pending`) and never auto-approve.
+ */
+export const approvals = sqliteTable(
+  'approvals',
+  {
+    id: text('id').primaryKey(),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    taskId: text('task_id').references(() => tasks.id),
+    /** The Stage Run it holds, when it holds one (`plan_approval` for a plan). */
+    stageRunId: text('stage_run_id').references(() => stageRuns.id),
+    /** `question | plan | spec_change | blocker | cleanup`. */
+    kind: text('kind').notNull(),
+    subjectRef: text('subject_ref').notNull(),
+    question: text('question').notNull(),
+    why: text('why').notNull(),
+    /** A `question` item's JSON array of `InboxQuestion` (agent-proposed, redacted); null otherwise. */
+    questionsJson: text('questions_json'),
+    /** JSON array of `ApprovalOption`. */
+    optionsJson: text('options_json').notNull(),
+    recommended: text('recommended'),
+    /** JSON array of the Artifact ids that back it. */
+    evidenceJson: text('evidence_json').notNull(),
+    /** `open | decided | cancelled | superseded`. */
+    state: text('state').notNull(),
+    deferred: integer('deferred', { mode: 'boolean' }).notNull(),
+    requestedBy: text('requested_by').notNull(),
+    decidedBy: text('decided_by'),
+    decidedAt: text('decided_at'),
+    /** `InboxDecision` once decided. */
+    decisionJson: text('decision_json'),
+    expiresPolicy: text('expires_policy').notNull(),
+    createdAt: text('created_at').notNull(),
+    version: integer('version').notNull(),
+  },
+  (t) => [index('approvals_job').on(t.jobId), index('approvals_state').on(t.state)],
+);
+
+/**
+ * The audit log (ARCHITECTURE §5): a human's change to what the factory may
+ * do, such as a cap raised by an Inbox grant (ADR-0026). Append-only, never
+ * deleted. `job_id` (beside §5's columns) lets a Job's audit be read.
+ */
+export const auditLog = sqliteTable(
+  'audit_log',
+  {
+    id: text('id').primaryKey(),
+    ts: text('ts').notNull(),
+    /** Who decided it: `user:<name>`. */
+    actor: text('actor').notNull(),
+    /** What changed, such as `cap.raised`. */
+    action: text('action').notNull(),
+    /** What it changed: `task:<id>`. */
+    target: text('target').notNull(),
+    jobId: text('job_id').references(() => jobs.id),
+    beforeJson: text('before_json').notNull(),
+    afterJson: text('after_json').notNull(),
+    /** The rule or decision that allowed it: `inbox:<approval id>/<option>`. */
+    policyRef: text('policy_ref'),
+    /** Ties it to the decision that made it (the Inbox Item's id). */
+    correlationId: text('correlation_id'),
+  },
+  (t) => [index('audit_log_job').on(t.jobId), index('audit_log_target').on(t.target)],
 );

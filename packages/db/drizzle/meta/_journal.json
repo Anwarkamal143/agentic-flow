@@ -64,6 +64,48 @@
       "when": 1794225714957,
       "tag": "0008_supreme_shinko_yamashiro",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794289254995,
+      "tag": "0009_flashy_lockheed",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794292379854,
+      "tag": "0010_dashing_firedrake",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1794307135257,
+      "tag": "0011_cold_warbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1794309797025,
+      "tag": "0012_minor_silverclaw",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1794311357998,
+      "tag": "0013_needy_siren",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1794652761962,
+      "tag": "0014_puzzling_strong_guy",
+      "breakpoints": true
     }
   ]
 }

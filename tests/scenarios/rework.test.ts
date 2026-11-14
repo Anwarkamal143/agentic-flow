@@ -24,6 +24,7 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
+  skipPlanApproval,
 } from '../support/api.js';
 import { scriptWith, validReviewResponse, validTaskResponse } from '../support/scripts.js';
 
@@ -87,6 +88,7 @@ async function runWith(script: string, opts: { maxAttempts?: number } = {}) {
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await skipPlanApproval(rt, repo.projectId);
   if (opts.maxAttempts !== undefined) await capAttempts(rt, repo.projectId, opts.maxAttempts);
   const created = await post(rt, '/v1/jobs', {
     repositoryId: repo.id,
@@ -365,24 +367,6 @@ describe('The path-scope Gate and Rework', () => {
     expect((await tasksOf(rt, job.id))[0]?.state).toBe('cancelled');
   });
 
-  it('routes a blocking Finding with Fault Origin plan or spec to a human', async () => {
-    const [plan, spec] = await Promise.all([
-      runWith(scriptWith({}, {}, { 'add-sum': [blockingReview('plan')] })),
-      runWith(scriptWith({}, {}, { 'add-sum': [blockingReview('spec')] })),
-    ]);
-
-    for (const [{ rt, job }, reason] of [
-      [plan, 'fault_origin_plan'],
-      [spec, 'fault_origin_spec'],
-    ] as const) {
-      expect(job.status).toBe('waiting_human');
-      const attempts = await attemptsOf(rt, job.id);
-      expect(attempts.map((a) => [a.n, a.state, a.exitReason])).toEqual([
-        [1, 'failed', 'changes_requested'],
-      ]);
-      const [task] = (await tasksOf(rt, job.id)) as [TaskBody];
-      expect(task).toMatchObject({ state: 'blocked', blocker: { kind: 'human', reason } });
-      expect(job.stageRuns.find((s) => s.stageId === 'execution')?.state).toBe('waiting_human');
-    }
-  });
+  // A blocking `plan` Finding replans instead (B4): tests/scenarios/plan-route.test.ts;
+  // a blocking `spec` Finding re-specifies (#47): tests/scenarios/spec-route.test.ts.
 });

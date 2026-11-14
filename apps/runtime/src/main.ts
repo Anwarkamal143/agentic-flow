@@ -12,6 +12,7 @@ import { appendEvent, openDatabase } from '@factory/db';
 import {
   RUNTIME_HOST,
   ensureHomeDirs,
+  globalConcurrency,
   isProcessAlive,
   readConfig,
   readRuntimeRecord,
@@ -31,15 +32,19 @@ import {
 } from '@factory/harness';
 import { API_KEY_MISSING, createRedactor, secretsFromEnv, type Billing } from '@factory/domain';
 import { createApp, type RuntimeStatus } from './app.js';
+import { InboxService } from './inbox.js';
 import { ArtifactStore } from './artifacts.js';
 import { runDoctor } from './doctor.js';
 import { JobService } from './jobs.js';
 import { jobLogs } from './logs.js';
+import { ActivityService } from './activity.js';
 import { Outbox } from './outbox.js';
 import { RepositoryService } from './repositories.js';
 import { StageScheduler } from './scheduler.js';
 import { CRASH_POINTS, TaskScheduler } from './execution.js';
 import { recoverTasks } from './recovery.js';
+import { CleanupWorker, openMissingCleanupItems } from './cleanup.js';
+import { applyLeaseKnobs, parseLeaseKnobs } from './sweeper.js';
 
 const ACTOR = 'system:runtime';
 
@@ -51,6 +56,11 @@ function fail(message: string): never {
   process.stderr.write(`factory runtime: ${message}\n`);
   process.exit(1);
 }
+
+/** Test-only lease knobs (ADR-0024); an unknown value is refused, never ignored. */
+const leaseKnobs = parseLeaseKnobs(process.env);
+if (!leaseKnobs.ok) fail(leaseKnobs.error);
+applyLeaseKnobs(leaseKnobs.knobs);
 
 const home = resolveHome();
 const config = readConfig(home);
@@ -188,6 +198,19 @@ const recovered =
         log,
       });
 
+/**
+ * A cancel a crash cut short opens its cleanup item now (ADR-0027), and the
+ * worker carries out the discards the operator decided.
+ */
+openMissingCleanupItems(database.db);
+const cleanup = new CleanupWorker(
+  database.db,
+  () => {
+    notify();
+  },
+  log,
+);
+
 /** Test-only fault injection (ADR-0012); an unknown point is refused, never ignored. */
 const crashEnv = process.env['FACTORY_TEST_CRASH_AT'];
 const crashAt = CRASH_POINTS.find((p) => p === crashEnv);
@@ -209,6 +232,7 @@ const tasks = new TaskScheduler({
   db: database.db,
   harness,
   harnessVersion: detection?.version ?? null,
+  globalConcurrency: globalConcurrency(config),
   artifacts,
   workspaceRoot: config.workspaceRoot,
   runtimeEnv: process.env,
@@ -225,7 +249,17 @@ const notify = () => {
   outbox.notify();
   scheduler.wake();
   tasks.wake();
+  cleanup.wake();
 };
+
+const jobs = new JobService(
+  database.db,
+  notify,
+  async (jobId) => {
+    await Promise.all([scheduler.cancelJob(jobId), tasks.cancelJob(jobId)]);
+  },
+  artifacts,
+);
 
 const app = createApp({
   token,
@@ -258,11 +292,18 @@ const app = createApp({
       config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
     ),
   repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
-  jobs: new JobService(database.db, notify, async (jobId) => {
-    await Promise.all([scheduler.cancelJob(jobId), tasks.cancelJob(jobId)]);
-  }),
+  jobs,
+  inbox: new InboxService(
+    database.db,
+    artifacts,
+    notify,
+    config.harness?.id === 'claude-code' ? config.harness.billing : null,
+    // A Blocker Approval's "cancel the Job" is the cancel operation itself (ADR-0026).
+    (jobId, input) => jobs.cancel(jobId, input),
+  ),
   artifacts,
   logs: (jobId) => jobLogs(database.db, artifacts, jobId),
+  activity: new ActivityService(database.db, redact),
   outbox,
   requestShutdown: () => {
     shutdown('api');
@@ -284,6 +325,7 @@ const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requested
   outbox.start();
   scheduler.start();
   tasks.start();
+  cleanup.start();
   writeRuntimeRecord(home, {
     pid: process.pid,
     host: RUNTIME_HOST,
@@ -313,7 +355,7 @@ function shutdown(reason: string): void {
   outbox.close();
   // A Harness Run in flight is cancelled; its Stage Run is resumed at the next start.
   // So is a developer Harness Run or verification command; its Attempt is recovered at the next start.
-  const stopped = Promise.all([scheduler.close(), tasks.close()]);
+  const stopped = Promise.all([scheduler.close(), tasks.close(), cleanup.close()]);
   server.close(() => {
     void stopped.then(() => {
       finish(reason);

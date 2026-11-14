@@ -1,7 +1,14 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   CancelJobInputSchema,
+  RequestReplanInputSchema,
   CreateJobInputSchema,
+  AnswerQuestionInputSchema,
+  DecideInputSchema,
+  DeferInputSchema,
+  PlanDecisionInputSchema,
+  EditPlanInputSchema,
+  RequestPlanChangesInputSchema,
   InspectRepositoryInputSchema,
   ProjectConfigSchema,
   RegisterRepositoryInputSchema,
@@ -13,11 +20,13 @@ import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import type { HarnessCredentials } from '@factory/harness';
+import type { ActivityService } from './activity.js';
 import type { ArtifactStore } from './artifacts.js';
 import type { DoctorReport } from './doctor.js';
 import type { Outbox } from './outbox.js';
 import { MAX_EVENT_PAGE } from './events.js';
 import { ApiFailure } from './errors.js';
+import type { InboxService } from './inbox.js';
 import type { JobService } from './jobs.js';
 import type { RepositoryService } from './repositories.js';
 
@@ -50,9 +59,12 @@ export interface AppDeps {
   doctor(): Promise<DoctorReport>;
   repositories: RepositoryService;
   jobs: JobService;
+  inbox: InboxService;
   artifacts: ArtifactStore;
   /** The (redacted) Harness and verification output of a Job's Attempts. */
   logs(jobId: string): JobLogEntry[];
+  /** The running Attempts and their redacted tails (ADR-0018). */
+  activity: ActivityService;
   outbox: Outbox;
   /** Begins a graceful shutdown after the response is sent. */
   requestShutdown(): void;
@@ -116,6 +128,8 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(deps.logs(id));
   });
   app.get('/v1/jobs/:id/worktrees', (c) => c.json(deps.jobs.worktrees(c.req.param('id'))));
+  app.get('/v1/activity', (c) => c.json(deps.activity.list()));
+  app.get('/v1/attempts/:id/tail', (c) => c.json(deps.activity.tail(c.req.param('id'))));
   app.get('/v1/artifacts/:id', (c) => c.json(deps.artifacts.get(c.req.param('id'))));
   /** The exact bytes the content hash was computed over. */
   app.get('/v1/artifacts/:id/content', (c) => {
@@ -182,6 +196,54 @@ export function createApp(deps: AppDeps): Hono {
     const input = await parseBody(c, CancelJobInputSchema);
     return c.json(await deps.jobs.cancel(c.req.param('id'), input));
   });
+  // `requestReplan` (ADR-0029): the Job, with `capApprovalId` when maxReplans held the request.
+  app.post('/v1/jobs/:id/replan', async (c) => {
+    const input = await parseBody(c, RequestReplanInputSchema);
+    const { job, capApprovalId } = deps.jobs.requestReplan(c.req.param('id'), input);
+    return c.json({ ...job, ...(capApprovalId === undefined ? {} : { capApprovalId }) });
+  });
+
+  // The operator is the only actor the API token stands for (ARCHITECTURE §16).
+  app.get('/v1/jobs/:id/plan', (c) => c.json(deps.inbox.planView(c.req.param('id'))));
+  app.post('/v1/jobs/:id/plan/approve', async (c) => {
+    const input = await parseBody(c, PlanDecisionInputSchema);
+    return c.json(await deps.inbox.decidePlan(c.req.param('id'), 'approve', input, OPERATOR));
+  });
+  app.post('/v1/jobs/:id/plan/reject', async (c) => {
+    const input = await parseBody(c, PlanDecisionInputSchema);
+    return c.json(await deps.inbox.decidePlan(c.req.param('id'), 'reject', input, OPERATOR));
+  });
+  app.post('/v1/jobs/:id/plan/request-changes', async (c) => {
+    const input = await parseBody(c, RequestPlanChangesInputSchema);
+    return c.json(await deps.inbox.requestPlanChanges(c.req.param('id'), input, OPERATOR));
+  });
+  app.post('/v1/jobs/:id/plan/edit', async (c) => {
+    const input = await parseBody(c, EditPlanInputSchema);
+    return c.json(await deps.inbox.editPlan(c.req.param('id'), input, OPERATOR));
+  });
+  // The Job's audit log: cap raises by Inbox grants (ADR-0026).
+  app.get('/v1/jobs/:id/audit', (c) => c.json(deps.inbox.audit(c.req.param('id'))));
+  app.get('/v1/inbox', (c) => {
+    const { all } = parseQuery(c, z.object({ all: z.enum(['true', 'false']).optional() }));
+    return c.json(deps.inbox.list({ all: all === 'true' }));
+  });
+  app.get('/v1/inbox/:id', (c) => c.json(deps.inbox.get(c.req.param('id'))));
+  app.post('/v1/inbox/:id/decide', async (c) => {
+    const input = await parseBody(c, DecideInputSchema);
+    return c.json(await deps.inbox.decide(c.req.param('id'), input, OPERATOR));
+  });
+  app.post('/v1/inbox/:id/answer', async (c) => {
+    const input = await parseBody(c, AnswerQuestionInputSchema);
+    return c.json(deps.inbox.answer(c.req.param('id'), input, OPERATOR));
+  });
+  app.post('/v1/inbox/:id/defer', async (c) => {
+    const input = await parseBody(c, DeferInputSchema);
+    return c.json(deps.inbox.defer(c.req.param('id'), input, OPERATOR, true));
+  });
+  app.post('/v1/inbox/:id/undefer', async (c) => {
+    const input = await parseBody(c, DeferInputSchema);
+    return c.json(deps.inbox.defer(c.req.param('id'), input, OPERATOR, false));
+  });
 
   app.post('/v1/shutdown', (c) => {
     setImmediate(() => {
@@ -202,6 +264,8 @@ export function createApp(deps: AppDeps): Hono {
   });
   return app;
 }
+
+const OPERATOR = 'user:local';
 
 const EventPageQuerySchema = z.object({
   after: z.coerce.number().int().nonnegative().optional(),
