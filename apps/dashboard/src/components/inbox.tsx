@@ -282,12 +282,19 @@ function AnswerForm({ item, returnTo }: { item: Approval; returnTo: string }) {
 
 /**
  * The item's actions: one form deciding it (a button per option, with an
- * optional comment), and one deferring or undeferring it. Each carries the
- * version the page was rendered with, and a decision its subject.
+ * optional comment, which "Request changes" needs as its feedback), and one
+ * deferring or undeferring it. Each carries the version the page was rendered
+ * with, and a decision its subject.
  */
 function ItemActions({ item, returnTo }: { item: Approval; returnTo: string }) {
   const version = String(item.version);
   const commentId = `comment-${item.id}`;
+  // "Request changes" (a Replan or a re-specification) is refused without the comment.
+  const changes = item.options.find((o) => o.id === 'request_changes');
+  const commentLabel =
+    changes === undefined
+      ? 'Comment (optional)'
+      : `Comment (optional; required with “${changes.label}”, as the ${item.kind === 'plan' ? 'planner’s ' : ''}feedback)`;
   return (
     <div className="flex flex-wrap items-end gap-4 border-t pt-4">
       <form method="post" action={`/api/inbox/${item.id}/decide`} className="space-y-2">
@@ -295,7 +302,7 @@ function ItemActions({ item, returnTo }: { item: Approval; returnTo: string }) {
         <input type="hidden" name="subjectRef" value={item.subjectRef} />
         <input type="hidden" name="return" value={returnTo} />
         <label htmlFor={commentId} className="block text-xs text-muted-foreground">
-          Comment (optional)
+          {commentLabel}
         </label>
         <textarea
           id={commentId}
