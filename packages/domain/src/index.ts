@@ -40,6 +40,7 @@ export * from './questions.js';
 export * from './blocker-approvals.js';
 export * from './keep-going.js';
 export * from './delivery.js';
+export * from './cleanup.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 

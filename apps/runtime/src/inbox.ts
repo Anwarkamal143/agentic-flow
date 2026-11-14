@@ -59,6 +59,7 @@ import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
 import { inspectSpool } from '@factory/harness';
 import { raiseCap, replaceBlocker } from './blocker-approvals.js';
+import { applyCleanupDecision } from './cleanup.js';
 import {
   changeJob,
   stepTask,
@@ -191,6 +192,7 @@ export class InboxService {
         payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
       });
       if (row.kind === 'plan') applyPlanDecision(tx, row, input.option, step, actor);
+      else if (row.kind === 'cleanup') applyCleanupDecision(tx, row, input.option);
       else throw new ApiFailure(409, 'not_decidable', `no ${row.kind} items are decided yet`);
     });
     this.onCommit();
