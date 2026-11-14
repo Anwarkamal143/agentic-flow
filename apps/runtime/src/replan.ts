@@ -226,6 +226,24 @@ export function beginReplan(
 }
 
 /**
+ * Why a Replan or a re-specification can't start now: one is already pending
+ * (requested and waiting, held at the cap, or a re-specification, ADR-0031).
+ */
+export const PENDING_REPLAN_CODES = [
+  'replan_already_requested',
+  'replan_cap_pending',
+  'respecification_pending',
+] as const;
+export type PendingReplanCode = (typeof PENDING_REPLAN_CODES)[number];
+
+/** `error` is {@link refuseUnlessReplannable}'s refusal because a Replan is already pending. */
+export function isPendingReplan(error: unknown): error is ApiFailure {
+  return (
+    error instanceof ApiFailure && (PENDING_REPLAN_CODES as readonly string[]).includes(error.code)
+  );
+}
+
+/**
  * 409 unless the Job is executing with no Replan pending (requested, or held
  * at the cap) and no re-specification pending (ADR-0031).
  */
@@ -245,7 +263,7 @@ export function refuseUnlessReplannable(tx: Tx, state: JobState, holdingItemId?:
   if (state.job.replanRequested) {
     throw new ApiFailure(
       409,
-      'replan_already_requested',
+      'replan_already_requested' satisfies PendingReplanCode,
       `a Replan of Job ${state.job.id} is already requested and waits for the Attempts in flight`,
     );
   }
@@ -253,7 +271,7 @@ export function refuseUnlessReplannable(tx: Tx, state: JobState, holdingItemId?:
   if (specification !== undefined && RESPECIFYING.includes(specification.state)) {
     throw new ApiFailure(
       409,
-      'respecification_pending',
+      'respecification_pending' satisfies PendingReplanCode,
       `Job ${state.job.id} is being re-specified (Stage Run ${specification.id} is ${specification.state}); decide its spec_change item first`,
     );
   }
@@ -272,7 +290,7 @@ export function refuseUnlessReplannable(tx: Tx, state: JobState, holdingItemId?:
   if (held !== undefined) {
     throw new ApiFailure(
       409,
-      'replan_cap_pending',
+      'replan_cap_pending' satisfies PendingReplanCode,
       `a Replan of Job ${state.job.id} already waits at the Replan cap in Inbox Item ${held.id}`,
     );
   }

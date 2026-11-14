@@ -102,8 +102,7 @@ import {
 } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
-import { routeToPlanning } from './plan-route.js';
-import { routeToSpecification } from './spec-route.js';
+import { routeByFaultOrigin, type FaultRouteInput } from './fault-route.js';
 import { answersAfter, openQuestionItem } from './questions.js';
 import { guidanceAfter } from './blocker-approvals.js';
 import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
@@ -2137,35 +2136,15 @@ function endAttempt(
     });
     if (route.kind === 'fail') {
       stepTask(tx, op, task, 'failed', { reason, payload });
-    } else if (route.kind === 'replan') {
-      routeToPlanning(
-        tx,
-        input.artifacts,
-        op,
-        {
-          task,
-          attemptId,
-          attemptN: attempt.n,
-          headSha: inspection.headSha,
-          findings: attemptFindings(tx, attempt),
-        },
-        step,
-      );
-      replanned = true;
-    } else if (route.kind === 'respecify') {
-      routeToSpecification(
-        tx,
-        input.artifacts,
-        op,
-        {
-          task,
-          attemptId,
-          attemptN: attempt.n,
-          headSha: inspection.headSha,
-          findings: attemptFindings(tx, attempt),
-        },
-        step,
-      );
+    } else if (route.kind === 'replan' || route.kind === 'respecify') {
+      const faulted: FaultRouteInput = {
+        task,
+        attemptId,
+        attemptN: attempt.n,
+        headSha: inspection.headSha,
+        findings: attemptFindings(tx, attempt),
+      };
+      routeByFaultOrigin(tx, input.artifacts, op, route.kind, faulted, step);
       replanned = true;
     } else if (route.kind === 'rework') {
       const back = stepTask(tx, op, task, 'changes_requested', { reason, payload });
