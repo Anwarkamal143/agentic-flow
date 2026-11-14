@@ -30,6 +30,8 @@ type StageRunRow = JobState['stageRuns'][number];
 
 /** Task states whose Attempt is in flight: planning waits for them (ARCHITECTURE §4.7). */
 const IN_FLIGHT = ['claimed', 'running', 'verifying', 'in_review'];
+/** A `specification` Stage Run in these states during execution is a pending re-specification. */
+const RESPECIFYING = ['queued', 'running', 'waiting_human'];
 /** `execution` states a Replan may replace. */
 const ACTIVE_EXECUTION = ['queued', 'running', 'waiting_human', 'blocked'];
 
@@ -94,6 +96,18 @@ export function grantReplanIn(
   readRequest: (artifactId: string) => ReplanRequestContent,
   step: StageRunStepper,
 ): ReplanOutcome {
+  raiseReplanCapIn(tx, item, actor);
+  const request = readRequest(item.subjectRef);
+  return beginReplan(tx, item.jobId, { requestId: item.subjectRef, ...request }, step);
+}
+
+/**
+ * The cap raise of "grant one more Replan": refused unless the Job may
+ * replan (the held item aside), then `maxReplans` becomes one more than were
+ * used, audited as decided by `actor`. The caller starts the held request: a
+ * Replan, or a re-specification (ADR-0031).
+ */
+export function raiseReplanCapIn(tx: Tx, item: { id: string; jobId: string }, actor: string): void {
   const state = readJobState(tx, item.jobId);
   refuseUnlessReplannable(tx, state, item.id);
   const config = EffectiveConfigSchema.parse(JSON.parse(state.job.configSnapshotJson));
@@ -128,8 +142,6 @@ export function grantReplanIn(
     actor,
     payload: { auditId, action: 'cap.raised', cap: 'maxReplans', from, to, approvalId: item.id },
   });
-  const request = readRequest(item.subjectRef);
-  return beginReplan(tx, item.jobId, { requestId: item.subjectRef, ...request }, step);
 }
 
 /**
@@ -175,16 +187,21 @@ export function startRequestedReplan(
   return true;
 }
 
-/** Counts the Replan, sets `replan_requested` with its event, and starts planning if it can. */
-function beginReplan(
+/**
+ * Counts the Replan, sets `replan_requested` with its event, and starts
+ * planning if it can. `counted: false` is the planning after an approved
+ * re-specification, which already counted as the Replan (ADR-0031).
+ */
+export function beginReplan(
   tx: Tx,
   jobId: string,
   request: ReplanRequestContent & { requestId: string },
   step: StageRunStepper,
+  opts: { counted: boolean } = { counted: true },
 ): ReplanOutcome {
   const job = readJobState(tx, jobId).job;
   const config = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson));
-  const replansUsed = job.replansUsed + 1;
+  const replansUsed = job.replansUsed + (opts.counted ? 1 : 0);
   tx.update(schema.jobs)
     .set({ replansUsed, replanRequested: true })
     .where(eq(schema.jobs.id, jobId))
@@ -208,8 +225,11 @@ function beginReplan(
   return { kind: 'requested', planningStarted };
 }
 
-/** 409 unless the Job is executing with no Replan pending (requested, or held at the cap). */
-function refuseUnlessReplannable(tx: Tx, state: JobState, holdingItemId?: string): void {
+/**
+ * 409 unless the Job is executing with no Replan pending (requested, or held
+ * at the cap) and no re-specification pending (ADR-0031).
+ */
+export function refuseUnlessReplannable(tx: Tx, state: JobState, holdingItemId?: string): void {
   const status = JobStatusSchema.parse(state.job.status);
   if (TERMINAL_JOB_STATUSES.includes(status)) {
     throw new ApiFailure(409, 'job_terminal', `Job ${state.job.id} is already ${status}`);
@@ -227,6 +247,14 @@ function refuseUnlessReplannable(tx: Tx, state: JobState, holdingItemId?: string
       409,
       'replan_already_requested',
       `a Replan of Job ${state.job.id} is already requested and waits for the Attempts in flight`,
+    );
+  }
+  const specification = latestStageRun(state, 'specification');
+  if (specification !== undefined && RESPECIFYING.includes(specification.state)) {
+    throw new ApiFailure(
+      409,
+      'respecification_pending',
+      `Job ${state.job.id} is being re-specified (Stage Run ${specification.id} is ${specification.state}); decide its spec_change item first`,
     );
   }
   const held = tx
@@ -250,11 +278,20 @@ function refuseUnlessReplannable(tx: Tx, state: JobState, holdingItemId?: string
   }
 }
 
-/** Opens the Job-level `replan_cap_reached` Blocker Approval holding the request. */
-function openReplanCapItem(
+/**
+ * Opens the Job-level `replan_cap_reached` Blocker Approval holding the
+ * request: a Replan's, or a re-specification's (`what`, ADR-0031).
+ */
+export function openReplanCapItem(
   tx: Tx,
   state: JobState,
-  input: { requestId: string; actor: string; replansUsed: number; maxReplans: number },
+  input: {
+    requestId: string;
+    actor: string;
+    replansUsed: number;
+    maxReplans: number;
+    what?: string;
+  },
 ): string {
   const options = blockerOptions('replan_cap_reached');
   if (options === undefined) throw new Error('replan_cap_reached has no options');
@@ -272,7 +309,7 @@ function openReplanCapItem(
       subjectRef: input.requestId,
       question: 'The Job reached its Replan cap',
       questionsJson: null,
-      why: `A Replan was asked for, but the Job has used ${String(input.replansUsed)} of ${String(input.maxReplans)} Replans (maxReplans). Grant one more to start it, or cancel the Job. Execution goes on meanwhile.`,
+      why: `${input.what ?? 'A Replan'} was asked for, but the Job has used ${String(input.replansUsed)} of ${String(input.maxReplans)} Replans (maxReplans). Grant one more to start it, or cancel the Job. Execution goes on meanwhile.`,
       optionsJson: JSON.stringify(options),
       recommended: null,
       evidenceJson: JSON.stringify([input.requestId]),
@@ -308,7 +345,13 @@ function requireLatest(state: JobState, stageId: string): StageRunRow {
 }
 
 /** Adds the next Stage Run (`attempt + 1`, `pending`) of `of`'s Stage, with its event. */
-function addStageRun(tx: Tx, jobId: string, of: StageRunRow, actor: string): StageRunRow {
+export function addStageRun(
+  tx: Tx,
+  jobId: string,
+  of: StageRunRow,
+  actor: string,
+  reason = 'replan',
+): StageRunRow {
   const id = newId('stg');
   tx.insert(schema.stageRuns)
     .values({
@@ -327,7 +370,7 @@ function addStageRun(tx: Tx, jobId: string, of: StageRunRow, actor: string): Sta
     jobId,
     type: 'stage_run.created',
     actor,
-    payload: { stageId: of.stageId, attempt: of.attempt + 1, replaces: of.id, reason: 'replan' },
+    payload: { stageId: of.stageId, attempt: of.attempt + 1, replaces: of.id, reason },
   });
   const row = tx.select().from(schema.stageRuns).where(eq(schema.stageRuns.id, id)).get();
   if (row === undefined) throw new Error(`no Stage Run ${id}`);

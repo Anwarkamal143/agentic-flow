@@ -24,7 +24,7 @@ import {
 import { changedPaths, commitsBetween } from '@factory/git';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { criteriaCoveredBy } from './criteria.js';
+import { criteriaCoveredBy, currentCriteria } from './criteria.js';
 import { latestArtifact } from './plan-approval.js';
 
 /** A POSIX shell single-quoted word. */
@@ -294,11 +294,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       );
     }
   }
-  const allCriteria = db
-    .select()
-    .from(schema.acceptanceCriteria)
-    .where(eq(schema.acceptanceCriteria.jobId, jobId))
-    .all();
+  const allCriteria = currentCriteria(db, jobId);
   for (const c of allCriteria) {
     const covered = delivered.some((t) =>
       t.criteria.some((x) => x.code === c.code && x.verdict === 'pass'),

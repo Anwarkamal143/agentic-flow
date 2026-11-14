@@ -42,6 +42,7 @@ export * from './carry-over.js';
 export * from './keep-going.js';
 export * from './delivery.js';
 export * from './cleanup.js';
+export * from './respecification.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -516,6 +517,8 @@ export const ArtifactKindSchema = z.enum([
   'review',
   /** A Replan asked for during execution (ADR-0029): the feedback and who asked, never regenerated. */
   'replan_request',
+  /** A re-specification asked for by a `spec` Finding or a human (ADR-0031), never regenerated. */
+  'respec_request',
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 

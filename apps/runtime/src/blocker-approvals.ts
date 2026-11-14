@@ -202,8 +202,8 @@ export function replaceBlocker(
 
 /**
  * The grant guidance the next Attempt after `previous` carries: what the
- * Attempts before it carried, plus the guidance of a grant that cleared
- * `previous`'s own Blocker.
+ * Attempts before it carried, plus the guidance of a grant (or a Rework with
+ * guidance) that cleared `previous`'s own Blocker.
  */
 export function guidanceAfter(
   tx: Tx,
@@ -224,7 +224,9 @@ export function guidanceAfter(
   const given = items.flatMap((item): GrantGuidance[] => {
     if (item.decisionJson === null) return [];
     const decision = InboxDecisionSchema.parse(JSON.parse(item.decisionJson));
-    if (decision.option !== 'grant' || decision.comment === null || decision.comment === '') {
+    // A grant's comment, or "Rework with guidance"'s (ADR-0031), guides the next Attempts.
+    const guides = decision.option === 'grant' || decision.option === 'rework';
+    if (!guides || decision.comment === null || decision.comment === '') {
       return [];
     }
     return [

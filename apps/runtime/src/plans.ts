@@ -23,6 +23,7 @@ import {
 } from '@factory/domain';
 import { git, resolveCommit } from '@factory/git';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { currentCriteria } from './criteria.js';
 import { stepTask } from './engine.js';
 import { newId } from './ids.js';
 
@@ -48,7 +49,7 @@ export function repositoriesOf(db: FactoryDb | Tx, jobId: string): JobRepository
 }
 
 /**
- * What a Plan is validated against: the Specification's criteria, the
+ * What a Plan is validated against: the current Specification's criteria, the
  * Effective Configuration's `maxAttempts`, and (unless `trackedFiles` is
  * false) the tracked files at the planning base of each Repository.
  */
@@ -67,11 +68,7 @@ export async function planContextOf(
   }
   return {
     repositories,
-    criteria: db
-      .select()
-      .from(schema.acceptanceCriteria)
-      .where(eq(schema.acceptanceCriteria.jobId, jobId))
-      .all(),
+    criteria: currentCriteria(db, jobId),
     maxAttempts: config.maxAttempts.value,
     trackedFiles,
   };

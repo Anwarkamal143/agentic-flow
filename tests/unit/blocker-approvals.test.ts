@@ -37,6 +37,15 @@ describe('the option sets of a Blocker Approval', () => {
     expect(ids('retry_cap_reached')).toEqual(['retry_now', 'cancel_job']);
   });
 
+  it('a Specification Finding no Specification change resolves offers Rework with guidance, a Replan under the current Specification and cancelling the Job (#47)', () => {
+    expect(ids('spec_finding_unresolved')).toEqual(['rework', 'replan', 'cancel_job']);
+    expect(checkBlockerDecision({ option: 'rework' })).toEqual({ ok: true, grant: null });
+    expect(checkBlockerDecision({ option: 'rework', grant: 1 })).toMatchObject({
+      ok: false,
+      code: 'invalid_grant',
+    });
+  });
+
   it('a live process turns "retry now" into "kill and retry"', () => {
     expect(KILL_AND_RETRY_OPTIONS.map((o) => o.id)).toEqual(['kill_and_retry', 'cancel_job']);
   });
@@ -57,6 +66,7 @@ describe('the option sets of a Blocker Approval', () => {
       'rework_cap_reached',
       'recovery_uncertain',
       'replan_cap_reached',
+      'spec_finding_unresolved',
     ] as const) {
       expect(blockerOptions(reason)?.every((o) => !o.agentProposed)).toBe(true);
     }
