@@ -4,11 +4,21 @@
  * dependency: its approved head. Several: their approved heads merged in Plan
  * order into a local commit (merge commits only; no ref, index or Worktree is
  * touched). It is local to the Job and is not the Integration Branch (§14).
+ * A merge that conflicts blocks the Task with `base_merge_conflict`, a human
+ * Blocker (§8.1, ADR-0028), never an automatic replan.
  */
 import { schema, type FactoryDb } from '@factory/db';
-import { planDependencyBase, TaskStateSchema, type DependencyFact } from '@factory/domain';
+import {
+  planDependencyBase,
+  TaskStateSchema,
+  type Blocker,
+  type DependencyFact,
+} from '@factory/domain';
 import { commitTree, mergeCommits } from '@factory/git';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { changeJob, stepTask } from './engine.js';
+import { settleExecution } from './keep-going.js';
+import { releaseAttemptTokens } from './worktree.js';
 
 export type DependencyBase =
   /** The Task depends on nothing: start from the default branch. */
@@ -77,4 +87,46 @@ export async function makeDependencyBase(
       return { kind: 'base', sha: base, dependencies };
     }
   }
+}
+
+/**
+ * Blocks the `claimed` Task whose Dependency Base conflicts, in one
+ * transaction: the `base_merge_conflict` Blocker (with its Blocker Approval,
+ * opened by `stepTask`), its lease and capacity tokens released, and
+ * `execution` settled. No Attempt or Worktree was made. The Blocker names the
+ * Task itself as its subject, since no Attempt raised it.
+ */
+export function blockOnBaseConflict(
+  db: FactoryDb,
+  op: { jobId: string; actor: string },
+  taskId: string,
+  conflict: { dependencies: string[]; paths: string[] },
+): void {
+  changeJob(
+    db,
+    { jobId: op.jobId, expectedVersion: 'current', actor: op.actor },
+    (tx, state, step) => {
+      const task = tx.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).get();
+      if (task?.state !== 'claimed')
+        throw new Error(`Task ${taskId} is ${String(task?.state)}, not claimed`);
+      const where = conflict.paths.length === 0 ? 'the merge' : conflict.paths.join(', ');
+      const blocker: Blocker = {
+        kind: 'human',
+        reason: 'base_merge_conflict',
+        detail: `merging the approved heads of ${conflict.dependencies.join(', ')} into the Dependency Base of ${task.key} conflicts in ${where}`,
+        requiredAction:
+          'look at the conflicting Task Branches in the Factory Clone, then decide the Blocker Approval in the Inbox: cancel the Job (a replan option is not built yet)',
+        taskId,
+        attemptId: taskId,
+        createdAt: new Date().toISOString(),
+      };
+      stepTask(tx, op, task, 'blocked', {
+        reason: blocker.reason,
+        payload: { dependencies: conflict.dependencies, paths: conflict.paths },
+        blocker,
+      });
+      releaseAttemptTokens(tx, taskId, undefined);
+      settleExecution(tx, state, step);
+    },
+  );
 }
