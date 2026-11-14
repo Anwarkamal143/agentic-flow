@@ -322,16 +322,29 @@ function writeAttempts(
 }
 
 function writeDelivery(report: DeliveryReport): void {
+  const version: number = report.reportVersion;
+  if (version < 3) {
+    // A report written before v3 (ADR-0028) has no branch list: show where it is.
+    process.stdout.write(
+      `Delivery: a v${String(version)} Delivery Report; read its report Artifact.\n`,
+    );
+    return;
+  }
   const lines = [
-    'Delivery (local branch in the Factory Clone):',
+    'Delivery (local branches in the Factory Clone):',
+    `  ${report.statement}`,
     `  clone: ${report.repository.clonePath}`,
   ];
-  for (const t of report.tasks) {
+  for (const b of report.branches) {
+    const state = b.cancelReason === null ? b.state : `${b.state} (${b.cancelReason})`;
     lines.push(
-      `  ${t.key}: ${t.branch} at ${t.headSha.slice(0, 12)}`,
-      `    fetch from your checkout: ${t.fetchCommand}`,
+      `  ${b.key}: ${state}${b.leaf ? ', leaf' : ''}` +
+        (b.branch === null ? ', no branch' : `, ${b.branch}`) +
+        (b.headSha === null ? '' : ` at ${b.headSha.slice(0, 12)}`),
     );
+    if (b.fetchCommand !== null) lines.push(`    fetch from your checkout: ${b.fetchCommand}`);
   }
+  lines.push(...report.notes.map((n) => `  ${n}`));
   if (report.knownLimitations.length > 0) {
     lines.push('Known limitations:', ...report.knownLimitations.map((l) => `  - ${l}`));
   }

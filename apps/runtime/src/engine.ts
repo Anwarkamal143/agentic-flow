@@ -10,7 +10,9 @@ import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   canTransitionStageRun,
   canTransitionTask,
+  dependentsToCancel,
   TaskStateSchema,
+  type TaskCancelReason,
   type TaskState,
   type AttemptState,
   type WorktreeState,
@@ -195,14 +197,21 @@ type TaskRow = typeof schema.tasks.$inferSelect;
  * update is guarded by the Task's state and version; zero rows is a conflict.
  * A Task goes `blocked` with its `blocker`, which is cleared when it leaves;
  * a human Blocker with options opens its Blocker Approval in the same
- * transaction (ADR-0026).
+ * transaction (ADR-0026). A Task going `cancelled` records its `cancelReason`.
+ * A Task going `failed` cancels its unfinished dependents, transitively, with
+ * reason `dependency_failed` in the same transaction, one event each (ADR-0028).
  */
 export function stepTask(
   tx: Tx,
   op: { jobId: string; actor: string },
   task: TaskRow,
   to: TaskState,
-  opts: { reason?: string | undefined; payload?: Record<string, unknown>; blocker?: Blocker } = {},
+  opts: {
+    reason?: string | undefined;
+    payload?: Record<string, unknown>;
+    blocker?: Blocker;
+    cancelReason?: TaskCancelReason;
+  } = {},
 ): TaskRow {
   const from = TaskStateSchema.parse(task.state);
   if (!canTransitionTask(from, to)) {
@@ -211,10 +220,21 @@ export function stepTask(
   if ((opts.blocker === undefined) !== (to !== 'blocked')) {
     throw new Error(`a Task is blocked with a Blocker, and only then (${task.id} → ${to})`);
   }
+  if (opts.cancelReason !== undefined && to !== 'cancelled') {
+    throw new Error(
+      `a cancel reason is recorded only when a Task is cancelled (${task.id} → ${to})`,
+    );
+  }
   const blockerJson = opts.blocker === undefined ? null : JSON.stringify(opts.blocker);
+  const cancelReason = opts.cancelReason ?? null;
   const updated = tx
     .update(schema.tasks)
-    .set({ state: to, blockerJson, version: sql`${schema.tasks.version} + 1` })
+    .set({
+      state: to,
+      blockerJson,
+      ...(to === 'cancelled' ? { cancelReason } : {}),
+      version: sql`${schema.tasks.version} + 1`,
+    })
     .where(
       and(
         eq(schema.tasks.id, task.id),
@@ -238,11 +258,57 @@ export function stepTask(
       to,
       ...(opts.reason === undefined ? {} : { reason: opts.reason }),
       ...(opts.blocker === undefined ? {} : { blocker: opts.blocker }),
+      ...(opts.cancelReason === undefined ? {} : { cancelReason: opts.cancelReason }),
       ...opts.payload,
     },
   });
   if (opts.blocker !== undefined) openBlockerItem(tx, op, task, opts.blocker);
-  return { ...task, state: to, blockerJson, version: task.version + 1 };
+  if (to === 'failed') cancelDependents(tx, op, task);
+  return {
+    ...task,
+    state: to,
+    blockerJson,
+    ...(to === 'cancelled' ? { cancelReason } : {}),
+    version: task.version + 1,
+  };
+}
+
+/**
+ * Cancels every unfinished Task that depends on the just-failed `failed`,
+ * directly or transitively (`dependency_failed`, ARCHITECTURE §4.4): they can
+ * never start. Only `pending` Tasks can be found here, since a dependent is
+ * `ready` only once all it depends on is approved.
+ */
+function cancelDependents(tx: Tx, op: { jobId: string; actor: string }, failed: TaskRow): void {
+  const tasks = tx
+    .select()
+    .from(schema.tasks)
+    .where(eq(schema.tasks.jobId, op.jobId))
+    .orderBy(asc(sql`rowid`))
+    .all();
+  const edges = tx
+    .select({ taskId: schema.taskDependencies.taskId, on: schema.taskDependencies.dependsOnTaskId })
+    .from(schema.taskDependencies)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskDependencies.taskId))
+    .where(eq(schema.tasks.jobId, op.jobId))
+    .all();
+  const doomed = dependentsToCancel(
+    failed.id,
+    tasks.map((t) => ({
+      id: t.id,
+      state: TaskStateSchema.parse(t.state),
+      dependsOn: edges.filter((e) => e.taskId === t.id).map((e) => e.on),
+    })),
+  );
+  for (const id of doomed) {
+    const row = tasks.find((t) => t.id === id);
+    if (row === undefined) continue;
+    stepTask(tx, op, row, 'cancelled', {
+      reason: 'dependency_failed',
+      cancelReason: 'dependency_failed',
+      payload: { failedTask: failed.key, failedTaskId: failed.id },
+    });
+  }
 }
 
 /**

@@ -46,6 +46,8 @@ const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   question_cap_reached: [GRANT, CANCEL_JOB],
   recovery_uncertain: [RETRY_NOW, CANCEL_JOB],
   retry_cap_reached: [RETRY_NOW, CANCEL_JOB],
+  // The replan option (§8.1) arrives with the Requested Replan (#45).
+  base_merge_conflict: [CANCEL_JOB],
 };
 
 /**
@@ -65,6 +67,7 @@ const TITLES: Partial<Record<BlockerReason, string>> = {
   question_cap_reached: 'reached its question cap',
   recovery_uncertain: 'stopped: recovery is uncertain',
   retry_cap_reached: 'reached its Retry cap',
+  base_merge_conflict: "can't start: its Dependency Base conflicts",
 };
 
 /** The line a Blocker Approval shows in a list. */
