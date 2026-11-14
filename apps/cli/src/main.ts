@@ -26,7 +26,7 @@ Commands:
   stop                            Stop the runtime cleanly
   doctor [--json]                 Check tools and credential presence (via the runtime)
   repo add <path> [--project <name>] [--test-command <cmd>]
-           [--typecheck-command <cmd>] [--yes]
+           [--typecheck-command <cmd>] [--github <owner/name>] [--yes]
                                   Register a Repository: make its Factory Clone and save
                                   its confirmed commands (your checkout is never modified)
   job create --repo <id|name> --title <text> [--description <text>]
@@ -106,6 +106,7 @@ async function main(argv: string[]): Promise<number> {
           project: { type: 'string' },
           'test-command': { type: 'string' },
           'typecheck-command': { type: 'string' },
+          github: { type: 'string' },
           yes: { type: 'boolean', short: 'y' },
         },
       });
@@ -119,6 +120,7 @@ async function main(argv: string[]): Promise<number> {
         project: values.project,
         testCommand: values['test-command'],
         typecheckCommand: values['typecheck-command'],
+        github: values.github,
         yes: values.yes === true,
       });
     }

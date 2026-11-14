@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { API_KEY_EXPOSURE, type Billing } from '@factory/domain';
+import type { TokenSource } from '@factory/github';
 import { findExecutable, probeClaudeCode } from '@factory/harness';
 
 export interface ToolCheck {
@@ -59,12 +60,26 @@ export type BillingCheck =
       exposure: string;
     };
 
+/**
+ * Whether the GitHub token reference resolves (ADR-0033): `gh` runs
+ * `gh auth token`, `env:NAME` reads the variable. Only the outcome is
+ * reported, never the token, and GitHub itself is not called.
+ */
+export interface GitHubCheck {
+  tokenReference: string;
+  apiBaseUrl: string;
+  resolves: boolean;
+  /** Why it doesn't resolve. */
+  problem?: string;
+}
+
 export interface DoctorReport {
   checkedAt: string;
   tools: ToolCheck[];
   credentials: CredentialCheck[];
   /** `null` when the configured Harness isn't Claude Code. */
   billing: BillingCheck | null;
+  github: GitHubCheck;
 }
 
 interface ToolSpec {
@@ -115,6 +130,7 @@ const ENV_CREDENTIALS: readonly Omit<CredentialCheck, 'present'>[] = [
  */
 export async function runDoctor(
   env: NodeJS.ProcessEnv,
+  github: { token: TokenSource; apiBaseUrl: string },
   claudeCommand = 'claude',
   billing?: Billing,
 ): Promise<DoctorReport> {
@@ -157,11 +173,18 @@ export async function runDoctor(
     // reflects gh's stored login, not GH_TOKEN/GITHUB_TOKEN (reported above).
     present: gh?.path !== undefined && (await run(gh.path, ['auth', 'status'], toolEnv(env))).ok,
   });
+  const token = await github.token.resolve();
   return {
     checkedAt: new Date().toISOString(),
     tools,
     credentials,
     billing: billing === undefined ? null : billingCheck(billing, env),
+    github: {
+      tokenReference: github.token.label,
+      apiBaseUrl: github.apiBaseUrl,
+      resolves: token.ok,
+      ...(token.ok ? {} : { problem: token.problem }),
+    },
   };
 }
 

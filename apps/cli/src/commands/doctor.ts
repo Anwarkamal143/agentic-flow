@@ -21,6 +21,7 @@ interface DoctorBody {
     | { mode: 'subscription' }
     | { mode: 'api_key'; credential: string; present: boolean; exposure: string }
     | null;
+  github: { tokenReference: string; apiBaseUrl: string; resolves: boolean; problem?: string };
 }
 
 /**
@@ -77,6 +78,14 @@ export async function doctor(opts: { json: boolean }): Promise<number> {
   for (const cred of body.credentials) {
     lines.push(`  ${(cred.present ? 'present' : 'absent').padEnd(9)}${cred.name} (${cred.source})`);
   }
+  const gh = body.github;
+  lines.push(
+    '',
+    `GitHub (${gh.apiBaseUrl}):`,
+    gh.resolves
+      ? `  ${'resolves'.padEnd(17)}token reference ${gh.tokenReference} (the token is never shown)`
+      : `  ${'does not resolve'.padEnd(17)}token reference ${gh.tokenReference}: ${gh.problem ?? 'unknown'}`,
+  );
   if (body.billing !== null) {
     const b = body.billing;
     lines.push(

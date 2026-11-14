@@ -9,6 +9,9 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
+  coordinatesFromRemoteUrl,
+  formatCoordinates,
+  parseCoordinates,
   ProjectConfigSchema,
   RepositoryProfileSchema,
   type PackageManager,
@@ -19,6 +22,7 @@ import {
   type Repository,
   type RepositoryCommands,
   type RepositoryInspection,
+  type GitHubCoordinates,
 } from '@factory/domain';
 import {
   clone,
@@ -59,12 +63,14 @@ export class RepositoryService {
     }
     // A relative origin (e.g. `../upstream.git`) is relative to the source repository.
     const remoteUrl = origin === undefined ? null : resolveRemote(source, origin);
-    return { source, name: basename(source), remoteUrl, ...detectCommands(source) };
+    const github = remoteUrl === null ? null : coordinatesFromRemoteUrl(remoteUrl);
+    return { source, name: basename(source), remoteUrl, github, ...detectCommands(source) };
   }
 
   async register(input: RegisterRepositoryInput): Promise<RegisterRepositoryResult> {
     const inspection = await this.inspect(input.path);
     const { source, name, remoteUrl } = inspection;
+    const github = input.github === undefined ? inspection.github : parsedCoordinates(input.github);
     // Checked again inside the transaction; this early check avoids a needless clone.
     const already = this.db
       .select({ id: schema.repositories.id })
@@ -132,6 +138,8 @@ export class RepositoryService {
             clonePath,
             defaultBranch,
             profileJson: JSON.stringify(profile),
+            githubOwner: github?.owner ?? null,
+            githubName: github?.name ?? null,
             createdAt: now,
           })
           .run();
@@ -140,7 +148,13 @@ export class RepositoryService {
           entityId: id,
           type: 'repository.registered',
           actor: ACTOR,
-          payload: { projectId: proj.id, name, cloneMethod, defaultBranch },
+          payload: {
+            projectId: proj.id,
+            name,
+            cloneMethod,
+            defaultBranch,
+            github: github === null ? null : formatCoordinates(github),
+          },
         });
         return proj;
       });
@@ -153,6 +167,7 @@ export class RepositoryService {
         clonePath,
         defaultBranch,
         profile,
+        github,
         createdAt: now,
       };
       return { project, repository, cloneMethod };
@@ -244,8 +259,19 @@ function toRepository(row: typeof schema.repositories.$inferSelect): Repository 
     clonePath: row.clonePath,
     defaultBranch: row.defaultBranch,
     profile: RepositoryProfileSchema.parse(JSON.parse(row.profileJson)),
+    github:
+      row.githubOwner === null || row.githubName === null
+        ? null
+        : { owner: row.githubOwner, name: row.githubName },
     createdAt: row.createdAt,
   };
+}
+
+/** `--github owner/name`; the API schema has checked it already. */
+function parsedCoordinates(text: string): GitHubCoordinates {
+  const parsed = parseCoordinates(text);
+  if (!parsed.ok) throw new ApiFailure(400, 'invalid_github', parsed.error);
+  return parsed.coordinates;
 }
 
 function resolveRemote(source: string, url: string): string {

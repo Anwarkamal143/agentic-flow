@@ -20,6 +20,9 @@
     },
     {
       "path": "../../packages/harness"
+    },
+    {
+      "path": "../../packages/github"
     }
   ]
 }

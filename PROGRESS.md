@@ -4,7 +4,7 @@
 
 ## Current phase
 
-**Phase C — GitHub delivery: design settled, not started (2026-11-14).** Phase B accepted 2026-11-14 (report `docs/phases/B.md`). The Phase C design grilling (Q1–Q32) is recorded under Human decisions; spec issues 29–35 are applied to the spec. **In progress:** #53 done (the Harness lock-out from GitHub). (Phase A accepted 2026-11-09; API-key billing built between the gates, ADR-0015.)
+**Phase C — GitHub delivery: design settled, not started (2026-11-14).** Phase B accepted 2026-11-14 (report `docs/phases/B.md`). The Phase C design grilling (Q1–Q32) is recorded under Human decisions; spec issues 29–35 are applied to the spec. **In progress:** #54 done (the GitHub port, token reference, coordinates and fake GitHub); #53 done (the Harness lock-out from GitHub). (Phase A accepted 2026-11-09; API-key billing built between the gates, ADR-0015.)
 
 ## Human answers (from CLAUDE.md §7)
 
@@ -24,7 +24,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 |---|---|---|---|
 | A — Walking skeleton | **Accepted** 2026-11-09 | 7 / 7 (A1–A7; A7 `[real]` on demand) | `docs/phases/A.md` |
 | B — Human-in-the-loop + DAG | **Accepted** 2026-11-14 | 8 / 8 (B1–B8) | `docs/phases/B.md` |
-| C — GitHub delivery | In progress (#53 done) | — | — |
+| C — GitHub delivery | In progress (#53, #54 done) | — | — |
 | D — Multi-project, multi-repo, onboarding | Not started | — | — |
 | E — Policy hardening, budgets, evals | Not started | — | — |
 | F — Later | Not started | — | — |
@@ -32,6 +32,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 ## Work log
 
 <!-- newest first: date — what changed — tests run (pass/fail counts) -->
+- 2026-11-14 — #54 The GitHub port, the token reference, Repository coordinates and the fake GitHub. New `packages/github`: `GitHubPort` (REST over `fetch`, configurable `github.apiBaseUrl`; every read takes an ETag and returns `notModified` on 304; failures classified `rate_limited` with `resetAt` / `transient` / `refused`) and `TokenSource` (`gh` via `gh auth token` with a minimal env, or `env:NAME`; resolved per request; each value taught to the new learning redactor, `env:` at boot). `config.json` `github: {token, apiBaseUrl}`. Repository `github` coordinates (migration 0015: `github_owner`, `github_name`) from a github.com `remote_url` (`coordinatesFromRemoteUrl`, pure) or `repo add --github owner/name`. `factory doctor` reports only whether the reference resolves. Test-only fake GitHub (`tests/support/github.ts`): the REST subset with ETags, a bare repo per repository as the git remote (`gitEnv()` insteadOf), and a control API (checks, statuses, reviews, comments, base moves, foreign pushes, close/reopen/merge, refused merge method or reopen, forced 304/429/403/5xx/dropped connection). ADR-0033. Tests: unit `github-coordinates`, `redaction` (learning redactor); integration `github-port` (11, against the fake over HTTP); scenarios `repo-add` (+4), `doctor` (+3), `redaction` (+2, mutation-checked). typecheck ✓, lint ✓, test 474/474 ✓ (61 files; run again after the review fixes: the fake answers a forced 304 to GETs only, keeps a PR's last SHAs when a branch is gone, and answers an unimplemented rebase with 501; the recovery lookup is documented as taking no ETag).
 - 2026-11-14 — #53 Lock the Harness out of GitHub (Q9). `Bash(gh:*)` is denied to every Role: in every recipe tool policy, and as an Immutable Invariant (`INVARIANT_DENY`, `withInvariants`) that `toolPolicyOf` adds to Jobs frozen before it. `GH_TOKEN`, `GITHUB_TOKEN`, `GH_CONFIG_DIR` are scrubbed from every guarded process (`ENV_SCRUBBED`, in `guardrailEnv` and again in `spawnGuarded`). The tier label and the Delivery Report's limitations say the `gh` login on disk stays readable under Tier 0; ARCHITECTURE §11 updated. ADR-0032. Branch `phase-c/design`. typecheck ✓, lint ✓, test 416/416 ✓.
 
 - 2026-11-14 — #50 **Phase B gate: complete, awaiting human review.** B1–B8 each map to a passing test: B1 `parallel-dag.test.ts`, B2 `tests/integration/claim-race.test.ts`, B3 `questions.test.ts`, B4 `plan-route.test.ts`, B5 `blocker-approvals.test.ts`, B6 `plan-approval.test.ts`, B7 `cancel-cleanup.test.ts`, B8 `lease-expiry.test.ts`. Report `docs/phases/B.md`. Known limitations: the five Phase B deferrals (24 h reminder, mixed bases, leaves not combined, `services` locks, unredacted spool) checked against the code and reworded; two stale entries corrected (replan-with-feedback on the dashboard is covered; cancel cleanup is built). File ownership cleared. `pnpm install` ✓, typecheck ✓, lint ✓. `pnpm test` run 1 (default workers, load ~18): 9 failed / 403 passed of 412, every failure a runtime start-up (10 s) or test (30 s) timeout; the 7 files alone 47/47 ✓; run 2 (`--maxWorkers=4`) 59 files / 412 tests ✓.
@@ -197,6 +198,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 ## Decisions (ADR index)
 - ADR-0032 — The Harness lock-out from GitHub (`Bash(gh:*)` denied to every Role, an Immutable Invariant also applied to earlier frozen Jobs on read; `GH_TOKEN`/`GITHUB_TOKEN`/`GH_CONFIG_DIR` scrubbed from every guarded process, Harness Runs and verification commands; a guardrail: the `gh` login on disk stays readable, and the prefix deny rule can be got around) — `docs/adr/0032-harness-github-lockout.md`
+- ADR-0033 — The GitHub transport and token reference (REST over `fetch` at a configurable base URL; ETag reads; failures classified rate limit / transient / refused; `gh` or `env:NAME` resolved per request and learned by redaction; coordinates from a github.com remote or `--github`; the test-only fake GitHub with a bare-repo remote and a control API) — `docs/adr/0033-github-transport-and-token-reference.md`
 
 - ADR-0001 — The factory works in its own clone, never in the user's checkout — `docs/adr/0001-factory-owned-clones.md`
 - ADR-0002 — Runtime foundation defaults (TS 6.0 pin, Hono, tsc -b build, home layout, port, stop semantics) — `docs/adr/0002-runtime-foundation-defaults.md`
@@ -266,6 +268,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 - Keep-going and the Delivery Report v3 (#44, ADR-0028): the `base_merge_conflict` Blocker Approval offers `replan` and `cancel_job` (no Rework: the Task has no Attempt yet). A failed Job opens no cleanup Approval for its preserved Worktrees (only cancel does, #48). The Job status derivation doesn't read `replan_requested` (spec #33 lists it with the derivation's unit test; #45 owns that state, and its effect, stopping dispatch, needs no derivation change as long as `execution` stays `running`). A pre-v3 Delivery Report is shown by `job show` only as a pointer to its Artifact.
 
 - Harness lock-out (#53, ADR-0032): a guardrail only. The `gh` login on disk stays readable to a Harness Run, and `Bash(gh:*)` is a prefix rule (`env gh`, an absolute path or a script get around it). The phase report must say Tier 0 is a guardrail, not isolation (Q9).
+- GitHub port (#54, ADR-0033): lists are read as one page of 100 (check runs, statuses, reviews, comments); more is truncated. Repositories registered before #54 have no GitHub coordinates, and there is no command to set them after registration. Doctor checks only that the token reference resolves, not that GitHub accepts the token. Every port test runs against the fake GitHub, not the real one.
 
 ## Blockers
 

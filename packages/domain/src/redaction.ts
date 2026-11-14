@@ -55,19 +55,35 @@ export function secretsFromEnv(env: Readonly<Record<string, string | undefined>>
  * too. Longer values are replaced first, so overlapping secrets go whole.
  */
 export function createRedactor(secrets: readonly Secret[]): Redactor {
+  return createLearningRedactor(secrets).redact;
+}
+
+/**
+ * A Redactor that can be taught further secrets after it was made, such as a
+ * token resolved at run time (ADR-0033). `redact` is the same function before
+ * and after: everything already holding it redacts what is learned. A value
+ * already known, or too short to redact, is ignored.
+ */
+export function createLearningRedactor(initial: readonly Secret[]): {
+  redact: Redactor;
+  learn: (secret: Secret) => void;
+} {
   const literals: { text: string; replacement: string }[] = [];
-  for (const s of secrets) {
-    if (s.value.length < MIN_SECRET_LENGTH) continue;
+  const learn = (s: Secret): void => {
+    if (s.value.length < MIN_SECRET_LENGTH) return;
+    if (literals.some((l) => l.text === s.value)) return;
     const replacement = `[REDACTED:${s.name}]`;
     literals.push({ text: s.value, replacement });
     const escaped = JSON.stringify(s.value).slice(1, -1);
     if (escaped !== s.value) literals.push({ text: escaped, replacement });
-  }
-  literals.sort((a, b) => b.text.length - a.text.length);
-  return (text) => {
+    literals.sort((a, b) => b.text.length - a.text.length);
+  };
+  for (const s of initial) learn(s);
+  const redact: Redactor = (text) => {
     let out = text;
     for (const l of literals) if (out.includes(l.text)) out = out.split(l.text).join(l.replacement);
     for (const p of PATTERNS) out = out.replace(p.pattern, `[REDACTED:${p.name}]`);
     return out;
   };
+  return { redact, learn };
 }

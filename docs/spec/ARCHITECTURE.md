@@ -167,7 +167,8 @@ A **Replan** (GLOSSARY) is started by a human (`requestReplan`, or "request chan
 ```text
 projects(id, name, config_json, created_at)
 repositories(id, project_id, name, source /*path or URL given at registration*/,
-             remote_url?, clone_path /*factory clone*/, default_branch, profile_json)
+             remote_url?, clone_path /*factory clone*/, default_branch, profile_json,
+             github_owner?, github_name? /*Phase C, ADR-0033*/)
 jobs(id, project_id, title, description, type, priority, status, workflow_snapshot_json,
      config_snapshot_json, created_by, created_at, version,
      replan_requested_json? /*Phase B, §4.7*/, replans_used)
@@ -362,6 +363,7 @@ Loop (every 1–2 s, plus a wake-up after any relevant event):
 - **Integration:** approved task branches merge into `factory/<job-id>/integration` (the job integration branch; `factory/<job-id>` would clash with the Task Branch refs under it) in dependency order. The branch belongs to the Job's Integration Task (one per Job and Repository), created by the factory, not the planner. After each merge, the affected verification re-runs on the integration branch. A conflict creates an `integration` task (role: integration agent) or asks a human, depending on policy. [Phase C builds the human route only: the `base_merge_conflict` Blocker; the integration agent is an extension point.] Then the **integration review** (§9) runs on the integration branch before any PR is opened.
 - **Staleness:** before the PR is opened and before merge, compare `base_sha` with the remote default branch. If the base moved, merge the base into the integration branch (never rebase it). A published integration branch is rewritten only through the `integration_rewrite` Blocker Approval (§8.1), never by the factory's own judgment. **Every gate with an old `(head, base)` pair is stale** and re-runs (verification and CI always; review only if the diff changed beyond the merge itself, or when policy says always).
 - **PR feedback loop:** the poller reads PR reviews and comments. A human "changes requested", or a comment addressed to the factory, creates a rework attempt on the integration branch and updates the PR in place. Comment text is untrusted: it is shown to the agent as context and never treated as instructions about permissions.
+- **Transport:** one GitHub port, REST over `fetch` at a configurable API base URL. Authentication is a **token reference** (`gh` or `env:NAME`) resolved for each request, never stored, and taught to redaction. A Repository's coordinates (`owner/name`) come from a github.com remote or `repo add --github` (ADR-0033).
 - **Local-first:** GitHub is **polled** (conditional requests with ETag, 30–60 s while a PR is open). Webhooks or a tunnel are optional [Later].
 - **Multi-repo:** one integration branch and one PR per repository. Each job has a `delivery_order` (from the DAG). The default contract strategy is **expand → migrate consumers → contract**, with feature flags where a change can't be made additive. Reports must say that multiple PRs are *not* atomic.
 

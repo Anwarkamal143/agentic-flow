@@ -33,4 +33,5 @@ Two processes writing one database exist **only in this tier**. In production on
 ## Not done
 
 - No other runtime function is covered by the tier yet. A later test may join it under the same rules.
+- **Amended by ADR-0033 (#54):** the tier also holds `github-port.test.ts`, which drives the built `@factory/github` package against the fake GitHub over real local HTTP (127.0.0.1). It opens no database and uses no external network. The fake is a test double for GitHub, labelled as such, not a mock of factory code.
 - The race is two processes on one machine. It doesn't exercise the scheduler around the claim (repository setup, the Harness), which the scenario tier covers with one runtime.

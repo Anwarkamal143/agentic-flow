@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { json } from '../support/api.js';
 import { git, startRuntime, tinyTsRepo } from '../support/factory.js';
+import { fakeGitHub } from '../support/github.js';
 
 interface RepositoryBody {
   id: string;
@@ -13,6 +15,7 @@ interface RepositoryBody {
   clonePath: string;
   defaultBranch: string;
   profile: { commands: { test: string | null; typecheck: string | null } };
+  github: { owner: string; name: string } | null;
 }
 
 describe('factory repo add', () => {
@@ -177,6 +180,62 @@ describe('factory repo add', () => {
     expect(readdirSync(join(rt.home.workspaceRoot, 'clones')), 'no stray clone left').toHaveLength(
       1,
     );
+  });
+});
+
+describe('factory repo add: GitHub coordinates', () => {
+  it('takes them from a github.com origin, cloning through the git remote it names', async () => {
+    const gh = await fakeGitHub();
+    const repo = tinyTsRepo();
+    const remote = gh.addRepository('acme/tiny-ts', repo);
+    git(repo, ['remote', 'add', 'origin', remote.remoteUrl]);
+    // The runtime's git reaches the fake GitHub's bare remote for that github.com URL.
+    const rt = await startRuntime(undefined, { env: gh.gitEnv() });
+
+    const res = await rt.home.cli(['repo', 'add', repo, '--yes']);
+
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).toMatch(/GitHub: +acme\/tiny-ts \(from the origin URL\)/);
+    const [registered] = await json<[RepositoryBody]>(rt.request('/v1/repositories'));
+    expect(registered).toMatchObject({
+      remoteUrl: 'https://github.com/acme/tiny-ts.git',
+      github: { owner: 'acme', name: 'tiny-ts' },
+    });
+    const events = await json<{ type: string; payload: Record<string, unknown> }[]>(
+      rt.request('/v1/events?limit=100'),
+    );
+    expect(events.find((e) => e.type === 'repository.registered')?.payload).toMatchObject({
+      github: 'acme/tiny-ts',
+    });
+  });
+
+  it('stores them from --github, which wins over the origin URL', async () => {
+    const rt = await startRuntime();
+    const repo = tinyTsRepo();
+
+    const res = await rt.home.cli(['repo', 'add', repo, '--github', 'acme/widgets', '--yes']);
+
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).toMatch(/GitHub: +acme\/widgets \(from --github\)/);
+    const [registered] = await json<[RepositoryBody]>(rt.request('/v1/repositories'));
+    expect(registered.github).toEqual({ owner: 'acme', name: 'widgets' });
+  });
+
+  it('has none without a github.com remote, and says so', async () => {
+    const rt = await startRuntime();
+    const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--yes']);
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).toMatch(/GitHub: +none/);
+    const [registered] = await json<[RepositoryBody]>(rt.request('/v1/repositories'));
+    expect(registered.github).toBeNull();
+  });
+
+  it('refuses a --github value that is not owner/name, registering nothing', async () => {
+    const rt = await startRuntime();
+    const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--github', 'widgets', '--yes']);
+    expect(res.code).not.toBe(0);
+    expect(res.stderr).toContain('owner/name');
+    expect(await json<unknown[]>(rt.request('/v1/repositories'))).toEqual([]);
   });
 });
 

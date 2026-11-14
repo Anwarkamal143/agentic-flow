@@ -6,6 +6,7 @@ import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { TaskCancelReasonSchema, TaskStateSchema } from './execution.js';
 import { BlockerSchema } from './rework.js';
+import { GitHubCoordinatesSchema, parseCoordinates } from './github.js';
 import {
   DEFAULT_TOOL_POLICIES,
   ToolPoliciesSchema,
@@ -44,6 +45,7 @@ export * from './keep-going.js';
 export * from './delivery.js';
 export * from './cleanup.js';
 export * from './respecification.js';
+export * from './github.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -126,6 +128,11 @@ export const RepositorySchema = z.object({
   clonePath: z.string(),
   defaultBranch: z.string(),
   profile: RepositoryProfileSchema,
+  /**
+   * Where the Repository lives on GitHub (ADR-0033): from a github.com
+   * `remoteUrl`, or set with `repo add --github`. `null`: no GitHub remote.
+   */
+  github: GitHubCoordinatesSchema.nullable(),
   createdAt: z.string(),
 });
 export type Repository = z.infer<typeof RepositorySchema>;
@@ -144,6 +151,8 @@ export const RepositoryInspectionSchema = z.object({
   source: z.string(),
   name: z.string(),
   remoteUrl: z.string().nullable(),
+  /** The GitHub coordinates `remoteUrl` gives, when it is a github.com URL. */
+  github: GitHubCoordinatesSchema.nullable(),
   packageManager: PackageManagerSchema.nullable(),
   /** Proposed commands, for the human to confirm or replace. */
   detectedCommands: RepositoryCommandsSchema,
@@ -155,6 +164,13 @@ export const RegisterRepositoryInputSchema = z.object({
   path: absolutePath,
   project: z.string().trim().min(1).max(100),
   commands: RepositoryCommandsSchema,
+  /** `owner/name`, from `repo add --github`. Wins over the coordinates the origin URL gives. */
+  github: z
+    .string()
+    .refine((text) => parseCoordinates(text).ok, {
+      message: 'must be a GitHub repository as owner/name (for example acme/widgets)',
+    })
+    .optional(),
 });
 export type RegisterRepositoryInput = z.infer<typeof RegisterRepositoryInputSchema>;
 
