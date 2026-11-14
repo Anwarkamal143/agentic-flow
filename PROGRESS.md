@@ -97,6 +97,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 Phase B (#33) on integration branch `phase-b/integration`, one worktree per ticket. Shared contracts: `packages/db/**` (schema + migrations) has exactly one owner at a time; other tickets wait for it.
 
 - Schema: `jobs.replan_requested` and `tasks.cancel_reason` already added on the integration branch (migration 0013); no schema owner this round
+- #47 (the spec Fault Origin route) → the spec branch of routeFailedAttempt in apps/runtime/src/**, the re-specification flow and the spec_change Approval (new modules, plus their dispatch in inbox.ts / the proposal Stages), apps/cli and dashboard changes only if the generic Inbox can't render it, spec-route scenarios, its ADR; reuses #45/#46 replan accounting without changing it; schema change only if unavoidable (then it owns packages/db/**)
 
 ## Human decisions (outside CLAUDE.md §7)
 
