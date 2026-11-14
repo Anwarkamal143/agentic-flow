@@ -273,7 +273,11 @@ function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
     lines.push('Tasks:');
     for (const t of tasks) {
       lines.push(
-        `  ${t.key.padEnd(14)} ${(t.cancelReason === null ? t.state : `${t.state} (${t.cancelReason})`).padEnd(10)} ${t.title}`,
+        `  ${t.key.padEnd(14)} ${(t.cancelReason === null ? t.state : `${t.state} (${t.cancelReason})`).padEnd(10)} ${t.title}` +
+          // The factory's own Task: not part of the Plan, never replanned or edited (ADR-0034).
+          (t.kind === 'integration'
+            ? '  [Integration Task, factory-created, not in the Plan]'
+            : ''),
         `    writable:  ${t.scope.writable.join(', ')}`,
         `    forbidden: ${t.scope.forbidden.join(', ') || '(none)'}`,
         `    verify:    ${t.verification.map((v) => `${v.key}: ${v.command}`).join('; ')}`,
@@ -318,6 +322,7 @@ function writeAttempts(
     lines.push(
       `  ${task?.key ?? a.taskId} attempt ${String(a.n)}  ${a.state}` +
         (a.cause === 'rework' ? ' [rework]' : '') +
+        (a.cause === 'merge' ? ' [merge: the factory merged, no Harness ran]' : '') +
         (a.exitReason === null
           ? ''
           : ` (${a.exitReason}${a.exitDetail === null ? '' : `: ${a.exitDetail}`})`),
@@ -383,6 +388,26 @@ function writeDelivery(report: DeliveryReport): void {
         (b.headSha === null ? '' : ` at ${b.headSha.slice(0, 12)}`),
     );
     if (b.fetchCommand !== null) lines.push(`    fetch from your checkout: ${b.fetchCommand}`);
+  }
+  const integration = version >= 4 ? report.integration : null;
+  if (integration !== null) {
+    lines.push(
+      `  Integration Branch ${integration.branch}: ${integration.state}` +
+        (integration.headSha === null ? '' : ` at ${integration.headSha.slice(0, 12)}`) +
+        (integration.baseSha === null ? '' : ` (base ${integration.baseSha.slice(0, 12)})`),
+    );
+    if (integration.merged.length > 0) {
+      lines.push(`    merged --no-ff: ${integration.merged.map((m) => m.key).join(' → ')}`);
+    }
+    for (const v of integration.verification) {
+      lines.push(
+        `    ${v.key.padEnd(12)} ${v.verdict.padEnd(10)} exit ${String(v.exitCode ?? 'none')}  ${v.command}`,
+      );
+    }
+    if (integration.problem !== null) lines.push(`    problem: ${integration.problem}`);
+    if (integration.fetchCommand !== null) {
+      lines.push(`    fetch from your checkout: ${integration.fetchCommand}`);
+    }
   }
   lines.push(...report.notes.map((n) => `  ${n}`));
   if (report.knownLimitations.length > 0) {

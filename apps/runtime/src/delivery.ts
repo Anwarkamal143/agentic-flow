@@ -1,5 +1,5 @@
 /**
- * The Delivery Report v3 (closure, ADR-0028): how the Job ended, every Task
+ * The Delivery Report v4 (closure; v3 of ADR-0028 plus the Integration Branch, ADR-0034): how the Job ended, every Task
  * Branch with the leaves to fetch (one `git fetch` each, from the Factory
  * Clone into the source checkout), what changed, the Evidence per Acceptance
  * Criterion, the independent review, and known limitations. A failed Job's
@@ -8,6 +8,8 @@
 import { schema, type FactoryDb } from '@factory/db';
 import {
   AttemptFindingSchema,
+  BlockerSchema,
+  integrationBranch,
   combineVerdicts,
   DeliveryReportSchema,
   deliveryBranches,
@@ -26,6 +28,7 @@ import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { criteriaCoveredBy, currentCriteria } from './criteria.js';
 import { latestArtifact } from './plan-approval.js';
+import { integrationSources } from './integration.js';
 
 /** A POSIX shell single-quoted word. */
 export function shellQuote(word: string): string {
@@ -74,7 +77,11 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     .where(eq(schema.tasks.jobId, jobId))
     .orderBy(asc(sql`rowid`))
     .all()
+    .filter((t) => t.kind === 'plan')
     .filter((t) => t.planArtifactId === plan?.id || worktrees.some((w) => w.taskId === t.id));
+  const integration = integrationOf(db, jobId, plan?.id);
+  // Once the Integration Branch is verified, it is what to fetch: the Task Branches are in it.
+  const integrated = integration?.state === 'approved';
   const edges = db
     .select({ taskId: schema.taskDependencies.taskId, on: schema.taskDependencies.dependsOnTaskId })
     .from(schema.taskDependencies)
@@ -105,7 +112,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
         .where(and(eq(schema.attempts.taskId, t.id), eq(schema.attempts.state, 'passed')))
         .orderBy(desc(schema.attempts.n))
         .get()?.headSha ?? null;
-    const offered = mark?.offered === true && branch !== null;
+    const offered = !integrated && mark?.offered === true && branch !== null;
     return {
       key: t.key,
       title: t.title,
@@ -118,29 +125,41 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     };
   });
   const offered = branches.filter((b) => b.fetchCommand !== null);
-  const execution = db
-    .select({ state: schema.stageRuns.state })
-    .from(schema.stageRuns)
-    .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'execution')))
-    .orderBy(desc(schema.stageRuns.attempt))
-    .get();
-  const outcome = execution?.state === 'failed' ? 'failed' : 'completed';
+  const latestState = (stageId: string) =>
+    db
+      .select({ state: schema.stageRuns.state })
+      .from(schema.stageRuns)
+      .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, stageId)))
+      .orderBy(desc(schema.stageRuns.attempt))
+      .get()?.state;
+  const integrationFailed = latestState('integration') === 'failed';
+  const outcome =
+    latestState('execution') === 'failed' || integrationFailed ? 'failed' : 'completed';
   const failedTasks = tasks
     .filter((t) => t.state === 'failed')
     .map((t) => `${t.key} (${latestAttempt(t.id)?.exitReason ?? 'factory_error'})`);
   const fetchCount = `${String(offered.length)} marked branch${offered.length === 1 ? '' : 'es'}`;
-  const statement =
-    outcome === 'failed'
-      ? `The Job failed: Task${failedTasks.length === 1 ? '' : 's'} ${failedTasks.join(', ')} failed with no Rework route, and nothing else could make progress. ${
-          offered.length === 0
-            ? 'No Task was approved, so there is nothing to fetch.'
-            : `The approved Task Branches are partial results: fetch the ${fetchCount} below.`
-        } Failed and cancelled Tasks are listed, never offered.`
-      : `The Job completed: every Task was approved. Fetch the ${fetchCount} below.`;
-  const notes = [
-    `The Task Branches are local branches in the Factory Clone at ${repo.clonePath} (ADR-0001); nothing was pushed. Run each fetch command from your own checkout.`,
-    'Independent leaf branches are not combined before Phase C (no Integration Branch yet): combining them yourself may conflict, and the factory has not checked.',
-  ];
+  const statement = integrationFailed
+    ? `The Job failed: every Task was approved, but the Integration Task failed (${integration?.problem ?? 'no detail'}). The approved Task Branches are partial results: fetch the ${fetchCount} below.`
+    : integration?.state === 'approved'
+      ? `The Job completed: every Task was approved, merged into ${integration.branch} and verified again on its head. Fetch the Integration Branch below.`
+      : outcome === 'failed'
+        ? `The Job failed: Task${failedTasks.length === 1 ? '' : 's'} ${failedTasks.join(', ')} failed with no Rework route, and nothing else could make progress. ${
+            offered.length === 0
+              ? 'No Task was approved, so there is nothing to fetch.'
+              : `The approved Task Branches are partial results: fetch the ${fetchCount} below.`
+          } Failed and cancelled Tasks are listed, never offered.`
+        : `The Job completed: every Task was approved. Fetch the ${fetchCount} below.`;
+  const notes =
+    integration === null
+      ? [
+          `The Task Branches are local branches in the Factory Clone at ${repo.clonePath} (ADR-0001); nothing was pushed. Run each fetch command from your own checkout.`,
+          'Independent leaf branches are not combined (this Job has no Integration Branch): combining them yourself may conflict, and the factory has not checked.',
+        ]
+      : [
+          `The Integration Branch and the Task Branches are local branches in the Factory Clone at ${repo.clonePath} (ADR-0001); nothing was pushed. Run the fetch command from your own checkout.`,
+          `${integration.branch} starts from ${repo.defaultBranch} as fetched when integration began${integration.baseSha === null ? '' : ` (${integration.baseSha})`} and merges each approved Task Branch --no-ff in dependency order.`,
+        ];
 
   const delivered: DeliveryReport['tasks'] = [];
   for (const task of tasks) {
@@ -306,7 +325,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     }
   }
   return DeliveryReportSchema.parse({
-    reportVersion: 3,
+    reportVersion: 4,
     outcome,
     statement,
     job: { id: job.id, title: job.title },
@@ -314,6 +333,87 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     branches,
     notes,
     tasks: delivered,
+    integration:
+      integration === null
+        ? null
+        : {
+            ...integration,
+            fetchCommand: integrated ? fetchCommand(repo.clonePath, integration.branch) : null,
+          },
     knownLimitations: limitations,
   } satisfies DeliveryReport);
+}
+
+/**
+ * The Job's newest Integration Task (of the newest Plan) as the report shows
+ * it: its branch, the base it was built on and the head, the Task Branches it
+ * merged, its verification, and why it did not finish. `null` when there is none.
+ */
+function integrationOf(
+  db: FactoryDb,
+  jobId: string,
+  planId: string | undefined,
+): Omit<NonNullable<DeliveryReport['integration']>, 'fetchCommand'> | null {
+  const task = db
+    .select()
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.jobId, jobId),
+        eq(schema.tasks.kind, 'integration'),
+        eq(schema.tasks.planArtifactId, planId ?? ''),
+      ),
+    )
+    .orderBy(desc(sql`rowid`))
+    .get();
+  if (task === undefined) return null;
+  const attempt = db
+    .select()
+    .from(schema.attempts)
+    .where(eq(schema.attempts.taskId, task.id))
+    .orderBy(desc(schema.attempts.n))
+    .get();
+  const runs =
+    attempt === undefined
+      ? []
+      : db
+          .select()
+          .from(schema.verificationRuns)
+          .where(eq(schema.verificationRuns.attemptId, attempt.id))
+          .orderBy(asc(sql`rowid`))
+          .all();
+  const evidence =
+    attempt === undefined
+      ? []
+      : db.select().from(schema.evidence).where(eq(schema.evidence.attemptId, attempt.id)).all();
+  const blocker =
+    task.blockerJson === null ? null : BlockerSchema.parse(JSON.parse(task.blockerJson));
+  const state = TaskStateSchema.parse(task.state);
+  return {
+    taskId: task.id,
+    state,
+    branch: integrationBranch(jobId),
+    baseSha: attempt?.baseSha ?? null,
+    headSha: attempt?.headSha ?? null,
+    merged:
+      attempt === undefined
+        ? []
+        : integrationSources(db, task).map((s) => ({
+            key: s.key,
+            branch: s.branch,
+            headSha: s.headSha,
+          })),
+    verification: runs.map((r) => ({
+      key: r.commandKey,
+      command: r.command,
+      exitCode: r.exitCode,
+      verdict: EvidenceVerdictSchema.parse(
+        evidence.find((e) => e.verificationRunId === r.id)?.verdict ?? 'not_tested',
+      ),
+    })),
+    problem:
+      state === 'approved'
+        ? null
+        : (blocker?.detail ?? attempt?.exitDetail ?? `the Integration Task is ${state}`),
+  };
 }

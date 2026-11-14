@@ -7,6 +7,7 @@ import {
   text,
   uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
 
 /**
  * Append-only event log (outbox). Written in the same transaction as the state
@@ -209,6 +210,11 @@ export const tasks = sqliteTable(
     planArtifactId: text('plan_artifact_id')
       .notNull()
       .references(() => artifacts.id),
+    /**
+     * `plan`, or `integration`: the factory's Integration Task (ADR-0034), whose
+     * `plan_artifact_id` is the Plan whose Tasks it integrates.
+     */
+    kind: text('kind').notNull().default('plan'),
     key: text('key').notNull(),
     title: text('title').notNull(),
     definitionJson: text('definition_json').notNull(),
@@ -226,8 +232,14 @@ export const tasks = sqliteTable(
     version: integer('version').notNull(),
   },
   // A key is unique within its Plan: a replaced Plan's Task may share a key with the new one (ADR-0019).
+  // One Integration Task per (Plan, Repository); its key may equal a Plan Task's (ADR-0034).
   (t) => [
-    uniqueIndex('tasks_plan_key').on(t.planArtifactId, t.key),
+    uniqueIndex('tasks_plan_key')
+      .on(t.planArtifactId, t.key)
+      .where(sql`"kind" = 'plan'`),
+    uniqueIndex('tasks_plan_integration')
+      .on(t.planArtifactId, t.repositoryId)
+      .where(sql`"kind" = 'integration'`),
     index('tasks_job').on(t.jobId),
     index('tasks_state').on(t.state),
   ],

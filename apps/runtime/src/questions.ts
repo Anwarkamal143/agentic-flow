@@ -18,13 +18,15 @@ import {
   type ExpiresPolicy,
   type InboxQuestion,
 } from '@factory/domain';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { newId } from './ids.js';
+import { latestStageRunOfTask } from './task-stage.js';
 
 /**
  * Opens the one `question` Inbox Item of an Attempt that asked: its subject is
- * the asking Attempt, it holds the `execution` Stage Run, and its questions
+ * the asking Attempt, it holds its Task's Stage Run (`execution`, or
+ * `integration` for the Integration Task), and its questions
  * are the agent's (redacted on write, shown as agent-proposed). Returns its id.
  */
 export function openQuestionItem(
@@ -41,12 +43,7 @@ export function openQuestionItem(
     actor: string;
   },
 ): string {
-  const execution = tx
-    .select({ id: schema.stageRuns.id })
-    .from(schema.stageRuns)
-    .where(and(eq(schema.stageRuns.jobId, input.jobId), eq(schema.stageRuns.stageId, 'execution')))
-    .orderBy(desc(schema.stageRuns.attempt))
-    .get();
+  const execution = latestStageRunOfTask(tx, input.jobId, input.taskId);
   const id = newId('apr');
   const kind: ApprovalKind = 'question';
   const expiresPolicy: ExpiresPolicy = 'remain_pending';

@@ -36,7 +36,7 @@ export interface EventBody {
   payload: Record<string, unknown>;
 }
 
-/** The Stages of the `feature` Recipe built so far (version 2, with `plan_approval`). */
+/** The Stages of the `feature` Recipe built so far (version 3, with `integration`). */
 export const FEATURE_STAGES = [
   'intake',
   'triage',
@@ -45,6 +45,7 @@ export const FEATURE_STAGES = [
   'planning',
   'plan_approval',
   'execution',
+  'integration',
   'closure',
 ];
 
@@ -97,9 +98,14 @@ export async function capAttempts(
   await skipPlanApproval(rt, projectId, { maxAttempts });
 }
 
-/** The Job's one Attempt; fails the test when there is not exactly one. */
+/**
+ * The Job's one Plan Task Attempt; fails the test when there is not exactly one. The
+ * Integration Task's merge Attempt (no Harness ran, ADR-0034) is left out.
+ */
 export async function onlyAttempt<T>(rt: RunningRuntime, jobId: string): Promise<T> {
-  const attempts = await json<T[]>(rt.request(`/v1/jobs/${jobId}/attempts`));
+  const attempts = (
+    await json<(T & { cause: string })[]>(rt.request(`/v1/jobs/${jobId}/attempts`))
+  ).filter((a) => a.cause !== 'merge');
   expect(attempts, 'exactly one Attempt').toHaveLength(1);
   return attempts[0] as T;
 }

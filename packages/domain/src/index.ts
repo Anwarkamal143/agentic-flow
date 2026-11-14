@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { TaskCancelReasonSchema, TaskStateSchema } from './execution.js';
 import { BlockerSchema } from './rework.js';
 import { GitHubCoordinatesSchema, parseCoordinates } from './github.js';
+import { TaskKindSchema } from './integration.js';
 import {
   DEFAULT_TOOL_POLICIES,
   ToolPoliciesSchema,
@@ -46,6 +47,7 @@ export * from './delivery.js';
 export * from './cleanup.js';
 export * from './respecification.js';
 export * from './github.js';
+export * from './integration.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -197,6 +199,7 @@ export const StageIdSchema = z.enum([
   'planning',
   'plan_approval',
   'execution',
+  'integration',
   'closure',
 ]);
 export type StageId = z.infer<typeof StageIdSchema>;
@@ -279,16 +282,55 @@ export const WorkflowSnapshotSchema = z.object({
 });
 export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
 
-/**
- * The built-in `feature` Recipe, Phase B cut: without `integration`,
- * `integration_review` and the delivery Stages (ROADMAP). Version 2 added
- * `plan_approval` (ADR-0016); Jobs created at version 1 keep their snapshot.
- */
-export const FEATURE_RECIPE: WorkflowSnapshot = {
-  recipeId: 'feature',
-  recipeVersion: 2,
-  stages: StageIdSchema.options.map((id) => ({ id })),
+/** The Stage IDs of each version of the built-in `feature` Recipe. */
+const FEATURE_RECIPE_STAGES: Readonly<Record<2 | 3, readonly StageId[]>> = {
+  // Version 2 added `plan_approval` (ADR-0016).
+  2: [
+    'intake',
+    'triage',
+    'discovery',
+    'specification',
+    'planning',
+    'plan_approval',
+    'execution',
+    'closure',
+  ],
+  // Version 3 adds `integration` (ADR-0034).
+  3: [
+    'intake',
+    'triage',
+    'discovery',
+    'specification',
+    'planning',
+    'plan_approval',
+    'execution',
+    'integration',
+    'closure',
+  ],
 };
+
+/** The `feature` Recipe versions a Job can be created at. */
+export const FEATURE_RECIPE_VERSIONS = [2, 3] as const;
+export type FeatureRecipeVersion = (typeof FEATURE_RECIPE_VERSIONS)[number];
+
+/**
+ * The built-in `feature` Recipe at `version`. A Job freezes it at creation and
+ * keeps its snapshot: a Job created at an earlier version runs its own Stages.
+ */
+export function featureRecipe(version: FeatureRecipeVersion): WorkflowSnapshot {
+  return {
+    recipeId: 'feature',
+    recipeVersion: version,
+    stages: FEATURE_RECIPE_STAGES[version].map((id) => ({ id })),
+  };
+}
+
+/**
+ * The built-in `feature` Recipe, Phase C cut so far: version 3, with
+ * `integration` (ADR-0034); without `integration_review` and the delivery
+ * Stages yet (ROADMAP).
+ */
+export const FEATURE_RECIPE: WorkflowSnapshot = featureRecipe(3);
 
 /**
  * A Job's status, derived from its Stage Runs (ARCHITECTURE §4.2; precedence
@@ -588,6 +630,8 @@ export type TaskDefinition = z.infer<typeof TaskDefinitionSchema>;
 export const TaskSchema = TaskDefinitionSchema.extend({
   id: z.string(),
   jobId: z.string(),
+  /** `plan`: from the Plan. `integration`: the factory's Integration Task, not part of the Plan (ADR-0034). */
+  kind: TaskKindSchema,
   key: z.string(),
   title: z.string(),
   repositoryId: z.string(),
@@ -601,7 +645,7 @@ export const TaskSchema = TaskDefinitionSchema.extend({
   maxQuestions: z.number().int().nonnegative(),
   /** Why a `blocked` Task can't go on, and what would clear it. */
   blocker: BlockerSchema.nullable(),
-  /** The Plan Artifact it was taken from. */
+  /** The Plan Artifact it was taken from; for the Integration Task, the Plan whose Tasks it integrates. */
   planArtifactId: z.string(),
   version: z.number().int(),
 });

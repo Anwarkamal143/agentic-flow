@@ -60,6 +60,7 @@ interface VerificationRunBody {
 interface AttemptBody {
   id: string;
   taskId: string;
+  cause: string;
   n: number;
   state: string;
   exitReason: string | null;
@@ -108,6 +109,14 @@ interface DeliveryReport {
     leaf: boolean;
     fetchCommand: string | null;
   }[];
+  integration: {
+    branch: string;
+    state: string;
+    baseSha: string | null;
+    headSha: string | null;
+    merged: { key: string; headSha: string }[];
+    fetchCommand: string | null;
+  } | null;
   knownLimitations: string[];
 }
 
@@ -159,6 +168,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       ['planning', 'succeeded'],
       ['plan_approval', 'skipped'],
       ['execution', 'succeeded'],
+      ['integration', 'succeeded'],
       ['closure', 'succeeded'],
     ]);
     expect(job.status).toBe('completed');
@@ -171,13 +181,21 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
     const [worktree] = await json<[WorktreeBody]>(rt.request(`/v1/jobs/${job.id}/worktrees`));
     expect(worktree.branch).toBe(`factory/${job.id}/${task.id}-add-sum`);
     expect(worktree.path.startsWith(rt.home.workspaceRoot + '/')).toBe(true);
-    expect(git(repo.clonePath, ['branch', '--list', 'factory/*']).trim()).toBe(worktree.branch);
+    // The Task Branch, and the Integration Branch the Integration Task built from it (ADR-0034).
+    const integrationBranch = `factory/${job.id}/integration`;
+    expect(
+      git(repo.clonePath, ['branch', '--list', '--format=%(refname:short)', 'factory/*'])
+        .trim()
+        .split('\n')
+        .sort(),
+    ).toEqual([worktree.branch, integrationBranch].sort());
     expect(git(source, ['branch', '-a'])).not.toContain('factory/');
 
     // The Attempt: what ran, against which commits, at what cost.
-    const [attempt] = (await attemptsOf(rt, job.id)) as [AttemptBody];
+    const [attempt, merge] = (await attemptsOf(rt, job.id)) as [AttemptBody, AttemptBody];
     const head = git(repo.clonePath, ['rev-parse', worktree.branch]).trim();
     const base = git(repo.clonePath, ['rev-parse', 'main']).trim();
+    expect(merge).toMatchObject({ n: 1, cause: 'merge', state: 'passed', baseSha: base });
     expect(attempt).toMatchObject({
       n: 1,
       state: 'passed',
@@ -233,13 +251,27 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       rt.request(`/v1/artifacts/${String(reportArtifact?.id)}/content`),
     );
     expect(report.repository).toMatchObject({ name: 'tiny-ts', clonePath: repo.clonePath });
-    expect(report).toMatchObject({ reportVersion: 3, outcome: 'completed' });
+    expect(report).toMatchObject({ reportVersion: 4, outcome: 'completed' });
     expect(report.statement).toMatch(/^The Job completed/);
-    // The one Task is the one leaf, offered with one fetch command.
+    // The one Task is the one leaf; what is offered is the Integration Branch holding it.
     expect(report.branches).toMatchObject([
-      { key: 'add-sum', state: 'approved', branch: worktree.branch, headSha: head, leaf: true },
+      {
+        key: 'add-sum',
+        state: 'approved',
+        branch: worktree.branch,
+        headSha: head,
+        leaf: true,
+        fetchCommand: null,
+      },
     ]);
-    const [offered] = report.branches;
+    const integrationHead = git(repo.clonePath, ['rev-parse', integrationBranch]).trim();
+    expect(report.integration).toMatchObject({
+      branch: integrationBranch,
+      state: 'approved',
+      baseSha: base,
+      headSha: integrationHead,
+      merged: [{ key: 'add-sum', headSha: head }],
+    });
     const [delivered] = report.tasks;
     expect(delivered).toMatchObject({
       key: 'add-sum',
@@ -258,7 +290,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
     const events = await json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events?limit=1000`));
     const seq = (type: string) => events.find((e) => e.type === type)?.seq ?? -1;
     const lifecycle = events
-      .filter((e) => e.type.startsWith('worktree.'))
+      .filter((e) => e.type.startsWith('worktree.') && e.entityId === worktree.id)
       .map((e) => [e.type, e.payload['to']]);
     expect(lifecycle).toEqual([
       ['worktree.created', 'active'],
@@ -280,9 +312,14 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
     expect(after.worktrees, 'git worktree list').toBe(before.worktrees);
     expect(after.config, '.git/config').toBe(before.config);
 
-    // Then the fetch command, run from the source repo, brings the result in.
-    execFileSync('sh', ['-c', offered?.fetchCommand ?? 'false'], { cwd: source, stdio: 'pipe' });
-    expect(git(source, ['rev-parse', worktree.branch]).trim()).toBe(head);
+    // Then the fetch command, run from the source repo, brings the Integration Branch in,
+    // with the Task's approved head merged into it (--no-ff: its second parent).
+    execFileSync('sh', ['-c', report.integration?.fetchCommand ?? 'false'], {
+      cwd: source,
+      stdio: 'pipe',
+    });
+    expect(git(source, ['rev-parse', integrationBranch]).trim()).toBe(integrationHead);
+    expect(git(source, ['rev-parse', `${integrationBranch}^2`]).trim()).toBe(head);
   });
 
   it('discovers commits from git, never from the Task Result list', async () => {

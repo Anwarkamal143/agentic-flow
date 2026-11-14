@@ -235,7 +235,7 @@ describe(
 
       // The Delivery Report v3: says plainly that the Job failed, lists every Task, offers D only.
       const report = await reportOf(rt, job.id);
-      expect(report.reportVersion).toBe(3);
+      expect(report.reportVersion).toBe(4);
       expect(report.outcome).toBe('failed');
       expect(report.statement).toMatch(/The Job failed/);
       expect(report.statement).toMatch(/partial results/);
@@ -382,7 +382,7 @@ describe('base_merge_conflict', { timeout: 60_000 }, () => {
     expect(after.status).toBe('cancelled');
   });
 
-  it('replans from the Blocker Approval: b and c carry over approved, d is re-planned as a new Task (#45)', async () => {
+  it('replans from the Blocker Approval: b and c carry over approved, d is re-planned as a new Task (#45), and integration still catches b and c conflicting', async () => {
     const conflicting = [
       docTask('b', [], ['test/math.test.ts', 'spec/math.test.ts']),
       docTask('c', [], ['test/extra.md']),
@@ -415,14 +415,21 @@ describe('base_merge_conflict', { timeout: 60_000 }, () => {
     });
     expect(decided.status, await decided.clone().text()).toBe(200);
 
+    // d no longer merges b and c, but the Job still delivers both: combining them on the
+    // Integration Branch conflicts the same way, so integration waits on its own Blocker (ADR-0034).
     const done = await waitForJob(
       rt,
       job.id,
-      (j) => j.status === 'completed' || j.status === 'failed',
+      (j) => j.stageRuns.some((r) => r.stageId === 'integration' && r.state === 'waiting_human'),
       30_000,
     );
-    expect(done.status, rt.output()).toBe('completed');
+    expect(done.status, rt.output()).toBe('waiting_human');
     const tasks = await tasksOf(rt, job.id);
+    expect(byKey(tasks, 'integration')).toMatchObject({
+      state: 'blocked',
+      blocker: { reason: 'base_merge_conflict' },
+    });
+    expect(byKey(tasks, 'integration').blocker?.detail).toMatch(/Task c.*after b merged cleanly/);
     const ids = (key: string) => tasks.filter((t) => t.key === key).map((t) => t.id);
     expect(ids('b')).toEqual([byKey(before, 'b').id]);
     expect(ids('c')).toEqual([byKey(before, 'c').id]);

@@ -234,6 +234,11 @@ function TaskCard({
             <span className="font-mono text-sm text-muted-foreground">{task.key}</span> {task.title}
           </CardTitle>
           <State value={task.state} />
+          {task.kind === 'integration' && (
+            <span data-testid="integration-task" className="text-xs text-muted-foreground">
+              Integration Task: created by the factory, not part of the Plan
+            </span>
+          )}
           {task.cancelReason !== null && (
             <span className="text-xs text-muted-foreground">
               Cancelled by {humanize(task.cancelReason)}

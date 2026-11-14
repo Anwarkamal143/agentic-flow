@@ -18,29 +18,26 @@ import {
   type ExpiresPolicy,
   type GrantGuidance,
 } from '@factory/domain';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { newId } from './ids.js';
+import { latestStageRunOfTask } from './task-stage.js';
 
 /**
  * Opens the Blocker Approval of `blocker` when its reason has one (§8.1), or
  * does nothing. Its subject is the Attempt whose end raised the Blocker, it
- * holds the Job's `execution` Stage Run, and it names the Task. Called by
+ * holds the Stage Run of the Stage the Task runs in, and it names the Task. Called by
  * `stepTask` whenever a Task goes `blocked`, so no Blocker path can miss it.
  */
 export function openBlockerItem(
   tx: Tx,
   op: { jobId: string; actor: string },
-  task: { id: string; key: string },
+  task: { id: string; key: string; kind?: string },
   blocker: Blocker,
 ): string | undefined {
   const options = blockerOptions(blocker.reason);
   if (options === undefined) return undefined;
-  const execution = tx
-    .select({ id: schema.stageRuns.id })
-    .from(schema.stageRuns)
-    .where(and(eq(schema.stageRuns.jobId, op.jobId), eq(schema.stageRuns.stageId, 'execution')))
-    .orderBy(desc(schema.stageRuns.attempt))
-    .get();
+  // The Stage the Task runs in: `execution`, or `integration` for the Integration Task.
+  const execution = latestStageRunOfTask(tx, op.jobId, task.id);
   const id = newId('apr');
   const kind: ApprovalKind = 'blocker';
   const expiresPolicy: ExpiresPolicy = 'remain_pending';
@@ -52,7 +49,11 @@ export function openBlockerItem(
       stageRunId: execution?.id ?? null,
       kind,
       subjectRef: blocker.attemptId,
-      question: blockerItemTitle(task.key, blocker.reason),
+      question: blockerItemTitle(
+        task.key,
+        blocker.reason,
+        task.kind === 'integration' ? 'integration' : 'plan',
+      ),
       questionsJson: null,
       why: `${blocker.detail}. ${blocker.requiredAction}.`,
       optionsJson: JSON.stringify(options),
@@ -175,12 +176,7 @@ export function replaceBlocker(
     actor: op.actor,
     payload: { key: task.key, state: 'blocked', blocker },
   });
-  const execution = tx
-    .select()
-    .from(schema.stageRuns)
-    .where(and(eq(schema.stageRuns.jobId, op.jobId), eq(schema.stageRuns.stageId, 'execution')))
-    .orderBy(desc(schema.stageRuns.attempt))
-    .get();
+  const execution = latestStageRunOfTask(tx, op.jobId, task.id);
   if (
     execution?.blockerJson != null &&
     (JSON.parse(execution.blockerJson) as { taskId?: string }).taskId === task.id

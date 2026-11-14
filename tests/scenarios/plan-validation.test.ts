@@ -19,6 +19,7 @@ import { scriptWith, validOutput } from '../support/scripts.js';
 
 interface TaskBody {
   id: string;
+  kind: string;
   key: string;
   state: string;
   maxAttempts: number;
@@ -94,7 +95,7 @@ describe('Plan validation in the planning Stage', () => {
 
     const tasks = await json<TaskBody[]>(rt.request(`/v1/jobs/${job.id}/tasks`));
     expect(
-      tasks.map((t) => t.key),
+      tasks.filter((t) => t.kind === 'plan').map((t) => t.key),
       'only the valid Plan made Tasks',
     ).toEqual(['add-sum']);
   });
@@ -158,9 +159,15 @@ describe('Plan validation in the planning Stage', () => {
     expect(tasks.map((t) => [t.key, t.maxAttempts])).toEqual([
       ['low-first', 3],
       ['high-later', 1],
+      // The Integration Task's cap comes from the Effective Configuration (ADR-0034).
+      ['integration', 3],
     ]);
     const keyOf = new Map(tasks.map((t) => [t.id, t.key]));
     const attempts = await json<AttemptBody[]>(rt.request(`/v1/jobs/${job.id}/attempts`));
-    expect(attempts.map((a) => keyOf.get(a.taskId))).toEqual(['high-later', 'low-first']);
+    expect(attempts.map((a) => keyOf.get(a.taskId))).toEqual([
+      'high-later',
+      'low-first',
+      'integration',
+    ]);
   });
 });

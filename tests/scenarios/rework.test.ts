@@ -163,6 +163,7 @@ describe('The path-scope Gate and Rework', () => {
     expect(attempts.map((a) => [a.n, a.cause, a.state, a.exitReason])).toEqual([
       [1, 'initial', 'failed', 'gates_failed'],
       [2, 'rework', 'passed', 'completed'],
+      [1, 'merge', 'passed', 'completed'],
     ]);
     const [first, second] = attempts as [AttemptBody, AttemptBody];
 
@@ -195,6 +196,7 @@ describe('The path-scope Gate and Rework', () => {
     expect(started.map((e) => [e.payload['n'], e.payload['cause']])).toEqual([
       [1, 'initial'],
       [2, 'rework'],
+      [1, 'merge'],
     ]);
     const taskSteps = events
       .filter((e) => e.entityKind === 'task')
@@ -274,6 +276,7 @@ describe('The path-scope Gate and Rework', () => {
     expect(attempts.map((a) => [a.n, a.state, a.exitReason])).toEqual([
       [1, 'failed', 'changes_requested'],
       [2, 'passed', 'completed'],
+      [1, 'passed', 'completed'], // the Integration Task's merge Attempt
     ]);
     const [first, rework] = attempts as [AttemptBody, AttemptBody];
     const reviews = await json<{ id: string; attemptId: string; outcome: string }[]>(

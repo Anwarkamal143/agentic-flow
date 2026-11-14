@@ -8,7 +8,8 @@
 import { schema, type Tx } from '@factory/db';
 import { BlockerSchema, executionOutcome, TaskStateSchema, type Blocker } from '@factory/domain';
 import { and, asc, eq, sql } from 'drizzle-orm';
-import type { JobState, StageRunStepper } from './engine.js';
+import { readJobState, type JobState, type StageRunStepper } from './engine.js';
+import { settleIntegration, startIntegration } from './integration.js';
 import { latestArtifact } from './plan-approval.js';
 import { latestStageRun, startRequestedReplan } from './replan.js';
 
@@ -18,13 +19,20 @@ import { latestStageRun, startRequestedReplan } from './replan.js';
  * else `waiting_human` or `blocked` if a Task is blocked (the Stage Run carries the first Blocker, human ones
  * first, so the Job shows why); then `failed` if a Task failed (and `closure`
  * queued for the partial results); `succeeded` (and `closure` queued) when
- * every Task is approved. Only the Tasks of the Job's newest Plan count: a
- * Plan replaced at `plan_approval` left its Tasks cancelled, never run
- * (ADR-0019).
+ * every Task is approved; with an `integration` Stage, that is queued instead,
+ * with the Integration Tasks (ADR-0034). Only the Plan Tasks of the Job's
+ * newest Plan count: a Plan replaced at `plan_approval` left its Tasks
+ * cancelled, never run (ADR-0019). Then settles `integration` the same way.
  */
 export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper): void {
   // A requested Replan starts planning once the last Attempt in flight settles (ADR-0029).
   if (startRequestedReplan(tx, state.job.id, step, 'system:scheduler')) return;
+  settlePlanTasks(tx, state, step);
+  // The Integration Task settles its own Stage (ADR-0034); every caller settles both.
+  settleIntegration(tx, readJobState(tx, state.job.id), step);
+}
+
+function settlePlanTasks(tx: Tx, state: JobState, step: StageRunStepper): void {
   const execution = latestStageRun(state, 'execution');
   if (execution?.state !== 'running') return;
   const plan = latestArtifact(tx, state.job.id, 'plan');
@@ -32,7 +40,11 @@ export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper):
     .select()
     .from(schema.tasks)
     .where(
-      and(eq(schema.tasks.jobId, state.job.id), eq(schema.tasks.planArtifactId, plan?.id ?? '')),
+      and(
+        eq(schema.tasks.jobId, state.job.id),
+        eq(schema.tasks.kind, 'plan'),
+        eq(schema.tasks.planArtifactId, plan?.id ?? ''),
+      ),
     )
     .orderBy(asc(sql`rowid`))
     .all();
@@ -46,6 +58,14 @@ export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper):
   const queueClosure = () => {
     const closure = state.stageRuns.find((r) => r.stageId === 'closure' && r.state === 'pending');
     if (closure !== undefined) step(closure, 'queued');
+  };
+  // A failed execution has nothing to integrate: `integration` is skipped and closure reports
+  // the partial results (ADR-0028, ADR-0034).
+  const skipIntegration = () => {
+    const integration = latestStageRun(readJobState(tx, state.job.id), 'integration');
+    if (integration?.state === 'pending') {
+      step(integration, 'skipped', { reason: 'execution failed: there is nothing to integrate' });
+    }
   };
   if (outcome.kind !== 'running') {
     // A Replan held at the cap decides what happens to the rest: wait for the human.
@@ -71,11 +91,13 @@ export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper):
           issues: [],
         },
       });
+      skipIntegration();
       queueClosure();
       return;
     case 'succeeded':
       step(execution, 'succeeded');
-      queueClosure();
+      // A Job created at `feature` v2 has no `integration` Stage: closure follows directly.
+      if (!startIntegration(tx, state.job.id, step, 'system:scheduler')) queueClosure();
       return;
   }
 }

@@ -186,17 +186,43 @@ export async function addWorktree(opts: {
   path: string;
   branch: string;
   startSha: string;
+  /** Point `branch` at `startSha` even when it exists (`-B`); else git refuses an existing branch. */
+  resetBranch?: boolean;
 }): Promise<void> {
   await worktreeGit(opts.repo, [
     'worktree',
     'add',
     '--quiet',
-    '-b',
+    opts.resetBranch === true ? '-B' : '-b',
     opts.branch,
     '--',
     opts.path,
     opts.startSha,
   ]);
+}
+
+/**
+ * Frees `branch` for a new Worktree: every Worktree of `repo` that has it
+ * checked out is detached at the same commit (its files and commits stay as
+ * they are), and the records of Worktrees whose directory is gone are pruned.
+ * Returns the paths that were detached.
+ */
+export async function releaseBranch(repo: string, branch: string): Promise<string[]> {
+  const out = await worktreeGit(repo, ['worktree', 'list', '--porcelain']);
+  const holders: { path: string; prunable: boolean }[] = [];
+  for (const block of out.split('\n\n')) {
+    const lines = block.split('\n');
+    const path = lines.find((l) => l.startsWith('worktree '))?.slice('worktree '.length);
+    if (path === undefined || !lines.includes(`branch refs/heads/${branch}`)) continue;
+    holders.push({ path, prunable: lines.some((l) => l.startsWith('prunable')) });
+  }
+  if (holders.some((h) => h.prunable)) await worktreeGit(repo, ['worktree', 'prune']);
+  const detached: string[] = [];
+  for (const h of holders.filter((x) => !x.prunable)) {
+    await worktreeGit(h.path, ['checkout', '--quiet', '--detach']);
+    detached.push(h.path);
+  }
+  return detached;
 }
 
 /**

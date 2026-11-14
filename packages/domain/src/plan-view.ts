@@ -153,6 +153,20 @@ export const PlanViewSchema = z.object({
       maxRetries: z.number().int(),
     }),
   ),
+  /**
+   * The factory's Integration Tasks for this Plan (ADR-0034), one per
+   * Repository once every Plan Task is approved. Not part of the Plan: never
+   * in `tasks`, the waves or the estimate, and never replanned or edited.
+   */
+  integrationTasks: z.array(
+    z.object({
+      id: z.string(),
+      key: z.string(),
+      repositoryId: z.string(),
+      state: z.string(),
+      branch: z.string(),
+    }),
+  ),
   /** Tasks that can start together, wave by wave. */
   parallel: z.array(z.array(z.string())),
   decisionPoints: z.array(DecisionPointSchema),

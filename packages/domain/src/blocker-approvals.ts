@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import type { ApprovalOption } from './approvals.js';
 import type { BlockerReason } from './rework.js';
+import type { TaskKind } from './integration.js';
 
 /** A grant's default and largest size: +1 to +5 Attempts. */
 export const GRANT_DEFAULT = 1;
@@ -101,8 +102,20 @@ const TITLES: Partial<Record<BlockerReason, string>> = {
 /** The option that starts a Replan from an Inbox Item (a Blocker Approval or a scope change Question). */
 export const REPLAN_OPTION: ApprovalOption = REPLAN;
 
+/** What the Integration Task's Blockers say instead (ADR-0034). */
+const INTEGRATION_TITLES: Partial<Record<BlockerReason, string>> = {
+  base_merge_conflict: "can't build the Integration Branch: a Task Branch conflicts",
+};
+
 /** The line a Blocker Approval shows in a list. */
-export function blockerItemTitle(taskKey: string, reason: BlockerReason): string {
+export function blockerItemTitle(
+  taskKey: string,
+  reason: BlockerReason,
+  kind: TaskKind = 'plan',
+): string {
+  if (kind === 'integration') {
+    return `Integration Task ${INTEGRATION_TITLES[reason] ?? TITLES[reason] ?? `is blocked (${reason})`}`;
+  }
   return `Task ${taskKey} ${TITLES[reason] ?? `is blocked (${reason})`}`;
 }
 

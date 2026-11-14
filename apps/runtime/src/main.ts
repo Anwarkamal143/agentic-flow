@@ -36,6 +36,7 @@ import {
   API_KEY_MISSING,
   createLearningRedactor,
   secretsFromEnv,
+  FEATURE_RECIPE_VERSIONS,
   type Billing,
 } from '@factory/domain';
 import { TokenSource } from '@factory/github';
@@ -239,6 +240,13 @@ if (crashEnv !== undefined && crashAt === undefined) {
   fail(`unknown FACTORY_TEST_CRASH_AT: ${crashEnv}`);
 }
 
+/** Test-only (ADR-0034): new Jobs freeze this earlier `feature` Recipe version; unknown is refused. */
+const recipeEnv = process.env['FACTORY_TEST_RECIPE_VERSION'];
+const recipeVersion = FEATURE_RECIPE_VERSIONS.find((v) => String(v) === recipeEnv);
+if (recipeEnv !== undefined && recipeVersion === undefined) {
+  fail(`unknown FACTORY_TEST_RECIPE_VERSION: ${recipeEnv}`);
+}
+
 const scheduler = new StageScheduler({
   db: database.db,
   harness,
@@ -280,6 +288,7 @@ const jobs = new JobService(
     await Promise.all([scheduler.cancelJob(jobId), tasks.cancelJob(jobId)]);
   },
   artifacts,
+  recipeVersion,
 );
 
 const app = createApp({

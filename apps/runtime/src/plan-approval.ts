@@ -68,6 +68,7 @@ function settleIfNothingToClaim(tx: Tx, jobId: string, step: StageRunStepper, ru
     .where(
       and(
         eq(schema.tasks.jobId, jobId),
+        eq(schema.tasks.kind, 'plan'),
         eq(schema.tasks.planArtifactId, plan?.id ?? ''),
         eq(schema.tasks.state, 'ready'),
       ),

@@ -15,7 +15,9 @@ import {
   canTransitionStageRun,
   currentStageOf,
   EffectiveConfigSchema,
+  featureRecipe,
   FEATURE_RECIPE,
+  type FeatureRecipeVersion,
   JobStatusSchema,
   JobTypeSchema,
   ProjectConfigSchema,
@@ -24,6 +26,7 @@ import {
   StageIdSchema,
   StageRunStateSchema,
   TaskDefinitionSchema,
+  TaskKindSchema,
   TaskCancelReasonSchema,
   TaskStateSchema,
   TERMINAL_JOB_STATUSES,
@@ -69,6 +72,11 @@ export class JobService {
     private readonly stopWork: (jobId: string) => Promise<void> = () => Promise.resolve(),
     /** Where a Replan request is stored (`requestReplan`); none: Replans can't be requested. */
     private readonly artifacts?: ArtifactStore,
+    /**
+     * The `feature` Recipe version new Jobs freeze: the current one, unless a
+     * test pinned an earlier one (`FACTORY_TEST_RECIPE_VERSION`, ADR-0034).
+     */
+    private readonly recipeVersion: FeatureRecipeVersion = FEATURE_RECIPE.recipeVersion as FeatureRecipeVersion,
   ) {}
 
   /**
@@ -123,7 +131,7 @@ export class JobService {
 
         // Copies, never references: later edits to the Recipe or config can't reach the Job.
         const snapshot: WorkflowSnapshot = WorkflowSnapshotSchema.parse(
-          structuredClone(FEATURE_RECIPE),
+          structuredClone(featureRecipe(this.recipeVersion)),
         );
         const effectiveConfig = resolveEffectiveConfig({
           project: ProjectConfigSchema.parse(JSON.parse(project.configJson)),
@@ -500,6 +508,7 @@ function toTask(row: typeof schema.tasks.$inferSelect): Task {
   return {
     id: row.id,
     jobId: row.jobId,
+    kind: TaskKindSchema.parse(row.kind),
     key: row.key,
     title: row.title,
     repositoryId: row.repositoryId,

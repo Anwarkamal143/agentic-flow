@@ -196,6 +196,20 @@ export function PlanViewCard({ plan }: { plan: PlanView }) {
             ))}
           </ol>
         </Section>
+        {plan.integrationTasks.length > 0 && (
+          <Section title="Integration Tasks (factory-created, not part of the Plan)">
+            <ul className="space-y-2" data-testid="plan-integration-tasks">
+              {plan.integrationTasks.map((t) => (
+                <li key={t.id} className="flex flex-wrap items-center gap-2 text-sm">
+                  <span className="font-mono text-xs">{t.key}</span>
+                  <State value={t.state} />
+                  <span>{repoName.get(t.repositoryId) ?? t.repositoryId}</span>
+                  <code className="font-mono text-xs">{t.branch}</code>
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
         <Section title="Affected repositories">
           <List items={plan.repositories.map((r) => r.name)} empty="None." />
         </Section>

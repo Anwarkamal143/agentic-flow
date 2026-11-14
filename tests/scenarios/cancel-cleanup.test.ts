@@ -209,8 +209,10 @@ describe('B7: cancelling a Job with several running Attempts', { timeout: 90_000
     const done = await waitForJob(rt, next.id, jobSettled, 40_000);
     expect(done.status).toBe('completed');
     const nextLog = await events(rt, next.id);
-    const claimed = nextLog.filter((e) => e.type === 'task.claimed').map((e) => e.seq);
-    const approved = nextLog.filter((e) => e.type === 'task.approved').map((e) => e.seq);
+    // The three Plan Tasks; the Integration Task is claimed once they are approved.
+    const plan = (e: EventBody) => e.payload['key'] !== 'integration';
+    const claimed = nextLog.filter((e) => e.type === 'task.claimed' && plan(e)).map((e) => e.seq);
+    const approved = nextLog.filter((e) => e.type === 'task.approved' && plan(e)).map((e) => e.seq);
     expect(claimed).toHaveLength(3);
     expect(Math.max(...claimed), 'all three claimed at once').toBeLessThan(Math.min(...approved));
 

@@ -221,6 +221,15 @@ export async function planShow(jobId: string, opts: { json: boolean }): Promise<
       `    writable: ${t.writable.join(', ')}`,
       `    covers:   ${t.acceptance.join(', ') || '(none)'}`,
     ]),
+    ...(view.integrationTasks.length === 0
+      ? []
+      : [
+          'Integration Tasks (factory-created, not part of the Plan; never replanned or edited):',
+          ...view.integrationTasks.map(
+            (t) =>
+              `  ${t.key.padEnd(14)} ${t.state.padEnd(10)} ${repoName(t.repositoryId)}  ${t.branch}`,
+          ),
+        ]),
     'Run in parallel:',
     ...view.parallel.map((w, n) => `  wave ${String(n + 1)}: ${w.join(', ')}`),
     'Risks:',

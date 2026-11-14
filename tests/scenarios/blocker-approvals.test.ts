@@ -272,6 +272,7 @@ describe('a Rework cap is a Blocker Approval, and a grant continues the Task', (
       [2, 'rework', 'failed'],
       [3, 'rework', 'failed'],
       [4, 'rework', 'passed'],
+      [1, 'merge', 'passed'],
     ]);
     // The guidance went into the next Attempt's context, beside the Findings to fix.
     expect(all[3]?.packet.context.guidance).toEqual([

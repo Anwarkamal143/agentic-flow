@@ -234,6 +234,7 @@ describe('the Task Result is checked, re-prompted once, and never trusted', () =
     expect(attempts.map((a) => [a.n, a.cause, a.state, a.exitReason])).toEqual([
       [1, 'initial', 'failed', 'gates_failed'],
       [2, 'rework', 'passed', 'completed'],
+      [1, 'merge', 'passed', 'completed'],
     ]);
     // The Rework Attempt is told what the factory found, not what the Harness claimed.
     const carried = attempts[1]?.packet.context.priorFindings.map((f) => [f.attemptN, f.rule]);

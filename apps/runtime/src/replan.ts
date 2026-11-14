@@ -32,8 +32,21 @@ type StageRunRow = JobState['stageRuns'][number];
 const IN_FLIGHT = ['claimed', 'running', 'verifying', 'in_review'];
 /** A `specification` Stage Run in these states during execution is a pending re-specification. */
 const RESPECIFYING = ['queued', 'running', 'waiting_human'];
-/** `execution` states a Replan may replace. */
+/** `execution` (or `integration`) states a Replan may replace. */
 const ACTIVE_EXECUTION = ['queued', 'running', 'waiting_human', 'blocked'];
+
+/**
+ * The Stage a Replan replaces: the newest `execution` while it is active, else
+ * the newest `integration` while that is (a Replan from an integration
+ * conflict, ADR-0034); `undefined` when neither is.
+ */
+export function activeTaskStage(state: JobState): StageRunRow | undefined {
+  for (const stageId of ['execution', 'integration']) {
+    const run = latestStageRun(state, stageId);
+    if (run !== undefined && ACTIVE_EXECUTION.includes(run.state)) return run;
+  }
+  return undefined;
+}
 
 /** What a Replan request did: started (it waits, or planning began), or held at the cap. */
 export type ReplanOutcome =
@@ -146,9 +159,9 @@ export function raiseReplanCapIn(tx: Tx, item: { id: string; jobId: string }, ac
 
 /**
  * Starts `planning` for a requested Replan once no Attempt is in flight: the
- * newest `execution` is `superseded`, `replan_requested` cleared, and new
- * Stage Runs of `planning` (queued), `plan_approval` and `execution`
- * (pending) added. `true` when it started. Call wherever an Attempt settles.
+ * active `execution` (or `integration`) is `superseded`, `replan_requested`
+ * cleared, and new Stage Runs of `planning` (queued), `plan_approval` and
+ * `execution` (pending) added, and of `integration` when it was replaced. `true` when it started. Call wherever an Attempt settles.
  */
 export function startRequestedReplan(
   tx: Tx,
@@ -158,8 +171,8 @@ export function startRequestedReplan(
 ): boolean {
   const state = readJobState(tx, jobId);
   if (!state.job.replanRequested) return false;
-  const execution = latestStageRun(state, 'execution');
-  if (execution === undefined || !ACTIVE_EXECUTION.includes(execution.state)) return false;
+  const execution = activeTaskStage(state);
+  if (execution === undefined) return false;
   const flying = tx
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
@@ -174,7 +187,9 @@ export function startRequestedReplan(
   const planning = requireLatest(state, 'planning');
   const nextPlanning = addStageRun(tx, jobId, planning, actor);
   addStageRun(tx, jobId, requireLatest(state, 'plan_approval'), actor);
-  addStageRun(tx, jobId, execution, actor);
+  addStageRun(tx, jobId, requireLatest(state, 'execution'), actor);
+  // Replacing `integration`: the new Plan's Tasks get a new Integration Task, in a new Stage Run.
+  if (execution.stageId === 'integration') addStageRun(tx, jobId, execution, actor);
   step(nextPlanning, 'queued');
   appendEvent(tx, {
     entityKind: 'job',
@@ -182,7 +197,11 @@ export function startRequestedReplan(
     jobId,
     type: 'job.replanning',
     actor,
-    payload: { replansUsed: state.job.replansUsed, supersededExecution: execution.id },
+    payload: {
+      replansUsed: state.job.replansUsed,
+      supersededExecution: execution.id,
+      supersededStage: execution.stageId,
+    },
   });
   return true;
 }
@@ -252,8 +271,8 @@ export function refuseUnlessReplannable(tx: Tx, state: JobState, holdingItemId?:
   if (TERMINAL_JOB_STATUSES.includes(status)) {
     throw new ApiFailure(409, 'job_terminal', `Job ${state.job.id} is already ${status}`);
   }
-  const execution = latestStageRun(state, 'execution');
-  if (execution === undefined || !ACTIVE_EXECUTION.includes(execution.state)) {
+  const execution = activeTaskStage(state);
+  if (execution === undefined) {
     throw new ApiFailure(
       409,
       'not_executing',
@@ -313,7 +332,7 @@ export function openReplanCapItem(
 ): string {
   const options = blockerOptions('replan_cap_reached');
   if (options === undefined) throw new Error('replan_cap_reached has no options');
-  const execution = latestStageRun(state, 'execution');
+  const execution = activeTaskStage(state) ?? latestStageRun(state, 'execution');
   const id = newId('apr');
   const kind: ApprovalKind = 'blocker';
   const expiresPolicy: ExpiresPolicy = 'remain_pending';
