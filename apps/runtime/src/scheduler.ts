@@ -92,6 +92,17 @@ type Outcome =
   | { kind: 'invalid'; issues: RuleIssue[] }
   | { kind: 'harness_failed'; message: string };
 
+/**
+ * What a proposal Harness Run is asked besides its Stage: why the previous
+ * output was rejected (a re-prompt), and the Replan or re-specification
+ * request it answers. Each is recorded on `harness_run.started`.
+ */
+interface StageRunContext {
+  rejected: RuleIssue[] | undefined;
+  replan: ReplanRequest | undefined;
+  respec: RespecRequest | undefined;
+}
+
 export class StageScheduler {
   private readonly loop = new PassLoop(() => this.pass(), POLL_MS);
   private current: HarnessRun | undefined;
@@ -270,9 +281,7 @@ export class StageScheduler {
         cwd,
         policy: toolPolicyOf(job.configSnapshotJson, stage.role),
         repositories,
-        rejected,
-        replan,
-        respec,
+        context: { rejected, replan, respec },
       });
       if (this.closed) return; // shutdown: left running, resumed at the next start
       if (this.stageRun(stageRunId).state !== 'running') return; // the Job was cancelled
@@ -304,11 +313,10 @@ export class StageScheduler {
       cwd: string;
       policy: ToolPolicy;
       repositories: readonly JobRepository[];
-      rejected: RuleIssue[] | undefined;
-      replan: ReplanRequest | undefined;
-      respec: RespecRequest | undefined;
+      context: StageRunContext;
     },
   ): Promise<Outcome> {
+    const { rejected, replan, respec } = input.context;
     // A proposal Run is never re-attached: a Stage Run left running starts again.
     const spool = join(this.opts.spoolRoot, `${run.id}-${String(input.n)}`);
     rmSync(spool, { recursive: true, force: true });
@@ -339,15 +347,15 @@ export class StageScheduler {
       n: input.n,
       template: { id: PROMPT_TEMPLATE_ID, hash: PROMPT_TEMPLATE_HASH },
       ...(started.sessionRef === undefined ? {} : { sessionRef: started.sessionRef }),
-      ...(input.rejected === undefined ? {} : { reprompt: { issues: input.rejected } }),
-      ...(input.replan === undefined ? {} : { replan: input.replan }),
-      ...(input.respec === undefined
+      ...(rejected === undefined ? {} : { reprompt: { issues: rejected } }),
+      ...(replan === undefined ? {} : { replan }),
+      ...(respec === undefined
         ? {}
         : {
             respec: {
-              specArtifactId: input.respec.specArtifactId,
-              feedback: input.respec.feedback,
-              requestArtifactId: input.respec.requestArtifactId,
+              specArtifactId: respec.specArtifactId,
+              feedback: respec.feedback,
+              requestArtifactId: respec.requestArtifactId,
             },
           }),
     });
