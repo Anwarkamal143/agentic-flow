@@ -11,7 +11,7 @@ import {
   planShow,
 } from './commands/inbox.js';
 import { init } from './commands/init.js';
-import { jobCancel, jobCreate, jobList, jobShow } from './commands/job.js';
+import { jobCancel, jobCreate, jobList, jobReplan, jobShow } from './commands/job.js';
 import { logs } from './commands/logs.js';
 import { planEdit, planRaw, planRequestChanges } from './commands/plan.js';
 import { repoAdd } from './commands/repo.js';
@@ -37,6 +37,10 @@ Commands:
   job show <id> [--json]          Show a Job: status, Stages, Workflow Snapshot, config
   job cancel <id> [--reason <text>]
                                   Cancel a Job, stopping its running work
+  job replan <id> --feedback <text>
+                                  Ask for a Replan during execution: nothing new is
+                                  dispatched, planning starts once no Attempt is in
+                                  flight, and unaffected Tasks keep their work
   logs <job> [--json]             Show the (redacted) Harness and verification output
                                   of a Job's Attempts
   plan show <job> [--json|--raw]  Show the Job's Plan for approval: Specification, DAG,
@@ -195,6 +199,23 @@ function job(argv: string[]): Promise<number> | number {
     case 'list': {
       const { values } = parseArgs({ args, options: { json: { type: 'boolean' } } });
       return jobList({ json: values.json === true });
+    }
+    case 'replan': {
+      const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: { feedback: { type: 'string' } },
+      });
+      const [id, ...extra] = positionals;
+      if (id === undefined || extra.length > 0) {
+        process.stderr.write(`factory: job replan takes exactly one Job id\n\n${USAGE}`);
+        return 2;
+      }
+      if (values.feedback === undefined || values.feedback.trim() === '') {
+        process.stderr.write(`factory: job replan needs --feedback <text>\n`);
+        return 2;
+      }
+      return jobReplan(id, { feedback: values.feedback });
     }
     case 'show':
     case 'cancel': {

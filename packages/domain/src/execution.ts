@@ -54,7 +54,9 @@ export const TASK_TRANSITIONS: Readonly<Record<TaskState, readonly TaskState[]>>
   ],
   in_review: ['approved', 'changes_requested', 'ready', 'failed', 'blocked', 'cancelled'],
   changes_requested: ['ready', 'blocked', 'failed', 'cancelled'],
-  approved: ['integrated'],
+  // `→ cancelled`: a Replan didn't carry it over (its definition changed, or its approval no
+  // longer holds); its approved head stays on record (ADR-0029).
+  approved: ['integrated', 'cancelled'],
   blocked: ['ready', 'cancelled'],
   integrated: [],
   failed: [],

@@ -19,7 +19,10 @@ const PORT_BLOCKS = 1_000;
 
 export type WorktreeRow = typeof schema.worktrees.$inferSelect;
 
-/** A Task's Worktree path and Task Branch (ADR-0007). */
+/**
+ * A Task's Worktree path and Task Branch (ADR-0007), both named by its id: a Task
+ * re-planned under the same key (ADR-0029) gets a fresh Worktree, never the old one.
+ */
 export function taskWorktree(input: {
   workspaceRoot: string;
   repositoryId: string;
@@ -28,7 +31,12 @@ export function taskWorktree(input: {
   taskKey: string;
 }): { path: string; branch: string } {
   return {
-    path: join(input.workspaceRoot, input.repositoryId, input.jobId, input.taskKey),
+    path: join(
+      input.workspaceRoot,
+      input.repositoryId,
+      input.jobId,
+      `${input.taskId}-${input.taskKey}`,
+    ),
     branch: `factory/${input.jobId}/${input.taskId}-${input.taskKey}`,
   };
 }

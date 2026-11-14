@@ -10,6 +10,7 @@ import { BlockerSchema, executionOutcome, TaskStateSchema } from '@factory/domai
 import { and, asc, eq, sql } from 'drizzle-orm';
 import type { JobState, StageRunStepper } from './engine.js';
 import { latestArtifact } from './plan-approval.js';
+import { latestStageRun, startRequestedReplan } from './replan.js';
 
 /**
  * Ends `execution` once no Task is in progress: `waiting_human` or `blocked`
@@ -21,7 +22,9 @@ import { latestArtifact } from './plan-approval.js';
  * (ADR-0019).
  */
 export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper): void {
-  const execution = state.stageRuns.find((r) => r.stageId === 'execution');
+  // A requested Replan starts planning once the last Attempt in flight settles (ADR-0029).
+  if (startRequestedReplan(tx, state.job.id, step, 'system:scheduler')) return;
+  const execution = latestStageRun(state, 'execution');
   if (execution?.state !== 'running') return;
   const plan = latestArtifact(tx, state.job.id, 'plan');
   const tasks = tx

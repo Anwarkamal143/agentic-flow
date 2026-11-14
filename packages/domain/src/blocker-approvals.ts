@@ -25,6 +25,20 @@ const CANCEL_JOB: ApprovalOption = {
     'Cancel the whole Job, as factory job cancel does: work in flight stops, Worktrees are preserved, branches kept.',
   agentProposed: false,
 };
+const REPLAN: ApprovalOption = {
+  id: 'replan',
+  label: 'Replan',
+  description:
+    'Send the Job back to the planner with this Blocker (and your comment) as feedback: a Replan, counted against maxReplans. Unaffected Tasks keep their work; the new Plan waits at plan_approval.',
+  agentProposed: false,
+};
+const GRANT_REPLAN: ApprovalOption = {
+  id: 'grant_replan',
+  label: 'Grant one more Replan',
+  description:
+    "Raise the Job's maxReplans by one and start the requested Replan with its feedback. Written to the audit log.",
+  agentProposed: false,
+};
 const RETRY_NOW: ApprovalOption = {
   id: 'retry_now',
   label: 'Retry now',
@@ -42,12 +56,12 @@ const KILL_AND_RETRY: ApprovalOption = {
 
 /** The Blocker reasons that open a Blocker Approval, with their options (§8.1). */
 const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
-  rework_cap_reached: [GRANT, CANCEL_JOB],
-  question_cap_reached: [GRANT, CANCEL_JOB],
+  rework_cap_reached: [GRANT, REPLAN, CANCEL_JOB],
+  question_cap_reached: [GRANT, REPLAN, CANCEL_JOB],
+  replan_cap_reached: [GRANT_REPLAN, CANCEL_JOB],
   recovery_uncertain: [RETRY_NOW, CANCEL_JOB],
   retry_cap_reached: [RETRY_NOW, CANCEL_JOB],
-  // The replan option (§8.1) arrives with the Requested Replan (#45).
-  base_merge_conflict: [CANCEL_JOB],
+  base_merge_conflict: [REPLAN, CANCEL_JOB],
 };
 
 /**
@@ -67,8 +81,12 @@ const TITLES: Partial<Record<BlockerReason, string>> = {
   question_cap_reached: 'reached its question cap',
   recovery_uncertain: 'stopped: recovery is uncertain',
   retry_cap_reached: 'reached its Retry cap',
+  replan_cap_reached: 'reached its Replan cap',
   base_merge_conflict: "can't start: its Dependency Base conflicts",
 };
+
+/** The option that starts a Replan from an Inbox Item (a Blocker Approval or a scope change Question). */
+export const REPLAN_OPTION: ApprovalOption = REPLAN;
 
 /** The line a Blocker Approval shows in a list. */
 export function blockerItemTitle(taskKey: string, reason: BlockerReason): string {

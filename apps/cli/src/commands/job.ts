@@ -8,6 +8,7 @@ import type {
   CancelJobInput,
   CreateJobInput,
   Job,
+  RequestReplanInput,
   JobSummary,
   Repository,
   Review,
@@ -154,6 +155,44 @@ export async function jobCancel(id: string, opts: { reason: string | undefined }
 }
 
 /**
+ * `factory job replan <job> --feedback <text>` (`requestReplan`, ADR-0029):
+ * asks for a Replan of a Job in execution. Nothing new is dispatched from
+ * then on; planning starts once no Attempt is in flight. At `maxReplans` the
+ * request waits in a Blocker Approval instead (its id is printed).
+ */
+export async function jobReplan(id: string, opts: { feedback: string }): Promise<number> {
+  const api = client();
+  if (api === undefined) return EXIT_NOT_RUNNING;
+  for (let attempt = 1; ; attempt++) {
+    const job = await getJob(api, id);
+    if (job === undefined) return 1;
+    const input: RequestReplanInput = { expectedVersion: job.version, feedback: opts.feedback };
+    try {
+      const result = await api.json<Job & { capApprovalId?: string }>(
+        'POST',
+        `/v1/jobs/${encodeURIComponent(id)}/replan`,
+        { body: input },
+      );
+      process.stdout.write(
+        result.capApprovalId === undefined
+          ? `Replan requested for Job ${result.id} (${String(result.replans.used)} of ${String(result.replans.max)} Replans used). ` +
+              'Nothing new is dispatched; planning starts once no Attempt is in flight, and the new Plan waits at plan_approval.\n'
+          : `Job ${result.id} has used ${String(result.replans.used)} of ${String(result.replans.max)} Replans (maxReplans): ` +
+              `the request waits in Blocker Approval ${result.capApprovalId}. ` +
+              `Grant one more Replan with: factory inbox decide ${result.capApprovalId} grant_replan\n`,
+      );
+      return 0;
+    } catch (err) {
+      if (!(err instanceof ApiRequestError)) throw err;
+      const conflict = err.body?.error === 'version_conflict';
+      if (conflict && attempt < CANCEL_TRIES) continue;
+      process.stderr.write(`factory: ${err.body?.error ?? 'error'}: ${err.message}\n`);
+      return 1;
+    }
+  }
+}
+
+/**
  * The Job's `cleanup` Inbox Item, opened once the cancel stopped everything
  * (ADR-0027): its id and how to decide it, or why there is none.
  */
@@ -207,6 +246,7 @@ function writeJob(job: Job): void {
     `  repository: ${job.repositoryId}`,
     `  recipe:     ${job.workflowSnapshot.recipeId} v${String(job.workflowSnapshot.recipeVersion)}`,
     `  config:     ${config}`,
+    `  replans:    ${String(job.replans.used)} of ${String(job.replans.max)} used${job.replanRequested ? '; replan requested, waiting for the Attempts in flight' : ''}`,
     `  version:    ${String(job.version)}`,
     `  created:    ${job.createdAt} by ${job.createdBy}`,
     'Stages:',

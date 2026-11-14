@@ -85,7 +85,9 @@ export type BlockerKind = z.infer<typeof BlockerKindSchema>;
  * unknown). `retry_cap_reached`: an interrupted Attempt has no Retry left.
  * `awaiting_human`: the developer asked a Question; the Task waits for the
  * answer in the Inbox (ADR-0023). `question_cap_reached`: it asked again with
- * no answer Attempt left (`max_questions`). `base_merge_conflict`: merging its
+ * no answer Attempt left (`max_questions`). `replan_cap_reached`: a Replan was
+ * asked for with none left (`max_replans`, ADR-0029); a Job-level Blocker
+ * whose Approval holds the request. `base_merge_conflict`: merging its
  * dependencies' approved heads into its Dependency Base conflicts, so it
  * can't start (ADR-0028); never an automatic replan.
  */
@@ -98,6 +100,7 @@ export const BlockerReasonSchema = z.enum([
   'fault_origin_infrastructure',
   'recovery_uncertain',
   'retry_cap_reached',
+  'replan_cap_reached',
   'base_merge_conflict',
 ]);
 export type BlockerReason = z.infer<typeof BlockerReasonSchema>;

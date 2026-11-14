@@ -34,7 +34,7 @@ import {
 } from '@factory/harness';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
-import { changeJob, readJobState, type JobState } from './engine.js';
+import { changeJob, readJobState, stepTask, type JobState } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
 import { queueNextStage } from './plan-approval.js';
@@ -45,6 +45,7 @@ import {
   repositoriesOf,
   type JobRepository,
   type ReplanRequest,
+  cancelTaskItems,
 } from './plans.js';
 import {
   PROMPT_TEMPLATE_HASH,
@@ -217,12 +218,17 @@ export class StageScheduler {
     const repositories = this.repositoriesOf(job.id);
     const [cwd] = repositories.map((r) => r.clonePath);
     if (cwd === undefined) throw new Error(`Job ${job.id} has no Repository`);
+    // A replan request reaches the planner as its Replan section below, not as an input.
     const inputs = this.opts.artifacts
       .listForJob(job.id)
+      .filter((a) => a.kind !== 'replan_request')
       .map((a) => ({ kind: a.kind, content: this.opts.artifacts.readJson(a.id) }));
 
     // A Replan (ADR-0019): the planner re-plans from the current Plan and the human's feedback.
-    const replan = stage.stageId === 'planning' ? replanRequestOf(this.opts.db, job.id) : undefined;
+    const replan =
+      stage.stageId === 'planning'
+        ? replanRequestOf(this.opts.db, job.id, (id) => this.opts.artifacts.readJson(id))
+        : undefined;
     const replanInput =
       replan === undefined
         ? undefined
@@ -440,7 +446,11 @@ export class StageScheduler {
         .run();
     }
     if (kind === 'plan') {
-      persistPlanTasks(tx, PlanProposalSchema.parse(value), { ...ctx, actor: ACTOR });
+      persistPlanTasks(tx, PlanProposalSchema.parse(value), {
+        ...ctx,
+        actor: ACTOR,
+        readPlan: (id) => PlanProposalSchema.parse(this.opts.artifacts.readJson(id)),
+      });
     }
   }
 
@@ -448,8 +458,11 @@ export class StageScheduler {
     changeJob(
       this.opts.db,
       { jobId: run.jobId, expectedVersion: 'current', actor: ACTOR },
-      (_, state, step) => {
+      (tx, state, step) => {
         step(requireStageRun(state, run.id, 'running'), 'failed', { failure });
+        // A failed Replan ends the Job: the Tasks it would have carried over or cancelled
+        // are cancelled now, with their open Inbox Items (ADR-0029).
+        if (run.stageId === 'planning') cancelUnfinishedTasks(tx, run.jobId, ACTOR);
       },
     );
     this.opts.onCommit();
@@ -496,4 +509,25 @@ function requireStageRun(state: JobState, id: string, expected: StageRunState): 
     throw new Error(`Stage Run ${id} is ${String(run?.state)}, not ${expected}`);
   }
   return run;
+}
+
+/** Cancels the Job's Tasks that are not finished (none is in flight while planning runs). */
+function cancelUnfinishedTasks(tx: Tx, jobId: string, actor: string): void {
+  const open = tx
+    .select()
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.jobId, jobId),
+        inArray(schema.tasks.state, ['pending', 'ready', 'blocked', 'changes_requested']),
+      ),
+    )
+    .all();
+  for (const task of open) {
+    stepTask(tx, { jobId, actor }, task, 'cancelled', {
+      reason: 'planning_failed',
+      cancelReason: 'replan',
+    });
+    cancelTaskItems(tx, { jobId, actor }, task.id);
+  }
 }

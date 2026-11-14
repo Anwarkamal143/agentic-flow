@@ -87,6 +87,10 @@ export function JobOverview({ job }: { job: Job }) {
           <Field label="Created">
             {formatTime(job.createdAt)} by {job.createdBy}
           </Field>
+          <Field label="Replans">
+            {job.replans.used} of {job.replans.max} used
+            {job.replanRequested ? ' · replan requested, waiting for the Attempts in flight' : ''}
+          </Field>
         </dl>
         {job.description === '' ? (
           <Empty>No description.</Empty>

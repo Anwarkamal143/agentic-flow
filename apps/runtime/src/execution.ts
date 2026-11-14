@@ -501,6 +501,7 @@ export class TaskScheduler {
       .select({ state: schema.stageRuns.state })
       .from(schema.stageRuns)
       .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'execution')))
+      .orderBy(desc(schema.stageRuns.attempt))
       .get();
     return execution?.state === 'cancelled' ? 'cancelled' : undefined;
   }

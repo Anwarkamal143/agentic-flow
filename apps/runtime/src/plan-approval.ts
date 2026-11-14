@@ -16,7 +16,7 @@ import {
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { readJobState, type JobState, type StageRunStepper } from './engine.js';
 import { newId } from './ids.js';
-import { cancelPlanTasks } from './plans.js';
+import { settleExecution } from './execution.js';
 
 type StageRunRow = JobState['stageRuns'][number];
 
@@ -37,6 +37,7 @@ export function queueNextStage(
   if (next === undefined) return;
   if (next.stageId !== 'plan_approval') {
     step(next, 'queued');
+    if (next.stageId === 'execution') settleIfNothingToClaim(tx, jobId, step, next.id);
     return;
   }
   const policy = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson)).planApproval;
@@ -51,6 +52,29 @@ export function queueNextStage(
     reason: `planApproval: required (from ${policy.source}); waiting for a human to approve or reject the Plan`,
   });
   openPlanItem(tx, jobId, next.id, actor);
+}
+
+/**
+ * After a Replan, the new Plan may hold no Task to claim (every one carried
+ * over approved or blocked, ADR-0029): nothing would ever settle `execution`,
+ * so it is run and settled here (`succeeded`, or waiting on its Blockers).
+ */
+function settleIfNothingToClaim(tx: Tx, jobId: string, step: StageRunStepper, runId: string): void {
+  const plan = latestArtifact(tx, jobId, 'plan');
+  const ready = tx
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.jobId, jobId),
+        eq(schema.tasks.planArtifactId, plan?.id ?? ''),
+        eq(schema.tasks.state, 'ready'),
+      ),
+    )
+    .get();
+  if (ready !== undefined) return;
+  step(reread(tx, runId), 'running');
+  settleExecution(tx, readJobState(tx, jobId), step);
 }
 
 /** Opens the `plan` Inbox Item for the Job's newest Plan, holding `stageRunId`. */
@@ -93,12 +117,14 @@ export function openPlanItem(tx: Tx, jobId: string, stageRunId: string, actor: s
 }
 
 /**
- * "Request changes" (a Replan before execution, ARCHITECTURE §4.7): the
- * waiting `plan_approval` Stage Run is `superseded`, the replaced Plan's Tasks
- * (none ran) are cancelled, one Replan is counted, and new Stage Runs of
+ * "Request changes" (a Replan at `plan_approval`, ARCHITECTURE §4.7): the
+ * waiting `plan_approval` Stage Run is `superseded`, one Replan is counted,
+ * and new Stage Runs of
  * `planning` (queued) and `plan_approval` (pending) are added. The planner then
  * re-plans from the current Plan and the item's feedback (`replanRequestOf`).
- * The caller has checked the cap and the feedback.
+ * The caller has checked the cap and the feedback. The replaced Plan's Tasks
+ * stay as they are until the new Plan is stored: the carry-over then keeps
+ * the unaffected ones and cancels the rest (`persistPlanTasks`, ADR-0029).
  */
 export function startReplan(
   tx: Tx,
@@ -110,7 +136,6 @@ export function startReplan(
   step(run, 'superseded', {
     reason: `${actor} requested changes to Plan ${input.planArtifactId}; the planner re-plans`,
   });
-  cancelPlanTasks(tx, { jobId, actor }, input.planArtifactId, 'plan_replanned');
   const { job, stageRuns } = readJobState(tx, jobId);
   const config = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson));
   const replansUsed = job.replansUsed + 1;

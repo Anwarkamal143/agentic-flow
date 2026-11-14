@@ -252,9 +252,14 @@ const notify = () => {
   cleanup.wake();
 };
 
-const jobs = new JobService(database.db, notify, async (jobId) => {
-  await Promise.all([scheduler.cancelJob(jobId), tasks.cancelJob(jobId)]);
-});
+const jobs = new JobService(
+  database.db,
+  notify,
+  async (jobId) => {
+    await Promise.all([scheduler.cancelJob(jobId), tasks.cancelJob(jobId)]);
+  },
+  artifacts,
+);
 
 const app = createApp({
   token,

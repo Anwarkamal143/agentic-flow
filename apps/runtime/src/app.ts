@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   CancelJobInputSchema,
+  RequestReplanInputSchema,
   CreateJobInputSchema,
   AnswerQuestionInputSchema,
   DecideInputSchema,
@@ -194,6 +195,12 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/v1/jobs/:id/cancel', async (c) => {
     const input = await parseBody(c, CancelJobInputSchema);
     return c.json(await deps.jobs.cancel(c.req.param('id'), input));
+  });
+  // `requestReplan` (ADR-0029): the Job, with `capApprovalId` when maxReplans held the request.
+  app.post('/v1/jobs/:id/replan', async (c) => {
+    const input = await parseBody(c, RequestReplanInputSchema);
+    const { job, capApprovalId } = deps.jobs.requestReplan(c.req.param('id'), input);
+    return c.json({ ...job, ...(capApprovalId === undefined ? {} : { capApprovalId }) });
   });
 
   // The operator is the only actor the API token stands for (ARCHITECTURE §16).

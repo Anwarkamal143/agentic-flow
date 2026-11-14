@@ -317,7 +317,7 @@ describe('a blocked Task: keep going', { timeout: 60_000 }, () => {
 });
 
 describe('base_merge_conflict', { timeout: 60_000 }, () => {
-  it('blocks the Task whose Dependency Base conflicts, with a Blocker Approval to cancel the Job', async () => {
+  it('blocks the Task whose Dependency Base conflicts, with a Blocker Approval to replan or cancel the Job', async () => {
     // B moves test/ to spec/ (every file of the directory); C adds test/extra.md. Their scopes
     // don't overlap, but git's directory-rename detection makes the merge conflict.
     const { rt, repo } = await runtimeWith(
@@ -369,7 +369,7 @@ describe('base_merge_conflict', { timeout: 60_000 }, () => {
     const items = await json<ItemBody[]>(rt.request('/v1/inbox'));
     expect(items.map((i) => [i.kind, i.taskId])).toEqual([['blocker', d.id]]);
     const [item] = items as [ItemBody];
-    expect(item.options.map((o) => o.id)).toEqual(['cancel_job']);
+    expect(item.options.map((o) => o.id)).toEqual(['replan', 'cancel_job']);
     expect(item.question).toContain('Dependency Base');
 
     const decided = await post(rt, `/v1/inbox/${item.id}/decide`, {
@@ -380,5 +380,59 @@ describe('base_merge_conflict', { timeout: 60_000 }, () => {
     expect(decided.status, await decided.clone().text()).toBe(200);
     const after = await waitForJob(rt, job.id, (j) => j.status === 'cancelled');
     expect(after.status).toBe('cancelled');
+  });
+
+  it('replans from the Blocker Approval: b and c carry over approved, d is re-planned as a new Task (#45)', async () => {
+    const conflicting = [
+      docTask('b', [], ['test/math.test.ts', 'spec/math.test.ts']),
+      docTask('c', [], ['test/extra.md']),
+      docTask('d', ['b', 'c']),
+    ];
+    // The new Plan keeps b and c as they are; d now depends on b only.
+    const replanned = [conflicting[0], conflicting[1], docTask('d', ['b'])];
+    const { rt, repo } = await runtimeWith(
+      scriptWith(
+        { planning: [{ output: { tasks: conflicting } }, { output: { tasks: replanned } }] },
+        {
+          b: devRun('b', { steps: [{ run: 'mkdir -p spec && mv test/math.test.ts spec/' }] }),
+          c: devRun('c', { steps: [{ write: { path: 'test/extra.md', content: 'extra\n' } }] }),
+          d: devRun('d'),
+        },
+        { b: APPROVE, c: APPROVE, d: APPROVE },
+      ),
+    );
+    const job = await runJob(rt, repo.id);
+    expect(job.status).toBe('waiting_human');
+    const before = await tasksOf(rt, job.id);
+    const [item] = await json<ItemBody[]>(rt.request('/v1/inbox'));
+    if (item === undefined) throw new Error('no base_merge_conflict Approval');
+
+    const decided = await post(rt, `/v1/inbox/${item.id}/decide`, {
+      expectedVersion: item.version,
+      subjectRef: item.subjectRef,
+      option: 'replan',
+      comment: 'Let d build on b only.',
+    });
+    expect(decided.status, await decided.clone().text()).toBe(200);
+
+    const done = await waitForJob(
+      rt,
+      job.id,
+      (j) => j.status === 'completed' || j.status === 'failed',
+      30_000,
+    );
+    expect(done.status, rt.output()).toBe('completed');
+    const tasks = await tasksOf(rt, job.id);
+    const ids = (key: string) => tasks.filter((t) => t.key === key).map((t) => t.id);
+    expect(ids('b')).toEqual([byKey(before, 'b').id]);
+    expect(ids('c')).toEqual([byKey(before, 'c').id]);
+    const [oldD, newD] = tasks.filter((t) => t.key === 'd');
+    expect(oldD?.id).toBe(byKey(before, 'd').id);
+    expect(oldD?.state).toBe('cancelled');
+    expect(newD?.state).toBe('approved');
+    const events = await json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events`));
+    expect(
+      events.find((e) => e.type === 'task.cancelled' && e.entityId === oldD?.id)?.payload,
+    ).toMatchObject({ cancelReason: 'replan', why: 'definition_changed' });
   });
 });

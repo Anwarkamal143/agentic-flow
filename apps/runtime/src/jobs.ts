@@ -30,6 +30,7 @@ import {
   type AcceptanceCriterion,
   type CancelJobInput,
   type CreateJobInput,
+  type RequestReplanInput,
   type Job,
   type JobSummary,
   type StageRun,
@@ -40,11 +41,19 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { changeJob, changeJobIn, readJobState, stepTask, type JobState } from './engine.js';
 import { ApiFailure } from './errors.js';
 import { attemptFindings } from './findings.js';
+import type { ArtifactStore } from './artifacts.js';
 import { openCleanupItem } from './cleanup.js';
 import { cancelOpenItems } from './inbox.js';
+import { requestReplanIn } from './replan.js';
 import { newId } from './ids.js';
 
 const OPERATOR = 'user:local';
+
+/** What `requestReplan` returns: the Job, and the Replan cap Approval when one holds the request. */
+export interface ReplanResult {
+  job: Job;
+  capApprovalId?: string;
+}
 
 export class JobService {
   constructor(
@@ -56,7 +65,37 @@ export class JobService {
      * command, by process group) and records it; settles once that is done.
      */
     private readonly stopWork: (jobId: string) => Promise<void> = () => Promise.resolve(),
+    /** Where a Replan request is stored (`requestReplan`); none: Replans can't be requested. */
+    private readonly artifacts?: ArtifactStore,
   ) {}
+
+  /**
+   * `requestReplan` (ARCHITECTURE §4.7, ADR-0029): the operator asks for a
+   * Replan of a Job in execution, with feedback for the planner. Under
+   * `maxReplans` it is counted and `replan_requested` set (no Task or Rework
+   * is dispatched from then on; planning starts once no Attempt is in
+   * flight); at the cap a `replan_cap_reached` Blocker Approval holds it.
+   */
+  requestReplan(id: string, input: RequestReplanInput): ReplanResult {
+    const artifacts = this.artifacts;
+    if (artifacts === undefined) throw new Error('no Artifact store configured');
+    const outcome = changeJob(
+      this.db,
+      { jobId: id, expectedVersion: input.expectedVersion, actor: OPERATOR },
+      (tx, _state, step) =>
+        requestReplanIn(
+          tx,
+          artifacts,
+          { jobId: id, feedback: input.feedback, actor: OPERATOR, approvalId: null },
+          step,
+        ),
+    );
+    this.onCommit();
+    return {
+      job: this.get(id),
+      ...(outcome.kind === 'capped' ? { capApprovalId: outcome.approvalId } : {}),
+    };
+  }
 
   /**
    * Intake: records the Job with its frozen Workflow Snapshot and Effective
@@ -212,6 +251,8 @@ export class JobService {
         }
         cancelOpenTasks(tx, id, input.reason);
         cancelOpenItems(tx, id, OPERATOR);
+        // A Replan waiting for the work in flight never starts on a cancelled Job.
+        tx.update(schema.jobs).set({ replanRequested: false }).where(eq(schema.jobs.id, id)).run();
         appendEvent(tx, {
           entityKind: 'job',
           entityId: id,
@@ -506,11 +547,14 @@ function toSummary(state: JobState, repositoryId: string): JobSummary {
 }
 
 function toJob(state: JobState, repositoryId: string): Job {
+  const effectiveConfig = EffectiveConfigSchema.parse(JSON.parse(state.job.configSnapshotJson));
   return {
     ...toSummary(state, repositoryId),
     description: state.job.description,
     workflowSnapshot: WorkflowSnapshotSchema.parse(JSON.parse(state.job.workflowSnapshotJson)),
-    effectiveConfig: EffectiveConfigSchema.parse(JSON.parse(state.job.configSnapshotJson)),
+    effectiveConfig,
     stageRuns: state.stageRuns.map(toStageRun),
+    replanRequested: state.job.replanRequested,
+    replans: { used: state.job.replansUsed, max: effectiveConfig.maxReplans.value },
   };
 }

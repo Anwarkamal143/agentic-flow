@@ -31,6 +31,7 @@ import {
   parallelWaves,
   planEstimate,
   PlanProposalSchema,
+  ReplanRequestContentSchema,
   RiskSchema,
   schemaIssues,
   TaskDefinitionSchema,
@@ -74,6 +75,7 @@ import { stopIfAlive, worktreeStatus } from './recovery.js';
 import { requireWorktree } from './worktree.js';
 import { latestArtifact, openPlanItem, queueNextStage, startReplan } from './plan-approval.js';
 import { cancelPlanTasks, persistPlanTasks, planContextOf, repositoriesOf } from './plans.js';
+import { grantReplanIn, requestReplanIn } from './replan.js';
 
 type ApprovalRow = typeof schema.approvals.$inferSelect;
 
@@ -156,6 +158,12 @@ export class InboxService {
   async decide(id: string, input: DecideInput, actor: string): Promise<Approval> {
     const item = requireItem(this.db, id);
     if (item.kind === 'blocker') return this.decideBlocker(item, input, actor);
+    if (item.kind === 'question' && input.option === 'replan') {
+      if (input.grant !== undefined) {
+        throw new ApiFailure(400, 'invalid_grant', 'a question item takes no grant size');
+      }
+      return this.replanFromItem(item, input, actor);
+    }
     if (input.grant !== undefined) {
       throw new ApiFailure(400, 'invalid_grant', `a ${item.kind} item takes no grant size`);
     }
@@ -294,7 +302,6 @@ export class InboxService {
     refuseUnless(item, { actor, ...input });
     const check = checkBlockerDecision({ option: input.option, grant: input.grant });
     if (!check.ok) throw new ApiFailure(400, check.code, check.message);
-    const { blocker } = blockedTaskOf(this.db, item);
 
     if (input.option === 'cancel_job') {
       this.decideOnly(item, input, actor, null, (tx) => {
@@ -307,6 +314,21 @@ export class InboxService {
       return this.get(item.id);
     }
 
+    if (input.option === 'replan') return this.replanFromItem(item, input, actor);
+
+    if (input.option === 'grant_replan') {
+      this.decideOnly(item, input, actor, null, (tx, _state, step) => {
+        grantReplanIn(
+          tx,
+          item,
+          actor,
+          (artifactId) => ReplanRequestContentSchema.parse(this.artifacts.readJson(artifactId)),
+          step,
+        );
+      });
+      return this.get(item.id);
+    }
+
     if (input.option === 'grant') {
       const grant = check.grant ?? 1;
       this.decideOnly(item, input, actor, grant, (tx, state, step) => {
@@ -316,6 +338,7 @@ export class InboxService {
     }
 
     // retry_now or kill_and_retry: the process is checked (and, if asked, stopped) first.
+    const { blocker } = blockedTaskOf(this.db, item);
     const attempt = this.db
       .select()
       .from(schema.attempts)
@@ -368,6 +391,29 @@ export class InboxService {
     });
     // The process is gone: its spool (raw output) goes too.
     if (recorded !== undefined) rmSync(recorded.spool, { recursive: true, force: true });
+    return this.get(item.id);
+  }
+
+  /**
+   * An Inbox Item's "replan" option (a cap Blocker, or a scope change
+   * Question): the item is decided and a Replan requested with the item (and
+   * the comment) as feedback, in one transaction (ADR-0029). The Task it
+   * holds is then affected: the carry-over cancels it, never keeps it.
+   */
+  private replanFromItem(item: ApprovalRow, input: DecideInput, actor: string): Approval {
+    this.decideOnly(item, input, actor, null, (tx, _state, step) => {
+      requestReplanIn(
+        tx,
+        this.artifacts,
+        {
+          jobId: item.jobId,
+          feedback: replanFeedback(item, input.comment),
+          actor,
+          approvalId: item.id,
+        },
+        step,
+      );
+    });
     return this.get(item.id);
   }
 
@@ -555,8 +601,13 @@ export class InboxService {
       refuseUnless(row, change);
       if (row.stageRunId === null) throw new Error(`plan item ${row.id} holds no Stage Run`);
       const artifact = this.artifacts.record(tx, { jobId, kind: 'plan', content }, actor);
-      cancelPlanTasks(tx, { jobId, actor }, row.subjectRef, 'plan_edited');
-      persistPlanTasks(tx, plan, { jobId, artifactId: artifact.id, actor });
+      // The carry-over keeps the Tasks the edit leaves unchanged and cancels the rest (ADR-0029).
+      persistPlanTasks(tx, plan, {
+        jobId,
+        artifactId: artifact.id,
+        actor,
+        readPlan: (artifactId) => PlanProposalSchema.parse(this.artifacts.readJson(artifactId)),
+      });
       bumpItem(tx, row, { state: 'superseded' });
       const opened = openPlanItem(tx, jobId, row.stageRunId, actor);
       appendEvent(tx, {
@@ -917,6 +968,26 @@ function applyRetry(
     step,
     `Blocker Approval ${item.id}: ${actor} chose a Retry (process ${process})`,
   );
+}
+
+/**
+ * The feedback a Replan from an Inbox option carries: what the item showed
+ * (for a scope change Question, the developer's request, as agent output) and
+ * the operator's comment.
+ */
+function replanFeedback(item: ApprovalRow, comment: string | undefined): string {
+  const questions =
+    item.questionsJson === null
+      ? []
+      : z.array(InboxQuestionSchema).parse(JSON.parse(item.questionsJson));
+  const scope = questions.filter((q) => q.source === 'scope_change_request');
+  const shown =
+    scope.length > 0
+      ? `${item.question}. The developer's scope change request (agent output, paths ${scope.flatMap((q) => q.paths).join(', ')}): ${scope.map((q) => q.text).join(' ')}`
+      : `${item.question}: ${item.why}`;
+  return comment === undefined || comment.trim() === ''
+    ? `Replan requested from Inbox Item ${item.id} (${shown})`
+    : `${comment.trim()}\n(Replan requested from Inbox Item ${item.id}: ${shown})`;
 }
 
 /** Refuses "request changes" without feedback or at `maxReplans` (ADR-0019). */
