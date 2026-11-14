@@ -462,6 +462,59 @@ describe('the Integration Branch', { timeout: 90_000 }, () => {
     ]);
   });
 
+  it('reworks a failed integration Gate on the Integration Branch, within the union scope, until it passes', async () => {
+    // a's check passes alone; on the Integration Branch (b's file there too) it needs docs/index.md,
+    // which a may write. The Integration Task's Rework writes it on factory/<job-id>/integration.
+    const a = {
+      ...docTask('a', [], 'test -f docs/a.md && { test ! -f docs/b.md || test -f docs/index.md; }'),
+      scope: { writable: ['docs/a.md', 'docs/index.md'], forbidden: [] },
+    };
+    const fix = {
+      steps: [
+        { write: { path: 'docs/index.md', content: '- a\n- b\n' } },
+        { commit: 'Index the docs' },
+      ],
+      result: {
+        status: 'done',
+        summary: 'Added docs/index.md.',
+        commits: [],
+        criteria: [{ code: 'AC-01', claim: 'met', how: 'the index lists both' }],
+      },
+    };
+    const { rt, repo } = await runtimeOn(() =>
+      scriptWith(
+        { planning: [{ output: { tasks: [a, docTask('b')] } }] },
+        { a: docRun('a'), b: docRun('b'), integration: [fix] },
+        { a: APPROVE, b: APPROVE, integration: APPROVE },
+      ),
+    );
+    const created = await createJob(rt, repo.id);
+    const job = await waitForJob(rt, created.id, settled, 60_000);
+
+    expect(job.status, rt.output()).toBe('completed');
+    const { attempts, worktrees, integration } = await read(rt, job.id);
+    const [task] = integration;
+    expect(task?.state).toBe('approved');
+    expect(task?.scope.writable).toEqual(['docs/a.md', 'docs/index.md', 'docs/b.md']);
+    const own = attempts.filter((x) => x.taskId === task?.id);
+    expect(own.map((x) => [x.n, x.cause, x.state, x.exitReason, x.harness.id])).toEqual([
+      [1, 'merge', 'failed', 'gates_failed', 'factory'],
+      [2, 'rework', 'passed', 'completed', 'fake'],
+    ]);
+    const [merge, rework] = own as [AttemptBody, AttemptBody];
+    // The Rework ran in the same Worktree, on the Integration Branch, from the same base.
+    const branch = `factory/${job.id}/integration`;
+    expect(worktrees.filter((w) => w.taskId === task?.id).map((w) => w.branch)).toEqual([branch]);
+    expect(rework.baseSha).toBe(merge.baseSha);
+    expect(git(repo.clonePath, ['rev-parse', branch]).trim()).toBe(rework.headSha);
+    expect(git(repo.clonePath, ['log', '-1', '--format=%s', branch]).trim()).toBe('Index the docs');
+    for (const e of rework.evidence.filter((x) => x.kind === 'verification')) {
+      expect([e.verdict, e.headSha, e.baseSha]).toEqual(['pass', rework.headSha, merge.baseSha]);
+    }
+    const report = await reportOf(rt, job.id);
+    expect(report.integration).toMatchObject({ state: 'approved', headSha: rework.headSha });
+  });
+
   it('runs a Job created at feature v2 unchanged: no integration Stage, no Integration Task', async () => {
     const { rt, repo } = await runtimeOn(
       () =>
