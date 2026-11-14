@@ -197,7 +197,9 @@ describe('the dashboard Inbox', () => {
   });
 
   it('requests changes to a Plan with feedback: the planner re-plans and a new Plan waits', async () => {
-    const replanned = { ...validOutput('planning') };
+    const first = validOutput('planning') as { tasks: Record<string, unknown>[] };
+    // A changed Task: the carry-over cancels the old one (a Replan), never keeps it.
+    const replanned = { tasks: first.tasks.map((t) => ({ ...t, title: 'Add the sum() helper' })) };
     const script = scriptWith({
       planning: [{ output: validOutput('planning') }, { output: replanned }],
     });
@@ -251,6 +253,17 @@ describe('the dashboard Inbox', () => {
     expect(open).toMatchObject({ kind: 'plan', state: 'open' });
     expect(open?.subjectRef).not.toBe(item.subjectRef);
     expect(await dash.html('/inbox')).toContain(`action="/api/inbox/${String(open?.id)}/decide"`);
+    // The replaced Plan's Task shows as cancelled, and why; the new Plan's does not.
+    const cards = [
+      ...(await dash.html(`/jobs/${job.id}`)).matchAll(/<[^>]*data-testid="task"[\s\S]*?<\/dl>/g),
+    ].map((m) => text(m[0]));
+    expect(cards.map((c) => /Cancelled by \w+/.exec(c)?.[0] ?? null).sort()).toEqual([
+      'Cancelled by replan',
+      null,
+    ]);
+    expect(cards.find((c) => c.includes('Cancelled by'))).toMatch(
+      / cancelled Cancelled by replan /,
+    );
   });
 
   it('defers an item out of the default view and undefers it back', async () => {

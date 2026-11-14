@@ -234,6 +234,11 @@ function TaskCard({
             <span className="font-mono text-sm text-muted-foreground">{task.key}</span> {task.title}
           </CardTitle>
           <State value={task.state} />
+          {task.cancelReason !== null && (
+            <span className="text-xs text-muted-foreground">
+              Cancelled by {humanize(task.cancelReason)}
+            </span>
+          )}
         </div>
         <CardDescription>{task.objective}</CardDescription>
       </CardHeader>

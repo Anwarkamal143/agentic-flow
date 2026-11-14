@@ -4,7 +4,7 @@
  */
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
-import { TaskStateSchema } from './execution.js';
+import { TaskCancelReasonSchema, TaskStateSchema } from './execution.js';
 import { BlockerSchema } from './rework.js';
 import {
   DEFAULT_TOOL_POLICIES,
@@ -570,6 +570,8 @@ export const TaskSchema = TaskDefinitionSchema.extend({
   title: z.string(),
   repositoryId: z.string(),
   state: TaskStateSchema,
+  /** Why a `cancelled` Task was cancelled; `null` otherwise. */
+  cancelReason: TaskCancelReasonSchema.nullable(),
   maxAttempts: z.number().int().positive(),
   /** Retries allowed after interrupted Attempts (not counted toward `maxAttempts`). */
   maxRetries: z.number().int().nonnegative(),

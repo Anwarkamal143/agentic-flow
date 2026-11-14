@@ -33,6 +33,7 @@ interface TaskBody {
   key: string;
   title: string;
   state: string;
+  cancelReason: string | null;
   planArtifactId: string;
 }
 interface ItemBody {
@@ -198,6 +199,15 @@ describe('the plan Fault Origin route', () => {
     );
     const id = (key: string) => byKey(cancelled, key)[0]?.id;
     expect(byKey(cancelled, 'c')[0]?.state).toBe('running');
+    // The Tasks API says why each was cancelled; the CLI shows it beside the state.
+    expect(cancelled.map((t) => [t.key, t.cancelReason])).toEqual([
+      ['a', 'replan'],
+      ['b', 'replan'],
+      ['c', null],
+    ]);
+    const shownTasks = await rt.home.cli(['job', 'show', job.id]);
+    expect(shownTasks.stdout).toMatch(/^ {2}a +cancelled \(replan\) /m);
+    expect(shownTasks.stdout).toMatch(/^ {2}c +running +Write docs\/c\.md/m);
     const waiting = await jobOf(rt, job.id);
     expect(waiting).toMatchObject({ replanRequested: true, replans: { used: 1, max: 2 } });
     // Planning waits for c: the Job is still active in execution.
