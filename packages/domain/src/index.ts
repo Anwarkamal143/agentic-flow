@@ -198,9 +198,11 @@ export type StageRunState = z.infer<typeof StageRunStateSchema>;
 /** Allowed Stage Run transitions. Everything else is refused by the engine. */
 export const STAGE_RUN_TRANSITIONS: Readonly<Record<StageRunState, readonly StageRunState[]>> = {
   pending: ['queued', 'skipped', 'cancelled'],
-  queued: ['running', 'cancelled'],
-  running: ['succeeded', 'failed', 'blocked', 'waiting_human', 'cancelled'],
-  blocked: ['queued', 'cancelled'],
+  // `→ superseded` from queued, running or blocked: a requested Replan replaces `execution` once
+  // no Attempt is in flight; a new Stage Run of it waits on the new Plan (ADR-0029).
+  queued: ['running', 'cancelled', 'superseded'],
+  running: ['succeeded', 'failed', 'blocked', 'waiting_human', 'cancelled', 'superseded'],
+  blocked: ['queued', 'cancelled', 'superseded'],
   // `→ succeeded | rejected`: a human decided a Stage that waits only on that decision (plan_approval).
   // `→ superseded`: a human requested changes to the Plan; a new Stage Run of it waits on the new Plan (ADR-0019).
   waiting_human: ['queued', 'succeeded', 'rejected', 'cancelled', 'superseded'],
@@ -459,8 +461,22 @@ export const JobSchema = JobSummarySchema.extend({
   workflowSnapshot: WorkflowSnapshotSchema,
   effectiveConfig: EffectiveConfigSchema,
   stageRuns: z.array(StageRunSchema),
+  /**
+   * A Replan was requested during execution and waits for every Attempt in flight to settle
+   * (ARCHITECTURE §4.7, ADR-0029). Persisted state; cleared when planning starts.
+   */
+  replanRequested: z.boolean(),
+  /** Replans used, against `maxReplans`. */
+  replans: z.object({ used: z.number().int(), max: z.number().int() }),
 });
 export type Job = z.infer<typeof JobSchema>;
+
+/** `POST /v1/jobs/:id/replan` (`requestReplan`, ADR-0029). */
+export const RequestReplanInputSchema = z.object({
+  expectedVersion: z.number().int().nonnegative(),
+  feedback: z.string().trim().min(1).max(5000),
+});
+export type RequestReplanInput = z.infer<typeof RequestReplanInputSchema>;
 
 /** `POST /v1/jobs`. */
 export const CreateJobInputSchema = z.object({
@@ -495,6 +511,8 @@ export const ArtifactKindSchema = z.enum([
   'log',
   'report',
   'review',
+  /** A Replan asked for during execution (ADR-0029): the feedback and who asked, never regenerated. */
+  'replan_request',
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 

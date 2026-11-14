@@ -18,9 +18,18 @@ import { describe, expect, it } from 'vitest';
 const ids = (reason: BlockerReason) => blockerOptions(reason)?.map((o) => o.id);
 
 describe('the option sets of a Blocker Approval', () => {
-  it('a Rework or question cap offers a grant and cancelling the Job', () => {
-    expect(ids('rework_cap_reached')).toEqual(['grant', 'cancel_job']);
-    expect(ids('question_cap_reached')).toEqual(['grant', 'cancel_job']);
+  it('a Rework or question cap offers a grant, a Replan and cancelling the Job', () => {
+    expect(ids('rework_cap_reached')).toEqual(['grant', 'replan', 'cancel_job']);
+    expect(ids('question_cap_reached')).toEqual(['grant', 'replan', 'cancel_job']);
+  });
+
+  it('the Replan cap offers one more Replan and cancelling the Job (#45)', () => {
+    expect(ids('replan_cap_reached')).toEqual(['grant_replan', 'cancel_job']);
+    expect(checkBlockerDecision({ option: 'grant_replan' })).toEqual({ ok: true, grant: null });
+    expect(checkBlockerDecision({ option: 'grant_replan', grant: 2 })).toMatchObject({
+      ok: false,
+      code: 'invalid_grant',
+    });
   });
 
   it('an uncertain recovery or a Retry cap offers retry now and cancelling the Job', () => {
@@ -44,7 +53,11 @@ describe('the option sets of a Blocker Approval', () => {
   });
 
   it('every option is the factory’s, never agent-proposed', () => {
-    for (const reason of ['rework_cap_reached', 'recovery_uncertain'] as const) {
+    for (const reason of [
+      'rework_cap_reached',
+      'recovery_uncertain',
+      'replan_cap_reached',
+    ] as const) {
       expect(blockerOptions(reason)?.every((o) => !o.agentProposed)).toBe(true);
     }
     expect(KILL_AND_RETRY_OPTIONS.every((o) => !o.agentProposed)).toBe(true);

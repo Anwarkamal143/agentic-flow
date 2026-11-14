@@ -4,6 +4,7 @@
  * Inbox option, or "request changes") and every Plan Edit applies the same
  * rule. No I/O.
  */
+import { z } from 'zod';
 import type { TaskState } from './execution.js';
 import type { PlanTaskProposal } from './proposals.js';
 
@@ -151,3 +152,19 @@ function canonical(value: unknown): string {
   }
   return JSON.stringify(value);
 }
+
+/**
+ * The content of a `replan_request` Artifact (ADR-0029): a Replan asked for
+ * during execution, by the operator (`requestReplan`) or by an Inbox option.
+ * Stored once, in the transaction that records the request; the planner reads
+ * it on every Harness Run, so it is never regenerated.
+ */
+export const ReplanRequestContentSchema = z.object({
+  /** The Plan being replanned (the Job's newest when it was asked for). */
+  planArtifactId: z.string(),
+  feedback: z.string(),
+  requestedBy: z.string(),
+  /** The Inbox Item whose option asked for it, when one did. */
+  approvalId: z.string().nullable(),
+});
+export type ReplanRequestContent = z.infer<typeof ReplanRequestContentSchema>;
