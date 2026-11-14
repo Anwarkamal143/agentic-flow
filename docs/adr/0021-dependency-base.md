@@ -19,6 +19,8 @@
 
 The Dependency Base is local to one dependent Task: nothing pushes it, no branch is named after it, and it does not combine the Job's leaves. The Integration Branch (`factory/<job-id>`, §14) is Phase C. B1 asserts no `factory/<job-id>` branch exists.
 
-## Conflicts: a stopgap until #44
+## Conflicts: a stopgap until #44 (superseded by ADR-0028)
 
 The Plan validator rejects overlapping writable paths for Tasks that no dependency orders (ADR-0017), so siblings rarely conflict. When they do, `merge-tree` reports the conflicting paths, and until the `base_merge_conflict` human Blocker and its Approval land (#44) the Task **fails** with `factory_error` and a message naming the dependencies and the paths. Nothing is merged, and nothing retries it silently.
+
+**Superseded (#44):** a conflict now blocks the Task with the human Blocker `base_merge_conflict` and its Blocker Approval; see ADR-0028.
