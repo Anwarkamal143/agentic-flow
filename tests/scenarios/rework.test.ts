@@ -367,16 +367,11 @@ describe('The path-scope Gate and Rework', () => {
     expect((await tasksOf(rt, job.id))[0]?.state).toBe('cancelled');
   });
 
-  it('routes a blocking Finding with Fault Origin plan or spec to a human', async () => {
-    const [plan, spec] = await Promise.all([
-      runWith(scriptWith({}, {}, { 'add-sum': [blockingReview('plan')] })),
-      runWith(scriptWith({}, {}, { 'add-sum': [blockingReview('spec')] })),
-    ]);
+  // A blocking `plan` Finding replans instead (B4): tests/scenarios/plan-route.test.ts.
+  it('routes a blocking Finding with Fault Origin spec to a human', async () => {
+    const spec = await runWith(scriptWith({}, {}, { 'add-sum': [blockingReview('spec')] }));
 
-    for (const [{ rt, job }, reason] of [
-      [plan, 'fault_origin_plan'],
-      [spec, 'fault_origin_spec'],
-    ] as const) {
+    for (const [{ rt, job }, reason] of [[spec, 'fault_origin_spec']] as const) {
       expect(job.status).toBe('waiting_human');
       const attempts = await attemptsOf(rt, job.id);
       expect(attempts.map((a) => [a.n, a.state, a.exitReason])).toEqual([
