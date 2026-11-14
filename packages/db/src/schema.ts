@@ -163,7 +163,11 @@ export const artifacts = sqliteTable(
   (t) => [index('artifacts_job').on(t.jobId), uniqueIndex('artifacts_stage_run').on(t.stageRunId)],
 );
 
-/** The numbered Acceptance Criteria of a Job's Specification. */
+/**
+ * The numbered Acceptance Criteria of each of a Job's Specifications: a
+ * re-specification adds a new spec Artifact with its own criteria, and the
+ * old ones stay (ADR-0031), so codes are unique per Artifact.
+ */
 export const acceptanceCriteria = sqliteTable(
   'acceptance_criteria',
   {
@@ -179,7 +183,10 @@ export const acceptanceCriteria = sqliteTable(
     mandatory: integer('mandatory', { mode: 'boolean' }).notNull(),
     verification: text('verification').notNull(),
   },
-  (t) => [uniqueIndex('acceptance_criteria_job_code').on(t.jobId, t.code)],
+  (t) => [
+    uniqueIndex('acceptance_criteria_artifact_code').on(t.artifactId, t.code),
+    index('acceptance_criteria_job').on(t.jobId),
+  ],
 );
 
 /**

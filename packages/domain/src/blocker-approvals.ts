@@ -32,6 +32,17 @@ const REPLAN: ApprovalOption = {
     'Send the Job back to the planner with this Blocker (and your comment) as feedback: a Replan, counted against maxReplans. Unaffected Tasks keep their work; the new Plan waits at plan_approval.',
   agentProposed: false,
 };
+const REWORK: ApprovalOption = {
+  id: 'rework',
+  label: 'Rework with guidance',
+  description:
+    "Keep the current Specification and run a new Attempt of this Task, with your comment as guidance in its context. It counts against the Task's maxAttempts: with none left, the Task waits on its Rework cap instead.",
+  agentProposed: false,
+};
+const REPLAN_UNDER_SPEC: ApprovalOption = {
+  ...REPLAN,
+  label: 'Replan under the current Specification',
+};
 const GRANT_REPLAN: ApprovalOption = {
   id: 'grant_replan',
   label: 'Grant one more Replan',
@@ -62,6 +73,7 @@ const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   recovery_uncertain: [RETRY_NOW, CANCEL_JOB],
   retry_cap_reached: [RETRY_NOW, CANCEL_JOB],
   base_merge_conflict: [REPLAN, CANCEL_JOB],
+  spec_finding_unresolved: [REWORK, REPLAN_UNDER_SPEC, CANCEL_JOB],
 };
 
 /**
@@ -83,6 +95,7 @@ const TITLES: Partial<Record<BlockerReason, string>> = {
   retry_cap_reached: 'reached its Retry cap',
   replan_cap_reached: 'reached its Replan cap',
   base_merge_conflict: "can't start: its Dependency Base conflicts",
+  spec_finding_unresolved: 'has a Specification Finding to decide',
 };
 
 /** The option that starts a Replan from an Inbox Item (a Blocker Approval or a scope change Question). */
