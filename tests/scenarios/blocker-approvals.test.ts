@@ -215,6 +215,7 @@ describe('a Rework cap is a Blocker Approval, and a grant continues the Task', (
     });
     expect(blocker.options.map((o) => [o.id, o.agentProposed])).toEqual([
       ['grant', false],
+      ['replan', false],
       ['cancel_job', false],
     ]);
     const blockedEvent = (await events(rt, job.id)).find(
@@ -346,7 +347,7 @@ describe('a question cap is a Blocker Approval', () => {
       subjectRef: second?.id,
       question: 'Task add-sum reached its question cap',
     });
-    expect(blocker.options.map((o) => o.id)).toEqual(['grant', 'cancel_job']);
+    expect(blocker.options.map((o) => o.id)).toEqual(['grant', 'replan', 'cancel_job']);
 
     const res = await decide(rt, blocker, { option: 'grant', grant: 2, comment: 'Keep it exact.' });
     expect(res.status, await res.clone().text()).toBe(200);

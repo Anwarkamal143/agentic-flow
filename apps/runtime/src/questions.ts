@@ -11,6 +11,7 @@ import {
   InboxQuestionSchema,
   questionItemTitle,
   QUESTION_OPTIONS,
+  REPLAN_OPTION,
   TaskPacketSchema,
   type AnsweredQuestion,
   type ApprovalKind,
@@ -64,7 +65,9 @@ export function openQuestionItem(
         `The developer of Task ${input.taskKey} ended its Attempt with needs_decision${scope ? ' and a scope change request' : ''}. ` +
         'The Task waits with no process alive; your answers start a fresh Attempt on the same Task Branch. ' +
         'The questions and their options are proposed by an agent, and an answer never widens the scope or grants a permission.',
-      optionsJson: JSON.stringify(QUESTION_OPTIONS),
+      // A scope change can only be granted by a Replan (the new Plan is approved under the
+      // validator), never by an answer (ADR-0023, ADR-0029).
+      optionsJson: JSON.stringify(scope ? [...QUESTION_OPTIONS, REPLAN_OPTION] : QUESTION_OPTIONS),
       recommended: null,
       evidenceJson: JSON.stringify(input.evidence),
       state: 'open',

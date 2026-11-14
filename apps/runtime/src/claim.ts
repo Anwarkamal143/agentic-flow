@@ -93,8 +93,14 @@ export function claimNextTask(db: FactoryDb, opts: ClaimOptions): Claim | undefi
         eq(schema.stageRuns.stageId, 'execution'),
       ),
     )
+    // A Job whose Replan is requested dispatches nothing new, Rework included (ADR-0029).
+    .innerJoin(schema.jobs, eq(schema.jobs.id, schema.tasks.jobId))
     .where(
-      and(eq(schema.tasks.state, 'ready'), inArray(schema.stageRuns.state, ['queued', 'running'])),
+      and(
+        eq(schema.tasks.state, 'ready'),
+        inArray(schema.stageRuns.state, ['queued', 'running']),
+        eq(schema.jobs.replanRequested, false),
+      ),
     )
     .orderBy(...READY_TASK_ORDER)
     .all();
@@ -121,7 +127,7 @@ function claimTask(
     { jobId, expectedVersion: 'current', actor: opts.actor },
     (tx, state, step) => {
       const task = tx.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).get();
-      if (task?.state !== 'ready') throw new ClaimRefused('not_ready');
+      if (task?.state !== 'ready' || state.job.replanRequested) throw new ClaimRefused('not_ready');
       const config = EffectiveConfigSchema.parse(JSON.parse(state.job.configSnapshotJson));
       const decision = claimCapacity({
         limits: {
@@ -161,7 +167,7 @@ function claimTask(
           capacity: decision.tokens.map((t) => `${t.resourceKind}/${t.resourceId}`),
         },
       });
-      const execution = state.stageRuns.find((r) => r.stageId === 'execution');
+      const execution = state.stageRuns.filter((r) => r.stageId === 'execution').at(-1);
       if (execution?.state === 'queued') step(execution, 'running');
       return { jobId, taskId, leaseId, tokens: decision.tokens };
     },

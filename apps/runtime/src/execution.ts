@@ -91,6 +91,7 @@ import {
   runningClosures,
   type CrashPoint,
 } from './closure.js';
+import { latestStageRun, startRequestedReplan } from './replan.js';
 import { attemptFindings, gateFinding, scopeFinding } from './findings.js';
 import {
   changeJob,
@@ -502,6 +503,7 @@ export class TaskScheduler {
       .select({ state: schema.stageRuns.state })
       .from(schema.stageRuns)
       .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'execution')))
+      .orderBy(desc(schema.stageRuns.attempt))
       .get();
     return execution?.state === 'cancelled' ? 'cancelled' : undefined;
   }
@@ -2231,7 +2233,9 @@ const IN_PROGRESS = ['ready', 'claimed', 'running', 'verifying', 'in_review', 'c
  * `plan_approval` left its Tasks cancelled, never run (ADR-0019).
  */
 export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper): void {
-  const execution = state.stageRuns.find((r) => r.stageId === 'execution');
+  // A requested Replan starts planning once the last Attempt in flight settles (ADR-0029).
+  if (startRequestedReplan(tx, state.job.id, step, ACTOR)) return;
+  const execution = latestStageRun(state, 'execution');
   if (execution?.state !== 'running') return;
   const plan = latestArtifact(tx, state.job.id, 'plan');
   const tasks = tx

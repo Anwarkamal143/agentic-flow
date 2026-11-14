@@ -24,7 +24,7 @@ import {
 } from '@factory/domain';
 import { resolveCommit, uncommittedPaths } from '@factory/git';
 import { attachGuarded, inspectSpool } from '@factory/harness';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { takeOverClaim } from './claim.js';
 import { changeJob, stepAttempt, stepTask, stepWorktree } from './engine.js';
 import { leaseExpiry, parseProcess, settleExecution, type Resumption } from './execution.js';
@@ -194,6 +194,7 @@ function executionCancelled(db: FactoryDb, jobId: string): boolean {
     .select({ state: schema.stageRuns.state })
     .from(schema.stageRuns)
     .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'execution')))
+    .orderBy(desc(schema.stageRuns.attempt))
     .get();
   return run?.state === 'cancelled';
 }
