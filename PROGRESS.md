@@ -96,6 +96,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 Phase B (#33) on integration branch `phase-b/integration`, one worktree per ticket. Shared contracts: `packages/db/**` (schema + migrations) has exactly one owner at a time; other tickets wait for it.
 
 - Schema: `jobs.replan_requested` and `tasks.cancel_reason` already added on the integration branch (migration 0013); no schema owner this round
+- #46 (the plan Fault Origin route, B4) → routeFailedAttempt and its plan branch in apps/runtime/src/**, the plan-route cancellation module it needs, B4 scenarios; may call #45's requested-Replan entry point but doesn't change carry-over rules; no schema change
 
 ## Human decisions (outside CLAUDE.md §7)
 
