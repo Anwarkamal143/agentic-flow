@@ -93,6 +93,7 @@ import {
 import { attemptFindings, gateFinding, scopeFinding } from './findings.js';
 import {
   changeJob,
+  readJobState,
   stepAttempt,
   stepTask,
   stepWorktree,
@@ -101,6 +102,7 @@ import {
 } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
+import { routeToPlanning } from './plan-route.js';
 import { answersAfter, openQuestionItem } from './questions.js';
 import { guidanceAfter } from './blocker-approvals.js';
 import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
@@ -1101,6 +1103,7 @@ export class TaskScheduler {
           outcome,
           usage,
           from: 'in_review',
+          artifacts: this.opts.artifacts,
         });
       },
     );
@@ -1497,7 +1500,11 @@ export class TaskScheduler {
       { jobId: input.jobId, expectedVersion: 'current', actor: ACTOR },
       (tx, state, step) => {
         this.recordVerification(tx, input);
-        endAttempt(tx, state, step, { ...input, from: 'verifying' });
+        endAttempt(tx, state, step, {
+          ...input,
+          from: 'verifying',
+          artifacts: this.opts.artifacts,
+        });
       },
     );
     this.opts.onCommit();
@@ -2058,8 +2065,9 @@ function commandCriteriaFailures(
  * and moves the Task: `approved`; or, after a failure, where Rework routing
  * sends it (ARCHITECTURE §4.6): back to `ready` for a Rework Attempt (through
  * `changes_requested`), `blocked` with a Blocker (the cap is reached, or a
- * blocking Finding blames the Plan, the Specification or the infrastructure),
- * or `failed`. Then settles `execution`.
+ * blocking Finding blames the Specification or the infrastructure),
+ * `cancelled` with its dependents and a Replan asked for (a blocking Finding
+ * blames the Plan, ADR-0030), or `failed`. Then settles `execution`.
  */
 function endAttempt(
   tx: Tx,
@@ -2075,6 +2083,7 @@ function endAttempt(
     outcome: Outcome;
     usage: Usage | null;
     from: 'verifying' | 'in_review';
+    artifacts: ArtifactStore;
   },
 ): void {
   const { jobId, taskId, attemptId, outcome, inspection } = input;
@@ -2101,6 +2110,7 @@ function endAttempt(
       findings: outcome.findings?.length ?? 0,
     },
   );
+  let replanned = false;
   const task = requireTask(tx, taskId, input.from);
   const payload = { attemptId, headSha: inspection.headSha };
   const reason = outcome.exitReason;
@@ -2125,6 +2135,21 @@ function endAttempt(
     });
     if (route.kind === 'fail') {
       stepTask(tx, op, task, 'failed', { reason, payload });
+    } else if (route.kind === 'replan') {
+      routeToPlanning(
+        tx,
+        input.artifacts,
+        op,
+        {
+          task,
+          attemptId,
+          attemptN: attempt.n,
+          headSha: inspection.headSha,
+          findings: attemptFindings(tx, attempt),
+        },
+        step,
+      );
+      replanned = true;
     } else if (route.kind === 'rework') {
       const back = stepTask(tx, op, task, 'changes_requested', { reason, payload });
       stepTask(tx, op, back, 'ready', {
@@ -2149,7 +2174,8 @@ function endAttempt(
   const worktree = requireWorktree(tx, input.worktreeId);
   releaseAttemptTokens(tx, taskId, worktree.portBase);
   stepWorktree(tx, op, worktree, 'active', 'preserved');
-  settleExecution(tx, state, step);
+  // The Replan may have superseded `execution` already: settle on what is stored now.
+  settleExecution(tx, replanned ? readJobState(tx, jobId) : state, step);
 }
 
 /**

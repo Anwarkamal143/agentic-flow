@@ -6,15 +6,16 @@
  * Report lists the approved Task Branches as partial results.
  */
 import { schema, type Tx } from '@factory/db';
-import { BlockerSchema, executionOutcome, TaskStateSchema } from '@factory/domain';
+import { BlockerSchema, executionOutcome, TaskStateSchema, type Blocker } from '@factory/domain';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import type { JobState, StageRunStepper } from './engine.js';
 import { latestArtifact } from './plan-approval.js';
 import { latestStageRun, startRequestedReplan } from './replan.js';
 
 /**
- * Ends `execution` once no Task is in progress: `waiting_human` or `blocked`
- * if a Task is blocked (the Stage Run carries the first Blocker, human ones
+ * Ends `execution` once no Task is in progress: `waiting_human` if a Replan
+ * waits at the cap in a `replan_cap_reached` Blocker Approval (ADR-0030);
+ * else `waiting_human` or `blocked` if a Task is blocked (the Stage Run carries the first Blocker, human ones
  * first, so the Job shows why); then `failed` if a Task failed (and `closure`
  * queued for the partial results); `succeeded` (and `closure` queued) when
  * every Task is approved. Only the Tasks of the Job's newest Plan count: a
@@ -46,6 +47,14 @@ export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper):
     const closure = state.stageRuns.find((r) => r.stageId === 'closure' && r.state === 'pending');
     if (closure !== undefined) step(closure, 'queued');
   };
+  if (outcome.kind !== 'running') {
+    // A Replan held at the cap decides what happens to the rest: wait for the human.
+    const held = heldReplanBlocker(tx, state.job.id);
+    if (held !== undefined) {
+      step(execution, 'waiting_human', { blocker: held });
+      return;
+    }
+  }
   switch (outcome.kind) {
     case 'running':
     case 'unchanged':
@@ -69,4 +78,36 @@ export function settleExecution(tx: Tx, state: JobState, step: StageRunStepper):
       queueClosure();
       return;
   }
+}
+
+/**
+ * The Job-level Blocker of a Replan held at `maxReplans` (its open
+ * `replan_cap_reached` Approval offers `grant_replan`), or `undefined`. It
+ * holds no Task: `taskId` is the Job's id and `attemptId` the held request
+ * Artifact, the subject of its Approval (ADR-0030).
+ */
+function heldReplanBlocker(tx: Tx, jobId: string): Blocker | undefined {
+  const item = tx
+    .select()
+    .from(schema.approvals)
+    .where(
+      and(
+        eq(schema.approvals.jobId, jobId),
+        eq(schema.approvals.kind, 'blocker'),
+        eq(schema.approvals.state, 'open'),
+      ),
+    )
+    .orderBy(asc(sql`rowid`))
+    .all()
+    .find((a) => a.optionsJson.includes('"grant_replan"'));
+  if (item === undefined) return undefined;
+  return {
+    kind: 'human',
+    reason: 'replan_cap_reached',
+    detail: item.why,
+    requiredAction: `decide Inbox Item ${item.id}: grant one more Replan, or cancel the Job`,
+    taskId: jobId,
+    attemptId: item.subjectRef,
+    createdAt: item.createdAt,
+  };
 }
