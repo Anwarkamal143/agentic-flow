@@ -43,7 +43,8 @@ export function taskWorktree(input: {
 
 /**
  * The Integration Task's Worktree (ADR-0034): its own directory (named by the
- * Task id, so a rebuild after a Replan never reuses the old one) on the Job's
+ * Task and the merge Attempt, so neither a rebuild after a Replan nor a merge
+ * redone after a crash reuses an old one) on the Job's
  * Integration Branch `factory/<job-id>/integration`.
  */
 export function integrationWorktree(input: {
@@ -51,9 +52,16 @@ export function integrationWorktree(input: {
   repositoryId: string;
   jobId: string;
   taskId: string;
+  /** The merge Attempt that makes it: a directory left by a crash before its row never collides. */
+  attemptId: string;
 }): { path: string; branch: string } {
   return {
-    path: join(input.workspaceRoot, input.repositoryId, input.jobId, `${input.taskId}-integration`),
+    path: join(
+      input.workspaceRoot,
+      input.repositoryId,
+      input.jobId,
+      `${input.taskId}-integration-${input.attemptId}`,
+    ),
     branch: integrationBranch(input.jobId),
   };
 }

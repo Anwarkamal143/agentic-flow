@@ -186,7 +186,7 @@ export function settleIntegration(tx: Tx, state: JobState, step: StageRunStepper
       step(integration, 'failed', {
         failure: {
           reason: 'task_failed',
-          message: `the Integration Task failed, with no Rework route`,
+          message: `the Integration Task failed: its last Attempt ended with no Rework or Blocker route left`,
           issues: [],
         },
       });

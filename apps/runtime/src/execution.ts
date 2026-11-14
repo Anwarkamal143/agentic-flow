@@ -553,16 +553,8 @@ export class TaskScheduler {
       .orderBy(desc(schema.attempts.n))
       .get();
     // The Integration Task's first Attempt merges and verifies; no Harness runs (ADR-0034).
-    // A merge Attempt interrupted before its Gates ran is merged again, never handed to a Harness.
-    if (
-      task.kind === 'integration' &&
-      (previous === undefined || (previous.cause === 'merge' && previous.state === 'interrupted'))
-    ) {
-      await this.runMerge(
-        harness,
-        { task, definition, job, repo, n: (previous?.n ?? 0) + 1 },
-        slot,
-      );
+    if (task.kind === 'integration' && previous === undefined) {
+      await this.runMerge(harness, { task, definition, job, repo, n: 1 }, slot);
       return;
     }
     const clone = repo.clonePath;
@@ -570,14 +562,19 @@ export class TaskScheduler {
     const n = (previous?.n ?? 0) + 1;
     // A Retry redoes an interrupted Attempt, and an answer Attempt goes on from one that
     // asked: both carry its packet's Findings, none of its own (it raised none).
+    // A merge Attempt interrupted before its Gates finished is verified again in its own
+    // Worktree, as a new merge Attempt: it is never handed to a Harness (ADR-0034).
+    const remerge = previous?.cause === 'merge' && previous.state === 'interrupted';
     const cause: AttemptCause =
       previous === undefined
         ? 'initial'
-        : previous.state === 'interrupted'
-          ? 'retry'
-          : previous.state === 'needs_decision'
-            ? 'answer'
-            : 'rework';
+        : remerge
+          ? 'merge'
+          : previous.state === 'interrupted'
+            ? 'retry'
+            : previous.state === 'needs_decision'
+              ? 'answer'
+              : 'rework';
     const priorFindings =
       previous === undefined
         ? []
@@ -736,11 +733,11 @@ export class TaskScheduler {
             n,
             cause,
             state: 'running',
-            harnessId: harness.id,
-            harnessVersion: this.opts.harnessVersion,
+            harnessId: remerge ? MERGE_HARNESS_ID : harness.id,
+            harnessVersion: remerge ? null : this.opts.harnessVersion,
             tier: TIER,
-            promptTemplateId: TASK_TEMPLATE_ID,
-            promptTemplateHash: TASK_TEMPLATE_HASH,
+            promptTemplateId: remerge ? MERGE_TEMPLATE.id : TASK_TEMPLATE_ID,
+            promptTemplateHash: remerge ? MERGE_TEMPLATE.hash : TASK_TEMPLATE_HASH,
             packetJson: JSON.stringify(packet),
             worktreeId,
             baseSha,
@@ -809,6 +806,11 @@ export class TaskScheduler {
       packet,
     };
     if (await this.stopped(ctx)) return;
+    if (remerge) {
+      this.toVerifying(ctx, undefined);
+      await this.verifyStep(ctx);
+      return;
+    }
     await this.develop(ctx);
   }
 
@@ -835,11 +837,15 @@ export class TaskScheduler {
     const { db } = this.opts;
     const { task, definition, job, repo, n } = input;
     const clone = repo.clonePath;
+    const attemptId = newId('att');
+    // Named by the Attempt too: a directory a crash left before its row was written never
+    // blocks this one (it stays where it is, never deleted).
     const at = integrationWorktree({
       workspaceRoot: this.opts.workspaceRoot,
       repositoryId: repo.id,
       jobId: job.id,
       taskId: task.id,
+      attemptId,
     });
     const sources = integrationSources(db, task);
     const built = await this.withClone(clone, async () => {
@@ -881,7 +887,6 @@ export class TaskScheduler {
       return;
     }
     const { baseSha, headSha } = built;
-    const attemptId = newId('att');
     const worktreeId = newId('wt');
     const packet = this.packet({
       job,
