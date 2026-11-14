@@ -4,7 +4,7 @@
 
 ## Current phase
 
-**Phase C — GitHub delivery: design settled, not started (2026-11-14).** Phase B accepted 2026-11-14 (report `docs/phases/B.md`). The Phase C design grilling (Q1–Q32) is recorded under Human decisions; spec issues 29–35 are applied to the spec. No Phase C code yet. (Phase A accepted 2026-11-09; API-key billing built between the gates, ADR-0015.)
+**Phase C — GitHub delivery: design settled, not started (2026-11-14).** Phase B accepted 2026-11-14 (report `docs/phases/B.md`). The Phase C design grilling (Q1–Q32) is recorded under Human decisions; spec issues 29–35 are applied to the spec. **In progress:** #53 done (the Harness lock-out from GitHub). (Phase A accepted 2026-11-09; API-key billing built between the gates, ADR-0015.)
 
 ## Human answers (from CLAUDE.md §7)
 
@@ -24,7 +24,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 |---|---|---|---|
 | A — Walking skeleton | **Accepted** 2026-11-09 | 7 / 7 (A1–A7; A7 `[real]` on demand) | `docs/phases/A.md` |
 | B — Human-in-the-loop + DAG | **Accepted** 2026-11-14 | 8 / 8 (B1–B8) | `docs/phases/B.md` |
-| C — GitHub delivery | Design settled, not started | — | — |
+| C — GitHub delivery | In progress (#53 done) | — | — |
 | D — Multi-project, multi-repo, onboarding | Not started | — | — |
 | E — Policy hardening, budgets, evals | Not started | — | — |
 | F — Later | Not started | — | — |
@@ -32,6 +32,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 ## Work log
 
 <!-- newest first: date — what changed — tests run (pass/fail counts) -->
+- 2026-11-14 — #53 Lock the Harness out of GitHub (Q9). `Bash(gh:*)` is denied to every Role: in every recipe tool policy, and as an Immutable Invariant (`INVARIANT_DENY`, `withInvariants`) that `toolPolicyOf` adds to Jobs frozen before it. `GH_TOKEN`, `GITHUB_TOKEN`, `GH_CONFIG_DIR` are scrubbed from every guarded process (`ENV_SCRUBBED`, in `guardrailEnv` and again in `spawnGuarded`). The tier label and the Delivery Report's limitations say the `gh` login on disk stays readable under Tier 0; ARCHITECTURE §11 updated. ADR-0032. Branch `phase-c/design`. typecheck ✓, lint ✓, test 416/416 ✓.
 
 - 2026-11-14 — #50 **Phase B gate: complete, awaiting human review.** B1–B8 each map to a passing test: B1 `parallel-dag.test.ts`, B2 `tests/integration/claim-race.test.ts`, B3 `questions.test.ts`, B4 `plan-route.test.ts`, B5 `blocker-approvals.test.ts`, B6 `plan-approval.test.ts`, B7 `cancel-cleanup.test.ts`, B8 `lease-expiry.test.ts`. Report `docs/phases/B.md`. Known limitations: the five Phase B deferrals (24 h reminder, mixed bases, leaves not combined, `services` locks, unredacted spool) checked against the code and reworded; two stale entries corrected (replan-with-feedback on the dashboard is covered; cancel cleanup is built). File ownership cleared. `pnpm install` ✓, typecheck ✓, lint ✓. `pnpm test` run 1 (default workers, load ~18): 9 failed / 403 passed of 412, every failure a runtime start-up (10 s) or test (30 s) timeout; the 7 files alone 47/47 ✓; run 2 (`--maxWorkers=4`) 59 files / 412 tests ✓.
 - 2026-11-14 — #47 The spec Fault Origin route (ADR-0031). `routeFailedAttempt` returns `{kind: 'respecify'}` for a blocking `spec` Finding (first, before `plan` and the Rework cap). In the Attempt-ending transaction `routeToSpecification` (`apps/runtime/src/spec-route.ts`) blocks the raising Task (`fault_origin_spec`, no item of its own), stores a `respec_request` Artifact (new kind; the Findings as feedback, labelled reviewer output), counts one Replan and queues a new `specification` Stage Run; at `maxReplans` the request waits in the Job-level `replan_cap_reached` Approval, whose `grant_replan` starts the re-specification (`raiseReplanCapIn`, split out of `grantReplanIn` unchanged). The specifier gets a re-specification section (`proposal-stage@4`), read from the stored request on every Run, so nothing is regenerated after a restart. Its spec is a new Artifact (the old one kept) and the Stage Run waits `waiting_human` on a `spec_change` item (options approve, request_changes, reject; evidence both specs). The current Specification is the newest spec of a `succeeded` Stage Run (`currentSpec`); criteria API, planner context, Task and review packets, plan view and Delivery Report read it. Approve: run `succeeded`, raising Task cancelled (`replan`), Replan via #45's `beginReplan` not counted again. Request changes: refused without a comment or at the cap, else run `superseded`, counted, specifier re-runs. Reject: run `superseded`, Task → `spec_finding_unresolved` Blocker Approval (`rework` with guidance against `maxAttempts`, at the cap a `rework_cap_reached` Blocker instead; `replan`; `cancel_job`). A failed re-specification is `superseded` (failure in the reason) and goes to the same Blocker. Replans are refused `respecification_pending` while one is pending; the plan route then only cancels. Schema (unavoidable): Acceptance Criteria codes unique per spec Artifact, migration 0014. No new commands. Unit `rework-routing.test.ts` (respecify first), `blocker-approvals.test.ts` (the new option set); scenario `spec-route.test.ts` (7): approve (+ restart regenerates nothing), request changes (refusals, cap), reject → Rework with guidance, reject → Rework at the cap → replan, the Replan cap + grant, a failed re-specification, the dashboard rendering and deciding the item. The old "spec → human" scenario in `rework.test.ts` is removed (superseded). typecheck ✓, lint ✓, test 59 files / 410 tests ✓ (`--maxWorkers=4`, first run).
@@ -195,6 +196,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 - 2026-11-09 (#9): **No scenario may pass on an exhausted Fake Harness script.** A test about one Attempt's verdict sets the Project's `maxAttempts: 1` and expects the honest end state (`waiting_human` with the `rework_cap_reached` Blocker), asserting the exact Attempt count; a test about a failure cause asserts one Attempt where the factory's rule ends the Job, or scripts the Rework. The scenario helper fails any test whose runtime logged an exhausted script.
 
 ## Decisions (ADR index)
+- ADR-0032 — The Harness lock-out from GitHub (`Bash(gh:*)` denied to every Role, an Immutable Invariant also applied to earlier frozen Jobs on read; `GH_TOKEN`/`GITHUB_TOKEN`/`GH_CONFIG_DIR` scrubbed from every guarded process, Harness Runs and verification commands; a guardrail: the `gh` login on disk stays readable, and the prefix deny rule can be got around) — `docs/adr/0032-harness-github-lockout.md`
 
 - ADR-0001 — The factory works in its own clone, never in the user's checkout — `docs/adr/0001-factory-owned-clones.md`
 - ADR-0002 — Runtime foundation defaults (TS 6.0 pin, Hono, tsc -b build, home layout, port, stop semantics) — `docs/adr/0002-runtime-foundation-defaults.md`
@@ -262,6 +264,8 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 - Questions (#42, ADR-0023): a scope change request's Question offers the answer and, since #45, "replan" (ADR-0029). A Question reopened by a `question_cap_reached` grant (#43) has no Evidence attached. A cancelled Task's open Question is cancelled with it: by a Replan (#45), the `plan` route (#46), an approved re-specification (#47) and a Job cancel. Every answer Attempt is a new Harness Session (`resume` unused).
 - Keep-going and the Delivery Report v3 (#44, ADR-0028): the `base_merge_conflict` Blocker Approval offers `replan` and `cancel_job` (no Rework: the Task has no Attempt yet). A failed Job opens no cleanup Approval for its preserved Worktrees (only cancel does, #48). The Job status derivation doesn't read `replan_requested` (spec #33 lists it with the derivation's unit test; #45 owns that state, and its effect, stopping dispatch, needs no derivation change as long as `execution` stays `running`). A pre-v3 Delivery Report is shown by `job show` only as a pointer to its Artifact.
+
+- Harness lock-out (#53, ADR-0032): a guardrail only. The `gh` login on disk stays readable to a Harness Run, and `Bash(gh:*)` is a prefix rule (`env gh`, an absolute path or a script get around it). The phase report must say Tier 0 is a guardrail, not isolation (Q9).
 
 ## Blockers
 

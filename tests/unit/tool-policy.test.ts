@@ -8,6 +8,7 @@ import {
   EffectiveConfigSchema,
   HarnessRoleSchema,
   resolveEffectiveConfig,
+  toolPolicyOf,
   toolsOf,
 } from '@factory/domain';
 import { describe, expect, it } from 'vitest';
@@ -48,6 +49,12 @@ describe('the recipe tool policies', () => {
     }
   });
 
+  it('deny every Role the `gh` CLI (the Harness lock-out from GitHub)', () => {
+    for (const role of HarnessRoleSchema.options) {
+      expect(DEFAULT_TOOL_POLICIES[role].deny, role).toContain('Bash(gh:*)');
+    }
+  });
+
   it('are frozen into the Effective Configuration at the recipe level', () => {
     const config = resolveEffectiveConfig({ project: { maxAttempts: 2 } });
     expect(config.toolPolicies).toEqual({ value: DEFAULT_TOOL_POLICIES, source: 'recipe' });
@@ -56,6 +63,30 @@ describe('the recipe tool policies', () => {
   it('are given to a Job frozen before they existed', () => {
     const old = EffectiveConfigSchema.parse({ maxAttempts: { value: 3, source: 'recipe' } });
     expect(old.toolPolicies.value).toEqual(DEFAULT_TOOL_POLICIES);
+  });
+});
+
+describe('toolPolicyOf', () => {
+  it('denies `gh` even to a Job frozen with a policy that did not', () => {
+    const open = { allow: ['Read', 'Bash'], deny: ['WebFetch'] };
+    const snapshot = JSON.stringify({
+      maxAttempts: { value: 3, source: 'recipe' },
+      toolPolicies: {
+        value: Object.fromEntries(HarnessRoleSchema.options.map((role) => [role, open])),
+        source: 'recipe',
+      },
+    });
+    for (const role of HarnessRoleSchema.options) {
+      const policy = toolPolicyOf(snapshot, role);
+      expect(policy.allow).toEqual(['Read', 'Bash']);
+      expect(policy.deny, role).toEqual(['WebFetch', 'Bash(gh:*)']);
+    }
+  });
+
+  it('lists the `gh` denial once when the frozen policy has it', () => {
+    const snapshot = JSON.stringify(resolveEffectiveConfig({ project: { maxAttempts: 2 } }));
+    const { deny } = toolPolicyOf(snapshot, 'developer');
+    expect(deny.filter((rule) => rule === 'Bash(gh:*)')).toHaveLength(1);
   });
 });
 

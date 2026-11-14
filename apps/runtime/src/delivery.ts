@@ -55,7 +55,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   if (job === undefined || repo === undefined) throw new Error(`Job ${jobId} has no Repository`);
 
   const limitations = [
-    'The Harness ran under the Tier 0 local guardrail (environment allowlist, closed stdin, the Worktree as working directory). It ran as your user; this is not a sandbox.',
+    'The Harness ran under the Tier 0 local guardrail (environment allowlist, closed stdin, the Worktree as working directory). It ran as your user; this is not a sandbox. It was denied `gh` and the GitHub tokens, but the `gh` login on disk stayed readable to it.',
     'Harness and verification output is not redacted yet.',
     'Delivery is a local branch in the Factory Clone; nothing was pushed.',
   ];

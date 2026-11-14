@@ -59,18 +59,27 @@ const DANGEROUS_SHELL = [
 const NO_WEB = ['WebFetch', 'WebSearch'];
 
 /**
+ * Immutable Invariant denials (GLOSSARY): denied to every Role whatever its
+ * policy says. Today the Harness lock-out from GitHub (ADR-0032): GitHub is the
+ * factory's job, through its own credentials; no Harness Run drives the
+ * operator's `gh` login. A guardrail only: the `gh` login on disk stays
+ * readable under Tier 0, and another program can still reach GitHub.
+ */
+export const INVARIANT_DENY: readonly string[] = ['Bash(gh:*)'];
+
+/**
  * The recipe's tool policies. The proposal Roles and the reviewer read only
  * (the reviewer may also read git history); the developer edits files and runs
  * commands in its Worktree.
  */
 export const DEFAULT_TOOL_POLICIES: ToolPolicies = {
-  triager: { allow: READ_ONLY, deny: NO_WEB },
-  researcher: { allow: READ_ONLY, deny: NO_WEB },
-  specifier: { allow: READ_ONLY, deny: NO_WEB },
-  planner: { allow: READ_ONLY, deny: NO_WEB },
+  triager: { allow: READ_ONLY, deny: [...NO_WEB, ...INVARIANT_DENY] },
+  researcher: { allow: READ_ONLY, deny: [...NO_WEB, ...INVARIANT_DENY] },
+  specifier: { allow: READ_ONLY, deny: [...NO_WEB, ...INVARIANT_DENY] },
+  planner: { allow: READ_ONLY, deny: [...NO_WEB, ...INVARIANT_DENY] },
   developer: {
     allow: [...READ_ONLY, 'Edit', 'Write', 'Bash'],
-    deny: [...NO_WEB, ...DANGEROUS_SHELL],
+    deny: [...NO_WEB, ...DANGEROUS_SHELL, ...INVARIANT_DENY],
   },
   reviewer: {
     allow: [
@@ -80,9 +89,19 @@ export const DEFAULT_TOOL_POLICIES: ToolPolicies = {
       'Bash(git show:*)',
       'Bash(git status:*)',
     ],
-    deny: [...NO_WEB, 'Edit', 'Write', 'NotebookEdit'],
+    deny: [...NO_WEB, 'Edit', 'Write', 'NotebookEdit', ...INVARIANT_DENY],
   },
 };
+
+/**
+ * `policy` with {@link INVARIANT_DENY} added to its `deny`, once each. A Job
+ * frozen before an Immutable Invariant existed gets it too: invariants rank
+ * above every configuration level, the frozen snapshot included, and adding
+ * one only narrows. Pure.
+ */
+export function withInvariants(policy: ToolPolicy): ToolPolicy {
+  return { allow: policy.allow, deny: [...new Set([...policy.deny, ...INVARIANT_DENY])] };
+}
 
 /**
  * The tools a policy makes available at all: the tool name of every `allow`

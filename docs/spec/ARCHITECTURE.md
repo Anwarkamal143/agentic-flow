@@ -331,9 +331,9 @@ Independence means:
 | | **Tier 0 — Local guardrail** (default) | **Tier 1 — Container** |
 |---|---|---|
 | Filesystem | The harness's own permission/allow-list flags; worktree as cwd; **post-run path gate** | Only the worktree and caches are mounted |
-| Environment | `env -i` plus an explicit allowlist; secrets never in env unless a policy grants a named one | Same |
+| Environment | `env -i` plus an explicit allowlist; secrets never in env unless a policy grants a named one; `GH_TOKEN`, `GITHUB_TOKEN`, `GH_CONFIG_DIR` never (ADR-0032) | Same |
 | Network | Not enforced | Egress allowlist or none |
-| Commands | Harness tool allow-lists and hooks to deny dangerous patterns (defense in depth only) | Same, plus container limits |
+| Commands | Harness tool allow-lists and hooks to deny dangerous patterns (defense in depth only); `gh` denied to every Role, though the `gh` login on disk stays readable | Same, plus container limits |
 | Untrusted repo setup scripts | **Refused** (needs a human override per repo) | Allowed |
 | What we claim | "Guardrails; the agent runs as your user" | "Isolated" |
 
