@@ -66,12 +66,14 @@ import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
 import { inspectSpool } from '@factory/harness';
 import { openBlockerItem, raiseCap, replaceBlocker } from './blocker-approvals.js';
-import { applyCleanupDecision } from './cleanup.js';
+import { applyCleanupDecision, checkCleanupAnswersOf } from './cleanup.js';
 import {
   ciFailedHolder,
   label as pullRequestLabel,
   requireFailedChecks,
   requiredChecksOf,
+  recordReopened,
+  requireClosedPullRequests,
   approveMerge,
   retryMerge,
 } from './merge-approval.js';
@@ -104,6 +106,9 @@ type Decider = (
   actor: string,
 ) => Approval | Promise<Approval>;
 
+/** Between an item's own reason and what the factory last reported on it. */
+const REPORT_SEPARATOR = ' Last attempt: ';
+
 const REFUSAL_STATUS: Readonly<Record<InboxRefusal['code'], 400 | 403 | 409>> = {
   actor_not_allowed: 403,
   item_not_open: 409,
@@ -134,8 +139,11 @@ export class InboxService {
     /** The Job cancel operation (`JobService.cancel`), for a Blocker Approval's "cancel the Job". */
     private readonly cancelJob: (jobId: string, input: CancelJobInput) => Promise<unknown> = () =>
       Promise.reject(new Error('no cancel operation configured')),
-    /** GitHub, for a `ci_failed` Blocker Approval's `rerun_checks` (#61); `null` without one. */
-    private readonly github: Pick<GitHubPort, 'listCheckRuns' | 'rerunCheckRun'> | null = null,
+    /** GitHub, for `rerun_checks` (#61) and `reopen_pr` (#64); `null` without one. */
+    private readonly github: Pick<
+      GitHubPort,
+      'listCheckRuns' | 'rerunCheckRun' | 'reopenPullRequest'
+    > | null = null,
   ) {}
 
   /** Open items not deferred, oldest first; `all` lists every item. */
@@ -258,6 +266,13 @@ export class InboxService {
       return this.get(item.id);
     },
     cleanup: (item, input, actor) => {
+      if (item.questionsJson !== null) {
+        throw new ApiFailure(
+          409,
+          'answer_required',
+          'a cleanup Approval is decided per question: POST /v1/inbox/:id/answer (factory inbox answer <id> --answer worktrees=discard …); a question left unanswered keeps',
+        );
+      }
       this.decideOnly(item, input, actor, null, (tx, _state, _step, row) => {
         applyCleanupDecision(tx, row, input.option);
       });
@@ -268,6 +283,8 @@ export class InboxService {
   /**
    * `answerQuestion` (ARCHITECTURE §8 step 3): answers each question of an
    * open `question` item (an offered option or free text) in one transaction.
+   * A `cleanup` item's questions are answered here too (ADR-0043): only the
+   * decision is recorded, and the cleanup worker carries it out.
    * The item is decided, its Task goes `blocked → ready` and `execution`
    * queued again, so a fresh Attempt (`cause: answer`) starts on the same Task
    * Branch with the answers in its packet. The answers are guidance only:
@@ -280,6 +297,18 @@ export class InboxService {
       { jobId: item.jobId, expectedVersion: 'current', actor },
       (tx, state, step) => {
         const row = requireItem(tx, id);
+        if (row.kind === 'cleanup' && row.questionsJson !== null) {
+          // The cancel cleanup's questions (ADR-0043): recorded here, carried out by the worker.
+          refuseUnless(row, {
+            actor,
+            expectedVersion: input.expectedVersion,
+            subjectRef: input.subjectRef,
+            option: 'answer',
+          });
+          checkCleanupAnswersOf(tx, row, input.answers);
+          markDecided(tx, row, actor, { option: 'answer', comment: null, answers: input.answers });
+          return;
+        }
         if (row.kind !== 'question') {
           throw new ApiFailure(
             409,
@@ -393,6 +422,8 @@ export class InboxService {
     }
 
     if (input.option === 'rerun_checks') return this.rerunChecksFromItem(item, input, actor);
+
+    if (input.option === 'reopen_pr') return this.reopenFromItem(item, input, actor);
 
     if (input.option === 'adopt_rewrite') {
       // A human approves the foreign rewrite of the Integration Branch (ADR-0042).
@@ -572,6 +603,91 @@ export class InboxService {
       this.onCommit();
     }
     return this.get(item.id);
+  }
+
+  /**
+   * `reopen_pr` on a `pr_closed` Blocker Approval (#64, Q16): GitHub is asked
+   * to reopen each closed PR of the Job before the item is decided. A refusal
+   * is reported on the item (its `why` says what GitHub answered, its version
+   * is bumped, `approval.reopen_refused`) and the item stays open with both
+   * options, so cancelling the Job remains; the factory decides nothing alone.
+   * Once reopened, the rows are recorded open and `merge_approval` waits on
+   * the merge again; the next poll evaluates the Merge Gate.
+   */
+  private async reopenFromItem(
+    item: ApprovalRow,
+    input: DecideInput,
+    actor: string,
+  ): Promise<Approval> {
+    const closed = requireClosedPullRequests(this.db, readJobState(this.db, item.jobId), item);
+    const github = this.github;
+    if (github === null) {
+      throw new ApiFailure(409, 'no_github', 'the runtime has no GitHub port to reopen PRs with');
+    }
+    const reopened: (typeof closed)[number][] = [];
+    for (const pr of closed) {
+      const res = await github.reopenPullRequest({ owner: pr.owner, name: pr.name }, pr.number);
+      if (!res.ok) {
+        const answer =
+          res.failure.kind === 'rate_limited'
+            ? `rate limited until ${res.failure.resetAt}`
+            : `${res.failure.kind}${res.failure.status === null ? '' : ` ${String(res.failure.status)}`}: ${res.failure.reason}`;
+        this.reportOnItem(item, actor, {
+          type: 'approval.reopen_refused',
+          note: `GitHub did not reopen ${pullRequestLabel(pr)} (${answer}). Reopen it on GitHub yourself, try again, or cancel the Job.`,
+          payload: {
+            pullRequest: pullRequestLabel(pr),
+            failure: res.failure.kind,
+            status: res.failure.status,
+            reopened: reopened.map((p) => pullRequestLabel(p)),
+          },
+        });
+        throw new ApiFailure(
+          res.failure.kind === 'refused' ? 409 : 502,
+          'reopen_refused',
+          `GitHub did not reopen ${pullRequestLabel(pr)} (${answer}); nothing was decided, and the item still offers reopen_pr and cancel_job`,
+        );
+      }
+      reopened.push(pr);
+    }
+    try {
+      this.decideOnly(item, input, actor, null, (tx, state) => {
+        recordReopened(tx, state, reopened, item.id, actor);
+      });
+    } catch (err) {
+      // A poll may have seen it reopened and superseded the item meanwhile.
+      if (!(err instanceof ApiFailure) || requireItem(this.db, item.id).state !== 'superseded') {
+        throw err;
+      }
+    }
+    return this.get(item.id);
+  }
+
+  /**
+   * Reports on an open item what the factory could not do for its decision:
+   * its `why` gains the note (replacing an earlier one), its version is bumped
+   * so the human re-reads it, and the event says what happened. Its options stay.
+   */
+  private reportOnItem(
+    item: ApprovalRow,
+    actor: string,
+    report: { type: string; note: string; payload: Record<string, unknown> },
+  ): void {
+    changeJob(this.db, { jobId: item.jobId, expectedVersion: 'current', actor }, (tx) => {
+      const row = requireItem(tx, item.id);
+      if (row.state !== 'open') return;
+      const base = row.why.split(REPORT_SEPARATOR)[0] ?? row.why;
+      bumpItem(tx, row, { why: `${base}${REPORT_SEPARATOR}${report.note}` });
+      appendEvent(tx, {
+        entityKind: 'approval',
+        entityId: row.id,
+        jobId: row.jobId,
+        type: report.type,
+        actor,
+        payload: { ...report.payload, note: report.note },
+      });
+    });
+    this.onCommit();
   }
 
   /**

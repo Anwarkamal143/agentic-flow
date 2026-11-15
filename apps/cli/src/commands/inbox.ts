@@ -101,7 +101,7 @@ export async function inboxAnswer(
   if (api === undefined) return EXIT_NOT_RUNNING;
   const item = await getItem(api, id);
   if (item === undefined) return 1;
-  if (item.kind !== 'question' || item.questions === null) {
+  if ((item.kind !== 'question' && item.kind !== 'cleanup') || item.questions === null) {
     process.stderr.write(`factory: ${id} is a ${item.kind} item; decide it with 'inbox decide'\n`);
     return 2;
   }
@@ -138,7 +138,9 @@ export async function inboxAnswer(
   );
   if (answered === undefined) return 1;
   process.stdout.write(
-    `Answered ${answered.id}: a fresh Attempt of Task ${answered.taskId ?? '?'} starts with your answers\n`,
+    answered.kind === 'cleanup'
+      ? `Decided ${answered.id}: the factory carries out the cleanup you chose (anything unanswered is kept)\n`
+      : `Answered ${answered.id}: a fresh Attempt of Task ${answered.taskId ?? '?'} starts with your answers\n`,
   );
   writeItem(answered);
   return 0;
@@ -275,13 +277,15 @@ function writeItem(i: Approval): void {
     ...(i.questions === null
       ? []
       : [
-          '  questions (asked by an agent):',
+          i.questions.some((q) => q.agentProposed)
+            ? '  questions (asked by an agent):'
+            : '  decide each (fixed options; unanswered keeps):',
           ...i.questions.flatMap((q) => [
             `    ${q.id.padEnd(6)} ${q.blocking ? 'blocking' : 'optional'}  ${q.text}`,
             ...(q.options.length === 0
               ? ['           answer in free text']
               : [
-                  `           options: ${q.options.map((o) => (o === q.recommended ? `${o} [recommended]` : o)).join(' | ')} (or free text)`,
+                  `           options: ${q.options.map((o) => (o === q.recommended ? `${o} [recommended]` : o)).join(' | ')}${q.agentProposed ? ' (or free text)' : ''}`,
                 ]),
           ]),
         ]),
@@ -302,6 +306,10 @@ function writeItem(i: Approval): void {
         (a) =>
           `    ${a.questionId.padEnd(6)} ${a.option !== undefined ? `option ${a.option}` : `text ${a.text ?? ''}`}`,
       ),
+    );
+  } else if (i.state === 'open' && i.kind === 'cleanup' && i.questions !== null) {
+    lines.push(
+      `  answer:     factory inbox answer ${i.id} --answer <question>=<option> ... --expect-version ${String(i.version)} (unanswered: keep)`,
     );
   } else if (i.state === 'open' && i.kind === 'question') {
     lines.push(

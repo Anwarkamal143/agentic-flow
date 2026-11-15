@@ -222,18 +222,8 @@ const recovered =
         log,
       });
 
-/**
- * A cancel a crash cut short opens its cleanup item now (ADR-0027), and the
- * worker carries out the discards the operator decided.
- */
+/** A cancel a crash cut short opens its cleanup item now (ADR-0027). */
 openMissingCleanupItems(database.db);
-const cleanup = new CleanupWorker(
-  database.db,
-  () => {
-    notify();
-  },
-  log,
-);
 
 /** Test-only fault injection (ADR-0012); an unknown point is refused, never ignored. */
 const crashEnv = process.env['FACTORY_TEST_CRASH_AT'];
@@ -264,6 +254,15 @@ const githubPort = new GitHubPort({
   apiBaseUrl: github.apiBaseUrl,
   token: () => githubToken.resolve(),
 });
+// Carries out the cleanup a human decided after a cancel: Worktrees, the PR, its branch (ADR-0043).
+const cleanup = new CleanupWorker(
+  database.db,
+  githubPort,
+  () => {
+    notify();
+  },
+  log,
+);
 const tasks = new TaskScheduler({
   db: database.db,
   harness,

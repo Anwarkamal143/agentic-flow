@@ -62,7 +62,9 @@ Commands:
                                   Decide an item (a stale version or subject is refused)
   inbox answer <id> (--answer [<q>=]<text>... | --file <answers.json>) [--expect-version <n>]
                                   Answer a Question (an option or free text per question);
-                                  a fresh Attempt continues the Task with the answers
+                                  a fresh Attempt continues the Task with the answers.
+                                  A cleanup Approval: --answer worktrees=discard|keep,
+                                  pull_request=close|keep, remote_branch=delete|keep
   inbox defer <id> | undefer <id> Hide an item from the default view, or show it again
   activity [--lines <n>] [--json] What is running now: each running Attempt with its
                                   Harness, model, Repository, tier, heartbeat, ports and

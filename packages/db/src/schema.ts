@@ -529,7 +529,7 @@ export const approvals = sqliteTable(
     subjectRef: text('subject_ref').notNull(),
     question: text('question').notNull(),
     why: text('why').notNull(),
-    /** A `question` item's JSON array of `InboxQuestion` (agent-proposed, redacted); null otherwise. */
+    /** JSON array of `InboxQuestion`: a `question` item's (agent-proposed, redacted) or a `cleanup` item's (the factory's, ADR-0043); null otherwise. */
     questionsJson: text('questions_json'),
     /** JSON array of `ApprovalOption`. */
     optionsJson: text('options_json').notNull(),

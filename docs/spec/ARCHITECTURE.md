@@ -199,7 +199,8 @@ review_findings(id, review_id, severity, fault_origin, location, problem, why,
 approvals(id, job_id, task_id?, kind, subject_ref, question, options_json, recommended,
           state, deferred, decided_by, decided_at, decision_json, expires_policy, version)
          -- kind: question | plan | spec_change | blocker | cleanup | merge [Phase C]   (an "Inbox Item")
-         --   a PR closed without merging opens a question [Phase C]
+         --   a PR closed without merging: the `pr_closed` Blocker Approval [Phase C, ADR-0043]
+         --   cleanup: questions worktrees | pull_request | remote_branch, each default keep [ADR-0043]
          -- state: open | decided | cancelled | superseded;  expires_policy: remain_pending
          -- subject_ref: what is decided on (e.g. the plan Artifact id); a decision naming
          --   another subject or version is refused
@@ -325,6 +326,7 @@ Every human-kind Blocker opens an Inbox Approval (kind `blocker`) with fixed opt
 | `merge_method_refused` [Phase C] | retry the merge (after the repository's settings changed), cancel the Job |
 | `foreign_push_out_of_scope` [Phase C] | rework on top of the foreign commits (the path-scope Findings and the comment as guidance), cancel the Job. A foreign push to the Integration Branch failed the path-scope Gate (ADR-0042) |
 | `foreign_push_rewrite` [Phase C] | adopt the rewrite (audited; verified and reviewed like any foreign push, the dropped approved commits listed in the PR body and the Delivery Report), cancel the Job. No "restore our head": it would overwrite the foreign push (ADR-0042) |
+| `pr_closed` [Phase C] | reopen the PR (a refusal from GitHub is reported on the item, which stays open), cancel the Job. Held by `merge_approval`; raised by the poller when the PR is closed without merging, and closed by it when the PR is open again (ADR-0043). Never cancels the Job on its own |
 | `integration_rewrite` [Phase C] | force-push with lease (pinned to the last head the factory pushed; audited; the PR is updated in place), open a new PR on `factory/<job-id>/integration-2` (the old one closed with a marked comment), cancel the Job |
 
 "Retry now" re-checks the pid and start time first; if the process is still alive it offers "kill and retry" instead. A human's word alone never starts a second process. A "replan" option counts against `max_replans`. Raising a cap is written to `audit_log` (`decided_by user:local`). Approvals stay pending (`remain_pending`, §17) and never auto-approve; "defer" only hides an item from the default view and can be undone.

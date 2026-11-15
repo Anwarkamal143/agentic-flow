@@ -156,6 +156,9 @@ export interface FakeGitHub {
     merged: boolean;
   }[];
 
+  /** The PR's conversation comments, oldest first. */
+  comments(fullName: string, number: number): { author: string; body: string }[];
+
   // ---- the control API ----
   setCheckRun(fullName: string, sha: string, run: CheckRunInput): void;
   setStatus(fullName: string, sha: string, status: StatusInput): void;
@@ -543,6 +546,19 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
       if (sha === undefined) return { status: 404, body: { message: 'Branch not found' } };
       return { status: 200, body: { name: branch, commit: { sha } } };
     }
+    if ((r = /^\/git\/refs\/heads\/(.+)$/.exec(rest)) !== null && method === 'DELETE') {
+      const branch = (r[1] ?? '').split('/').map(decodeURIComponent).join('/');
+      const sha = head(repo, branch);
+      if (sha === undefined) return { status: 422, body: { message: 'Reference does not exist' } };
+      // As GitHub does: an open PR whose head branch is deleted is closed (its SHAs kept).
+      for (const pr of repo.pulls) {
+        if (pr.head !== branch) continue;
+        pr.lastSha = { head: sha, base: head(repo, pr.base) ?? pr.lastSha.base };
+        if (pr.state === 'open') pr.state = 'closed';
+      }
+      git(repo.remote.bareDir, ['update-ref', '-d', `refs/heads/${branch}`]);
+      return { status: 204, body: undefined };
+    }
     return notFound;
   };
 
@@ -787,6 +803,9 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
         from: defaultBranch(repo),
         force: true,
       });
+    },
+    comments(fullName, number) {
+      return prOf(fullName, number).comments.map((c) => ({ author: c.author, body: c.body }));
     },
     closePullRequest(fullName, number) {
       prOf(fullName, number).state = 'closed';

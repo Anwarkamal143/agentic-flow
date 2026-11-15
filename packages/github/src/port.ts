@@ -404,6 +404,29 @@ export class GitHubPort {
     return mapRead(res, branchWire, (b) => b.commit.sha);
   }
 
+  /**
+   * Deletes `branch` on GitHub (a cancel cleanup's explicit "delete the remote
+   * branch", ADR-0043). `gone: true` when it was already gone (GitHub answers
+   * 422 "Reference does not exist"). GitHub closes an open PR whose head it was.
+   */
+  async deleteBranch(
+    repo: GitHubCoordinates,
+    branch: string,
+  ): Promise<GitHubResult<{ gone: boolean }>> {
+    const name = branch.split('/').map(encodeURIComponent).join('/');
+    const res = await this.send('DELETE', `${repoPath(repo)}/git/refs/heads/${name}`);
+    if (res.ok) return { ok: true, value: { gone: false } };
+    const { failure } = res;
+    if (
+      failure.kind === 'refused' &&
+      (failure.status === 404 ||
+        (failure.status === 422 && /reference does not exist/i.test(failure.reason)))
+    ) {
+      return { ok: true, value: { gone: true } };
+    }
+    return res;
+  }
+
   // ---- transport ----
 
   private read(path: string, opts: ReadOptions): Promise<Raw> {

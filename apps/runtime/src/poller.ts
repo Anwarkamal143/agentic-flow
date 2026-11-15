@@ -1,6 +1,7 @@
 /**
  * The GitHub poller (#58, ADR-0037; Q23). Every `github.pollIntervalMs`
- * (default 30 s) it reads each PR whose Job waits in `merge_approval`: the
+ * (default 30 s) it reads each PR whose Job waits in `merge_approval` (a
+ * closed one too, so a reopen on GitHub is seen, #64): the
  * PR (state, head, base, `mergeable_state`, merge), the check runs and commit
  * statuses on its head, and its reviews. ETags are kept in memory only and
  * sent as `If-None-Match`; a 304 reuses the value read before. What it saw is
@@ -35,6 +36,7 @@ import {
   assessPoll,
   ciBlockerStep,
   POLLER,
+  prClosedBlockerStep,
   recordPoll,
   trackedPullRequests,
   type Observation,
@@ -182,6 +184,8 @@ export class GitHubPoller {
       !assessed.itemsStale &&
       // A ci_failed Blocker out of step with the checks (#61), e.g. none open after a re-run.
       ciBlockerStep(db, row.jobId).kind === 'none' &&
+      // A pr_closed Blocker out of step with the PR's state (#64).
+      prClosedBlockerStep(db, row.jobId).kind === 'none' &&
       unseenFeedback(db, row.id, feedback).length === 0;
     if (quiet) {
       // A quiet poll: nothing new, so no event and no Job change; only when it was read.

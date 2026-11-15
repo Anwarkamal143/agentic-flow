@@ -44,6 +44,7 @@ interface ItemBody {
   state: string;
   decidedBy: string | null;
   decision: { option: string } | null;
+  questions: { id: string; text: string; options: string[]; recommended: string | null }[] | null;
   version: number;
 }
 interface WorktreeBody {
@@ -188,9 +189,13 @@ describe('B7: cancelling a Job with several running Attempts', { timeout: 90_000
     expect(more).toBeUndefined();
     if (item === undefined) throw new Error('no cleanup item');
     expect(res.stdout).toContain(`Cleanup Approval ${item.id}`);
-    expect(item).toMatchObject({ state: 'open', recommended: 'keep', subjectRef: created.id });
-    expect(item.question).toContain('3 preserved Worktrees');
-    expect(item.options.map((o) => o.id)).toEqual(['keep', 'discard']);
+    expect(item).toMatchObject({ state: 'open', subjectRef: created.id });
+    // No PR yet: the one question is about the Worktrees, defaulting to keep (ADR-0043).
+    expect(item.questions?.map((q) => [q.id, q.text, q.options, q.recommended])).toEqual([
+      ['worktrees', 'Discard the 3 preserved Worktrees?', ['keep', 'discard'], 'keep'],
+    ]);
+    expect(item.options.map((o) => o.id)).toEqual(['answer']);
+    expect(res.stdout).toContain('worktrees: Discard the 3 preserved Worktrees?');
     const log = await events(rt, created.id);
     const opened = log.find((e) => e.type === 'approval.opened' && e.entityId === item.id)?.seq;
     if (opened === undefined) throw new Error('no approval.opened for the cleanup item');
@@ -219,15 +224,19 @@ describe('B7: cancelling a Job with several running Attempts', { timeout: 90_000
     // Keep (the default) closes the item and leaves every Worktree in place.
     const kept = await rt.home.cli([
       'inbox',
-      'decide',
+      'answer',
       item.id,
-      'keep',
+      '--answer',
+      'worktrees=keep',
       '--expect-version',
       String(item.version),
     ]);
     expect(kept.code, kept.stderr).toBe(0);
     const [decided] = await cleanupItemOf(rt, created.id);
-    expect(decided).toMatchObject({ state: 'decided', decision: { option: 'keep' } });
+    expect(decided).toMatchObject({
+      state: 'decided',
+      decision: { option: 'answer', answers: [{ questionId: 'worktrees', option: 'keep' }] },
+    });
     await new Promise((r) => setTimeout(r, 500));
     const after = await json<WorktreeBody[]>(rt.request(`/v1/jobs/${created.id}/worktrees`));
     expect(after.map((w) => w.state)).toEqual(['preserved', 'preserved', 'preserved']);
@@ -243,7 +252,9 @@ describe('B7: cancelling a Job with several running Attempts', { timeout: 90_000
     );
     const res = await rt.home.cli(['job', 'cancel', created.id]);
     expect(res.code, res.stderr).toBe(0);
-    expect(res.stdout).toContain('No cleanup Approval: the cancel left no preserved Worktree');
+    expect(res.stdout).toContain(
+      'No cleanup Approval: the cancel left no preserved Worktree, open PR or remote branch',
+    );
     expect(await cleanupItemOf(rt, created.id)).toEqual([]);
   });
 });
@@ -267,24 +278,26 @@ describe('discarding the preserved Worktrees', { timeout: 90_000 }, () => {
     expect(res.code, res.stderr).toBe(0);
     const [item] = await cleanupItemOf(rt, created.id);
     if (item === undefined) throw new Error('no cleanup item');
-    expect(item.question).toContain('2 preserved Worktrees');
+    expect(item.questions?.[0]?.text).toBe('Discard the 2 preserved Worktrees?');
     const worktrees = await json<WorktreeBody[]>(rt.request(`/v1/jobs/${created.id}/worktrees`));
     expect(worktrees).toHaveLength(2);
     const [repo] = await json<[{ clonePath: string }]>(rt.request('/v1/repositories'));
     const tips = worktrees.map((w) => git(repo.clonePath, ['rev-parse', w.branch]).trim());
 
     const dash = await startDashboard(rt.home);
-    const form = await dash.postForm(`/api/inbox/${item.id}/decide`, {
+    // The page offers the cleanup form: per question its options, keep checked.
+    expect(await dash.html(`/inbox/${item.id}`)).toContain('data-testid="cleanup-form"');
+    const form = await dash.postForm(`/api/inbox/${item.id}/answer`, {
       expectedVersion: String(item.version),
       subjectRef: item.subjectRef,
-      option: 'discard',
+      'choice.worktrees': 'discard',
     });
     expect(form.status, form.body).toBe(303);
     const [decided] = await cleanupItemOf(rt, created.id);
     expect(decided).toMatchObject({
       state: 'decided',
       decidedBy: 'user:local',
-      decision: { option: 'discard' },
+      decision: { option: 'answer', answers: [{ questionId: 'worktrees', option: 'discard' }] },
     });
 
     await waitFor(
