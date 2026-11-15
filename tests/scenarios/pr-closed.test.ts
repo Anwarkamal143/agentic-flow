@@ -18,6 +18,7 @@
  */
 import { existsSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { startDashboard } from '../support/dashboard.js';
 import {
   git,
   initializedHome,
@@ -388,14 +389,43 @@ describe('cancelling a Job with an open PR', { timeout: 180_000 }, () => {
     // Cancelling stopped the polling already: no PR read after the cancel.
     const readsAtCancel = prReads(gh, pr.number);
 
-    // Deleting the branch of a PR kept open is refused (GitHub would close it).
+    // Deleting the branch of a PR kept open is refused (GitHub would close it), and the
+    // refusal names the conflict: from the API, the CLI and the dashboard alike.
     const refused = await post(rt, `/v1/inbox/${item.id}/answer`, {
       expectedVersion: item.version,
       subjectRef: item.subjectRef,
       answers: [{ questionId: 'remote_branch', option: 'delete' }],
     });
     expect(refused.status).toBe(400);
-    expect(await refused.json()).toMatchObject({ error: 'invalid_answer' });
+    const body = (await refused.json()) as { error: string; message: string };
+    expect(body.error).toBe('invalid_answer');
+    expect(body.message).toContain('conflicts with keeping the PR open');
+    expect(body.message).toContain('pull_request=close');
+    const cli = await rt.home.cli([
+      'inbox',
+      'answer',
+      item.id,
+      '--answer',
+      'remote_branch=delete',
+      '--expect-version',
+      String(item.version),
+    ]);
+    expect(cli.code).not.toBe(0);
+    expect(cli.stderr).toContain('conflicts with keeping the PR open');
+    const dash = await startDashboard(rt.home);
+    const page = await dash.html(`/inbox/${item.id}`);
+    expect(page).toContain('data-testid="cleanup-form"');
+    expect(page).toContain('data-testid="delete-needs-close"');
+    expect(page).toMatch(
+      /<input[^>]*value="delete"[^>]*disabled|<input[^>]*disabled[^>]*value="delete"/,
+    );
+    const form = await dash.postForm(`/api/inbox/${item.id}/answer`, {
+      expectedVersion: String(item.version),
+      subjectRef: item.subjectRef,
+      'choice.remote_branch': 'delete',
+    });
+    expect(form.status).toBe(400);
+    expect(form.body).toContain('conflicts with keeping the PR open');
 
     const worktrees = await json<WorktreeBody[]>(rt.request(`/v1/jobs/${job.id}/worktrees`));
     const log = await answerCleanup(rt, item, ['worktrees=keep']);

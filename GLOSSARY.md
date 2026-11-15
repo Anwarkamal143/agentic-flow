@@ -223,5 +223,5 @@ An Inbox Item asking for information the factory lacks. It is answered with cont
 _Avoid_: Clarification request, prompt
 
 **Approval**:
-An Inbox Item asking for authorization of a protected action, such as accepting a plan, merging or expanding scope. It is decided as approve, reject or request changes.
+An Inbox Item asking for authorization of a protected action, such as accepting a plan, merging or expanding scope. It is decided as approve, reject or request changes. An Approval may also be decided per question, each question with fixed options and a default: the cleanup Approval a cancel opens asks separately whether to discard the preserved Worktrees, close the PR and delete the remote branch, each defaulting to keep. Answering its questions is how it is decided; it is never a Question.
 _Avoid_: Sign-off, permission request

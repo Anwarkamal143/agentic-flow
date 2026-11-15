@@ -7,6 +7,7 @@
  */
 import { GRANT_DEFAULT, GRANT_MAX, type Approval, type PlanView } from '@factory/domain';
 import Link from 'next/link';
+import { CleanupChoices } from '@/components/cleanup-choices';
 import { Field, State } from '@/components/job-sections';
 import { PlanRisks } from '@/components/plan-view';
 import { Badge } from '@/components/ui/badge';
@@ -156,7 +157,7 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
 
 /**
  * An item's questions with the answers once given: a `question` item's,
- * labelled as the agent's, or a `cleanup` item's, the factory's own.
+ * labelled as the agent's, or the cleanup Approval's, decided per question.
  */
 function Questions({ item }: { item: Approval }) {
   const answers = item.decision?.answers ?? [];
@@ -164,14 +165,14 @@ function Questions({ item }: { item: Approval }) {
   return (
     <div className="text-sm">
       <p className="text-xs text-muted-foreground">
-        Questions{' '}
+        {byAgent ? 'Questions' : 'Decide each'}{' '}
         {byAgent ? (
           <Badge variant="warning" className="ml-1">
             proposed by an agent
           </Badge>
         ) : (
           <Badge variant="secondary" className="ml-1">
-            asked by the factory; unanswered keeps
+            fixed options; unanswered keeps
           </Badge>
         )}
       </p>
@@ -298,9 +299,10 @@ function AnswerForm({ item, returnTo }: { item: Approval; returnTo: string }) {
 }
 
 /**
- * A `cleanup` item's form (ADR-0043): per question, its options only (no free
- * text), the default (keep) checked, then one submit (`answer`). A question
- * left at keep is sent unanswered, so only an explicit choice does anything.
+ * The cleanup Approval's form (ADR-0043): decided per question, its options
+ * only (no free text), the default (keep) checked, then one submit
+ * (`answer`). A question left at keep is sent unanswered, so only an explicit
+ * choice does anything.
  */
 function CleanupForm({ item, returnTo }: { item: Approval; returnTo: string }) {
   const version = String(item.version);
@@ -315,25 +317,7 @@ function CleanupForm({ item, returnTo }: { item: Approval; returnTo: string }) {
         <input type="hidden" name="expectedVersion" value={version} />
         <input type="hidden" name="subjectRef" value={item.subjectRef} />
         <input type="hidden" name="return" value={returnTo} />
-        {(item.questions ?? []).map((q) => (
-          <fieldset key={q.id} className="space-y-1 text-sm">
-            <legend className="font-medium">{q.text}</legend>
-            {q.options.map((o) => (
-              <label key={o} className="mr-4 inline-flex items-center gap-1">
-                <input
-                  type="radio"
-                  name={`choice.${q.id}`}
-                  value={o === q.recommended ? '' : o}
-                  defaultChecked={o === q.recommended}
-                />
-                {o}
-                {q.recommended === o && (
-                  <span className="text-xs text-muted-foreground">(default)</span>
-                )}
-              </label>
-            ))}
-          </fieldset>
-        ))}
+        <CleanupChoices questions={item.questions ?? []} />
         <p className="text-xs text-muted-foreground">
           Nothing is removed, closed or deleted unless you choose it. Task Branches are always kept
           in the Factory Clone, and each PR gets a comment saying the factory stopped tracking it.

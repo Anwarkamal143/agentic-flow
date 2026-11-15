@@ -270,7 +270,7 @@ export class InboxService {
         throw new ApiFailure(
           409,
           'answer_required',
-          'a cleanup item is answered, not decided: POST /v1/inbox/:id/answer (factory inbox answer <id> --answer worktrees=discard …); a question left unanswered keeps',
+          'a cleanup Approval is decided per question: POST /v1/inbox/:id/answer (factory inbox answer <id> --answer worktrees=discard …); a question left unanswered keeps',
         );
       }
       this.decideOnly(item, input, actor, null, (tx, _state, _step, row) => {

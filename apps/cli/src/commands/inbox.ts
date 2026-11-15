@@ -139,7 +139,7 @@ export async function inboxAnswer(
   if (answered === undefined) return 1;
   process.stdout.write(
     answered.kind === 'cleanup'
-      ? `Answered ${answered.id}: the factory carries out the cleanup you chose (anything unanswered is kept)\n`
+      ? `Decided ${answered.id}: the factory carries out the cleanup you chose (anything unanswered is kept)\n`
       : `Answered ${answered.id}: a fresh Attempt of Task ${answered.taskId ?? '?'} starts with your answers\n`,
   );
   writeItem(answered);
@@ -277,7 +277,9 @@ function writeItem(i: Approval): void {
     ...(i.questions === null
       ? []
       : [
-          `  questions (asked by ${i.questions.some((q) => q.agentProposed) ? 'an agent' : 'the factory'}):`,
+          i.questions.some((q) => q.agentProposed)
+            ? '  questions (asked by an agent):'
+            : '  decide each (fixed options; unanswered keeps):',
           ...i.questions.flatMap((q) => [
             `    ${q.id.padEnd(6)} ${q.blocking ? 'blocking' : 'optional'}  ${q.text}`,
             ...(q.options.length === 0

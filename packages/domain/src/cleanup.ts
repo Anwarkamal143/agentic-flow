@@ -20,15 +20,15 @@ export const CLEANUP_PULL_REQUEST = 'pull_request';
 export const CLEANUP_REMOTE_BRANCH = 'remote_branch';
 
 /**
- * The one option of a `cleanup` item: answering its questions
+ * The one option of a `cleanup` Approval: deciding it per question
  * (`POST /v1/inbox/:id/answer`). A question left unanswered keeps.
  */
 export const CLEANUP_OPTIONS: readonly ApprovalOption[] = [
   {
     id: 'answer',
-    label: 'Answer',
+    label: 'Decide each',
     description:
-      'Answer each question; one you leave unanswered keeps (the default). Only an explicit discard, close or delete does anything. Task Branches are always kept in the Factory Clone.',
+      'Decide each question with one of its options; one you leave unanswered keeps (the default). Only an explicit discard, close or delete does anything. Task Branches are always kept in the Factory Clone.',
     agentProposed: false,
   },
 ];
@@ -167,7 +167,7 @@ export function checkCleanupAnswers(
   ) {
     return {
       code: 'invalid_answer',
-      message: `deleting the remote branch closes the PR on GitHub; answer ${CLEANUP_PULL_REQUEST}=${CLEANUP_CLOSE} too, or keep the branch`,
+      message: `${CLEANUP_REMOTE_BRANCH}=${CLEANUP_DELETE} conflicts with keeping the PR open: GitHub closes a PR whose head branch is deleted, so the PR could not stay open as you chose. Close the PR as well (${CLEANUP_PULL_REQUEST}=${CLEANUP_CLOSE}), or keep the branch`,
     };
   }
   return undefined;
