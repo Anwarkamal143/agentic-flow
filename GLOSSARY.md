@@ -145,7 +145,7 @@ The recorded verdict of a Gate or an acceptance criterion, valid only for the ex
 _Avoid_: Gate result, proof, test result
 
 **Review**:
-An independent judgement of one Task's change by a reviewer Harness Run in a fresh Session, which sees only the Review Packet. It approves the change or requests changes, carries Findings and a verdict per acceptance criterion, and is valid only for the `(head_sha, base_sha)` it reviewed. It is a Gate, stored once and never regenerated. When merging in a moved base leaves the reviewed diff unchanged, the Review is re-anchored to the new code version instead of run again, and the re-anchoring is recorded.
+An independent judgement of one Task's change (or, for the Integration Review, of a Job's whole combined change on its Integration Branch) by a reviewer Harness Run in a fresh Session, which sees only the Review Packet. It approves the change or requests changes, carries Findings and a verdict per acceptance criterion, and is valid only for the `(head_sha, base_sha)` it reviewed. It is a Gate, stored once and never regenerated. When merging in a moved base leaves the reviewed diff unchanged, the Review is re-anchored to the new code version instead of run again, and the re-anchoring is recorded.
 _Avoid_: Code review (on its own), QA, check
 
 **Merge Gate**:
@@ -153,7 +153,7 @@ The Gate a Job's pull request must pass before it may be merged: the reviewed co
 _Avoid_: Merge check, merge conditions
 
 **Review Packet**:
-What a reviewer is sent: the specification, the acceptance criteria the Task covers, the diff of the Task Branch, and the factory's own Evidence. Never the implementer's transcript or its claims.
+What a reviewer is sent: the specification, the acceptance criteria the Task covers, the diff of the Task Branch, and the factory's own Evidence. For the Integration Review: every acceptance criterion and the diff from the base to the Integration Branch head. Never the implementer's transcript or its claims.
 _Avoid_: Review context, review prompt
 
 **Finding**:

@@ -46,6 +46,7 @@ export const FEATURE_STAGES = [
   'plan_approval',
   'execution',
   'integration',
+  'integration_review',
   'closure',
 ];
 

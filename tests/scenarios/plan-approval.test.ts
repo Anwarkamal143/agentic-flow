@@ -72,6 +72,7 @@ describe('plan_approval', () => {
       ['plan_approval', 'waiting_human'],
       ['execution', 'pending'],
       ['integration', 'pending'],
+      ['integration_review', 'pending'],
       ['closure', 'pending'],
     ]);
     expect(item).toMatchObject({
@@ -202,6 +203,7 @@ describe('plan_approval', () => {
       ['plan_approval', 'rejected'],
       ['execution', 'pending'],
       ['integration', 'pending'],
+      ['integration_review', 'pending'],
       ['closure', 'pending'],
     ]);
     const tasks = await json<{ state: string }[]>(rt.request(`/v1/jobs/${job.id}/tasks`));

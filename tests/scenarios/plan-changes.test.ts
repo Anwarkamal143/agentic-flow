@@ -182,6 +182,7 @@ describe('Plan Edit', () => {
       ['plan_approval', 'waiting_human'],
       ['execution', 'pending'],
       ['integration', 'pending'],
+      ['integration_review', 'pending'],
       ['closure', 'pending'],
     ]);
 
@@ -270,6 +271,7 @@ describe('request changes', () => {
       ['plan_approval', 'waiting_human'],
       ['execution', 'pending'],
       ['integration', 'pending'],
+      ['integration_review', 'pending'],
       ['closure', 'pending'],
     ]);
 

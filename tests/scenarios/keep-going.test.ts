@@ -231,6 +231,15 @@ describe(
       expect(jobFailed?.seq).toBeGreaterThan(dApproved?.seq ?? Infinity);
       const execution = job.stageRuns.find((s) => s.stageId === 'execution');
       expect(execution?.state).toBe('failed');
+      // Nothing to integrate or review: both are skipped, never left pending (ADR-0035).
+      expect(
+        job.stageRuns
+          .filter((s) => ['integration', 'integration_review'].includes(s.stageId))
+          .map((s) => [s.stageId, s.state]),
+      ).toEqual([
+        ['integration', 'skipped'],
+        ['integration_review', 'skipped'],
+      ]);
       expect(job.stageRuns.find((s) => s.stageId === 'closure')?.state).toBe('succeeded');
 
       // The Delivery Report v3: says plainly that the Job failed, lists every Task, offers D only.

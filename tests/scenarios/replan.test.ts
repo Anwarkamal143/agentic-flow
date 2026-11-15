@@ -222,6 +222,7 @@ describe('requested Replan', () => {
       ['execution', 'superseded'],
       ['execution', expect.stringMatching(/queued|running|succeeded/)],
       ['integration', expect.any(String)],
+      ['integration_review', expect.any(String)],
       ['closure', expect.any(String)],
     ]);
 

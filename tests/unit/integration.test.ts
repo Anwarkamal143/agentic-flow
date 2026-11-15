@@ -9,6 +9,8 @@ import {
   FEATURE_RECIPE,
   integrationDefinition,
   integrationOrder,
+  integrationReviewSkip,
+  stageOfTask,
   type TaskDefinition,
 } from '@factory/domain';
 import { describe, expect, it } from 'vitest';
@@ -154,8 +156,8 @@ describe('integrationDefinition', () => {
 });
 
 describe('the feature Recipe', () => {
-  it('is version 3, with integration between execution and closure', () => {
-    expect(FEATURE_RECIPE.recipeVersion).toBe(3);
+  it('is version 4, with integration then integration_review between execution and closure', () => {
+    expect(FEATURE_RECIPE.recipeVersion).toBe(4);
     expect(FEATURE_RECIPE.stages.map((s) => s.id)).toEqual([
       'intake',
       'triage',
@@ -165,13 +167,62 @@ describe('the feature Recipe', () => {
       'plan_approval',
       'execution',
       'integration',
+      'integration_review',
       'closure',
     ]);
   });
 
-  it('keeps version 2 as it was, without integration', () => {
+  it('keeps versions 2 and 3 as they were', () => {
     expect(featureRecipe(2).stages.map((s) => s.id)).not.toContain('integration');
     expect(featureRecipe(2).stages.at(-1)?.id).toBe('closure');
-    expect(featureRecipe(3)).toEqual(FEATURE_RECIPE);
+    expect(featureRecipe(3).stages.map((s) => s.id)).toContain('integration');
+    expect(featureRecipe(3).stages.map((s) => s.id)).not.toContain('integration_review');
+    expect(featureRecipe(4)).toEqual(FEATURE_RECIPE);
+  });
+});
+
+describe('stageOfTask', () => {
+  it('runs a Plan Task in execution, whatever the Integration Review does', () => {
+    expect(stageOfTask('plan', false)).toBe('execution');
+    expect(stageOfTask('plan', true)).toBe('execution');
+  });
+
+  it('runs the Integration Task in integration until its Integration Review starts, then there', () => {
+    expect(stageOfTask('integration', false)).toBe('integration');
+    expect(stageOfTask('integration', true)).toBe('integration_review');
+  });
+});
+
+describe('integrationReviewSkip', () => {
+  const TREE_A = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+  const TREE_B = '8d0e41234f24b6da002d962a26c2495ea16a425f';
+
+  it("skips a single-Task Job whose Integration Branch tree is that Task's reviewed head tree", () => {
+    const decision = integrationReviewSkip({
+      planTasks: 1,
+      integrationTree: TREE_A,
+      reviewedTree: TREE_A,
+    });
+    if (!decision.skip) throw new Error('expected the Integration Review to be skipped');
+    expect(decision.reason).toMatch(/one Plan Task/);
+    expect(decision.reason).toMatch(/same tree/);
+  });
+
+  it("reviews a single-Task Job whose base moved (the tree differs from the Task's reviewed one)", () => {
+    expect(
+      integrationReviewSkip({ planTasks: 1, integrationTree: TREE_B, reviewedTree: TREE_A }),
+    ).toEqual({ skip: false });
+  });
+
+  it('reviews a single-Task Job with no reviewed head to compare with', () => {
+    expect(
+      integrationReviewSkip({ planTasks: 1, integrationTree: TREE_A, reviewedTree: null }),
+    ).toEqual({ skip: false });
+  });
+
+  it('always reviews a Job with more than one Plan Task, even with equal trees', () => {
+    expect(
+      integrationReviewSkip({ planTasks: 2, integrationTree: TREE_A, reviewedTree: TREE_A }),
+    ).toEqual({ skip: false });
   });
 });

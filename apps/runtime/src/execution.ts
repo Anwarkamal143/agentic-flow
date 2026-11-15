@@ -53,8 +53,8 @@ import {
   type Usage,
   toolPolicyOf,
   type SecurityTier,
-  stageOfTask,
-  TaskKindSchema,
+  integrationReviewSkip,
+  type IntegrationReviewSkip,
 } from '@factory/domain';
 import {
   addWorktree,
@@ -64,6 +64,7 @@ import {
   fetchRemote,
   releaseBranch,
   resolveCommit,
+  treeOf,
   uncommittedPaths,
   updateRef,
 } from '@factory/git';
@@ -88,9 +89,12 @@ import { blockOnBaseConflict, makeDependencyBase } from './dependency-base.js';
 import { settleExecution } from './keep-going.js';
 import {
   blockOnIntegrationConflict,
+  enterIntegrationReview,
   integrationSources,
   mergeTaskBranches,
 } from './integration.js';
+import { latestArtifact } from './plan-approval.js';
+import { latestStageRun } from './replan.js';
 import {
   failClosure,
   nextClosure,
@@ -109,7 +113,7 @@ import {
   type StageRunStepper,
 } from './engine.js';
 import { newId } from './ids.js';
-import { latestStageRunOfTask } from './task-stage.js';
+import { latestStageRunOfTask, stageIdOfTask } from './task-stage.js';
 import { PassLoop } from './pass-loop.js';
 import { routeByFaultOrigin, type FaultRouteInput } from './fault-route.js';
 import { answersAfter, openQuestionItem } from './questions.js';
@@ -1048,6 +1052,7 @@ export class TaskScheduler {
     );
     let outcome: Outcome;
     let verificationRuns: VerificationRunRecord[] = [];
+    let decision: IntegrationReviewSkip | undefined;
     if (scopeViolations.length > 0) {
       outcome = {
         state: 'failed',
@@ -1073,12 +1078,33 @@ export class TaskScheduler {
           criteriaCoveredBy(this.opts.db, ctx.job.id, definition.acceptance),
         ).map((p) => ['criteria', p] as [string, string]),
       ];
+      decision =
+        problems.length === 0 ? await this.integrationReviewDecision(ctx, headSha) : undefined;
+      // A merge Attempt redone after one interrupted in its Integration Review is reviewed
+      // again: an Integration Review once started is never skipped (ADR-0035).
+      const reviewing = stageIdOfTask(this.opts.db, ctx.task.id) === 'integration_review';
+      if (problems.length === 0 && (reviewing || (decision !== undefined && !decision.skip))) {
+        // Every Gate passed: the Integration Review judges the combined change (ADR-0035).
+        this.toReview({
+          jobId: ctx.job.id,
+          taskId: ctx.task.id,
+          attemptId,
+          baseSha,
+          inspection: facts,
+          resultContent: undefined,
+          verificationRuns,
+          usage: null,
+          ...(decision === undefined ? {} : { enterReview: decision }),
+        });
+        await this.reviewStep(ctx);
+        return;
+      }
       outcome =
         problems.length === 0
           ? {
               state: 'passed',
               exitReason: 'completed',
-              detail: `the Integration Branch's verification passed on ${headSha}`,
+              detail: `the Integration Branch's verification passed on ${headSha}${decision?.skip === true ? `; the Integration Review is skipped: ${decision.reason}` : ''}`,
             }
           : {
               state: 'failed',
@@ -1098,6 +1124,59 @@ export class TaskScheduler {
       verificationRuns,
       outcome,
       usage: null,
+      ...(decision === undefined ? {} : { enterReview: decision }),
+    });
+  }
+
+  /**
+   * The Integration Task's Gates passed on `headSha` while it runs in
+   * `integration` (ADR-0035): whether its Integration Review runs, or is
+   * skipped by the pure rule (one Plan Task, and the Integration Branch's tree
+   * is that Task's reviewed head tree). `undefined` when there is none to
+   * enter: a Plan Task, a Job created at `feature` v3, or an Integration Review
+   * already started (its Rework is reviewed again, never skipped).
+   */
+  private async integrationReviewDecision(
+    ctx: AttemptContext,
+    headSha: string,
+  ): Promise<IntegrationReviewSkip | undefined> {
+    const { db } = this.opts;
+    if (ctx.task.kind !== 'integration') return undefined;
+    const state = readJobState(db, ctx.job.id);
+    if (latestStageRun(state, 'integration_review')?.state !== 'pending') return undefined;
+    const plan = latestArtifact(db, ctx.job.id, 'plan');
+    const planTasks = db
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.jobId, ctx.job.id),
+          eq(schema.tasks.kind, 'plan'),
+          eq(schema.tasks.planArtifactId, plan?.id ?? ''),
+        ),
+      )
+      .all();
+    // The one Plan Task's head the Integration Branch merged, if a review approved that head.
+    const [merged] = planTasks.length === 1 ? integrationSources(db, ctx.task) : [];
+    const reviewed =
+      merged === undefined
+        ? undefined
+        : db
+            .select({ headSha: schema.reviews.headSha })
+            .from(schema.reviews)
+            .where(
+              and(
+                eq(schema.reviews.taskId, merged.taskId),
+                eq(schema.reviews.headSha, merged.headSha),
+                eq(schema.reviews.outcome, 'approved'),
+              ),
+            )
+            .get();
+    return integrationReviewSkip({
+      planTasks: planTasks.length,
+      integrationTree: await treeOf(ctx.path, headSha),
+      reviewedTree:
+        reviewed === undefined ? null : await treeOf(ctx.repo.clonePath, reviewed.headSha),
     });
   }
 
@@ -1257,6 +1336,7 @@ export class TaskScheduler {
 
     let outcome: Outcome;
     let verificationRuns: VerificationRunRecord[] = [];
+    let skip: IntegrationReviewSkip | undefined;
     if (!cleanExit) {
       outcome = {
         state: 'failed',
@@ -1309,7 +1389,12 @@ export class TaskScheduler {
           criteriaCoveredBy(this.opts.db, ctx.job.id, definition.acceptance),
         ).map((p) => ['criteria', p] as [string, string]),
       ];
-      if (problems.length === 0) {
+      // The Integration Task's Rework in `integration` enters its Integration Review (ADR-0035).
+      const decision =
+        problems.length === 0
+          ? await this.integrationReviewDecision(ctx, inspection.headSha)
+          : undefined;
+      if (problems.length === 0 && decision?.skip !== true) {
         // Every factory Gate passed: the independent review decides the rest.
         this.toReview({
           jobId: ctx.job.id,
@@ -1320,18 +1405,27 @@ export class TaskScheduler {
           resultContent,
           verificationRuns,
           usage,
+          ...(decision === undefined ? {} : { enterReview: decision }),
         });
         // The reviewer never sees the implementer's claims (they are stored as an Artifact).
         rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
         await this.reviewStep(ctx);
         return;
       }
-      outcome = {
-        state: 'failed',
-        exitReason: 'gates_failed',
-        detail: problems.map(([, p]) => p).join('; '),
-        findings: problems.map(([rule, p]) => gateFinding(self, rule, p)),
-      };
+      outcome =
+        decision?.skip === true
+          ? {
+              state: 'passed',
+              exitReason: 'completed',
+              detail: `every Gate passed on the Integration Branch; the Integration Review is skipped: ${decision.reason}`,
+            }
+          : {
+              state: 'failed',
+              exitReason: 'gates_failed',
+              detail: problems.map(([, p]) => p).join('; '),
+              findings: problems.map(([rule, p]) => gateFinding(self, rule, p)),
+            };
+      if (decision?.skip === true) skip = decision;
     }
 
     this.finish({
@@ -1345,6 +1439,7 @@ export class TaskScheduler {
       verificationRuns,
       outcome,
       usage,
+      ...(skip === undefined ? {} : { enterReview: skip }),
     });
   }
 
@@ -1368,6 +1463,9 @@ export class TaskScheduler {
     };
     const usage =
       attempt.usageJson === null ? null : UsageSchema.parse(JSON.parse(attempt.usageJson));
+    // The Integration Task's review in `integration_review` is the Integration Review (ADR-0035).
+    const scope =
+      stageIdOfTask(this.opts.db, ctx.task.id) === 'integration_review' ? 'integration' : 'task';
     const reviewed = await runReview(
       this.opts,
       {
@@ -1384,6 +1482,7 @@ export class TaskScheduler {
         harnessId: ctx.harness.id,
         wallClockMs: this.reviewWallClockMs,
         firstRun: from?.run ?? 1,
+        scope,
       },
       {
         run: (input, evaluate) =>
@@ -1407,6 +1506,7 @@ export class TaskScheduler {
           baseSha: ctx.baseSha,
         },
         reviewerChanges: await worktreeProblems(ctx.path, facts.headSha, 'reviewer'),
+        scope,
       },
       (tx, state, step, outcome) => {
         endAttempt(tx, state, step, {
@@ -1547,7 +1647,7 @@ export class TaskScheduler {
         env: ctx.env,
         subject: {
           jobId: ctx.job.id,
-          stageId: stageOfTask(TaskKindSchema.parse(ctx.task.kind)),
+          stageId: stageIdOfTask(this.opts.db, ctx.task.id),
           taskKey: ctx.task.key,
         },
         limits: { wallClockMs: input.wallClockMs, maxTurns: MAX_TURNS },
@@ -1582,7 +1682,7 @@ export class TaskScheduler {
         payload: {
           attemptId: ctx.attemptId,
           taskId: ctx.task.id,
-          stageId: stageOfTask(TaskKindSchema.parse(ctx.task.kind)),
+          stageId: stageIdOfTask(this.opts.db, ctx.task.id),
           role: input.role,
           harnessId: harness.id,
           n: input.run,
@@ -1814,12 +1914,17 @@ export class TaskScheduler {
     verificationRuns: VerificationRunRecord[];
     outcome: Outcome;
     usage: Usage | null;
+    /** The Integration Task passed its Gates in `integration`: the skip-or-review decision to enter its Integration Review with (ADR-0035). */
+    enterReview?: IntegrationReviewSkip;
   }): void {
     changeJob(
       this.opts.db,
       { jobId: input.jobId, expectedVersion: 'current', actor: ACTOR },
       (tx, state, step) => {
         this.recordVerification(tx, input);
+        if (input.enterReview !== undefined && input.outcome.state === 'passed') {
+          enterIntegrationReview(tx, input.jobId, step, input.enterReview);
+        }
         endAttempt(tx, state, step, {
           ...input,
           from: 'verifying',
@@ -1961,22 +2066,30 @@ export class TaskScheduler {
     resultContent: StoredContent | undefined;
     verificationRuns: VerificationRunRecord[];
     usage: Usage | null;
+    /** The Integration Task passed its Gates in `integration`: the skip-or-review decision to enter its Integration Review with (ADR-0035). */
+    enterReview?: IntegrationReviewSkip;
   }): void {
     const { jobId, taskId, attemptId, inspection } = input;
-    changeJob(this.opts.db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx) => {
-      this.recordVerification(tx, input);
-      stepAttempt(
-        tx,
-        { jobId, actor: ACTOR },
-        attemptId,
-        'verifying',
-        { state: 'in_review', ...inspectionColumns(inspection, input.usage) },
-        { headSha: inspection.headSha, baseSha: input.baseSha },
-      );
-      stepTask(tx, { jobId, actor: ACTOR }, requireTask(tx, taskId, 'verifying'), 'in_review', {
-        payload: { attemptId, headSha: inspection.headSha },
-      });
-    });
+    changeJob(
+      this.opts.db,
+      { jobId, expectedVersion: 'current', actor: ACTOR },
+      (tx, _state, step) => {
+        this.recordVerification(tx, input);
+        if (input.enterReview !== undefined)
+          enterIntegrationReview(tx, jobId, step, input.enterReview);
+        stepAttempt(
+          tx,
+          { jobId, actor: ACTOR },
+          attemptId,
+          'verifying',
+          { state: 'in_review', ...inspectionColumns(inspection, input.usage) },
+          { headSha: inspection.headSha, baseSha: input.baseSha },
+        );
+        stepTask(tx, { jobId, actor: ACTOR }, requireTask(tx, taskId, 'verifying'), 'in_review', {
+          payload: { attemptId, headSha: inspection.headSha },
+        });
+      },
+    );
     this.opts.onCommit();
   }
 

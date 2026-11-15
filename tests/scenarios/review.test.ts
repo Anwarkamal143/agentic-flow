@@ -135,10 +135,12 @@ describe('The independent review Gate', () => {
         'diff',
         'evidence',
         'packetVersion',
+        'scope',
         'specification',
         'subject',
       ].sort(),
     );
+    expect(packet['scope']).toBe('task');
     expect(packet['specification']).toEqual(validOutput('specification'));
     expect(packet.acceptanceCriteria.map((c) => [c.code, c.mandatory])).toEqual([['AC-01', true]]);
     expect(packet.diff.files).toEqual(['src/math.ts']);

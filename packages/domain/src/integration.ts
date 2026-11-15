@@ -27,9 +27,42 @@ export function integrationBranch(jobId: string): string {
   return `factory/${jobId}/integration`;
 }
 
-/** The Stage a Task's Attempts run in: `execution` for Plan Tasks, `integration` for the Integration Task. */
-export function stageOfTask(kind: TaskKind): 'execution' | 'integration' {
-  return kind === 'integration' ? 'integration' : 'execution';
+/** A Stage a Task's Attempts run in. */
+export type TaskStageId = 'execution' | 'integration' | 'integration_review';
+
+/**
+ * The Stage a Task's Attempts run in: `execution` for Plan Tasks; for the
+ * Integration Task, `integration` until its Integration Review has started
+ * (the Job's newest `integration_review` Stage Run has left `pending`), then
+ * `integration_review`, where its Integration Review Rework stays (ADR-0035).
+ */
+export function stageOfTask(kind: TaskKind, integrationReviewStarted: boolean): TaskStageId {
+  if (kind !== 'integration') return 'execution';
+  return integrationReviewStarted ? 'integration_review' : 'integration';
+}
+
+/** Whether the Integration Review runs, or is skipped with the reason recorded. */
+export type IntegrationReviewSkip = { skip: true; reason: string } | { skip: false };
+
+/**
+ * The Integration Review skip rule (Phase C grilling Q18, ARCHITECTURE §9):
+ * skipped when the Job has exactly one Plan Task and the Integration Branch's
+ * tree equals that Task's reviewed head tree, so integration changed nothing
+ * the Task review did not see. `reviewedTree` is `null` when the Task has no
+ * approving review to compare with. Pure.
+ */
+export function integrationReviewSkip(input: {
+  planTasks: number;
+  integrationTree: string;
+  reviewedTree: string | null;
+}): IntegrationReviewSkip {
+  if (input.planTasks !== 1 || input.reviewedTree !== input.integrationTree) {
+    return { skip: false };
+  }
+  return {
+    skip: true,
+    reason: `the Job has one Plan Task and the Integration Branch has the same tree (${input.integrationTree}) as that Task's reviewed head: integration changed nothing its review did not see`,
+  };
 }
 
 /**

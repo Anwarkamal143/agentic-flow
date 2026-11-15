@@ -56,8 +56,6 @@ import {
   type PlanDecisionInput,
   type PlanView,
   type RequestPlanChangesInput,
-  stageOfTask,
-  TaskKindSchema,
   integrationBranch,
 } from '@factory/domain';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
@@ -83,6 +81,7 @@ import { latestArtifact, openPlanItem, queueNextStage, startReplan } from './pla
 import { cancelPlanTasks, persistPlanTasks, planContextOf, repositoriesOf } from './plans.js';
 import { grantReplanIn, requestReplanIn } from './replan.js';
 import { applySpecChangeDecision, grantRespecificationIn } from './spec-route.js';
+import { stageIdOfTask } from './task-stage.js';
 
 type ApprovalRow = typeof schema.approvals.$inferSelect;
 type Decider = (
@@ -271,7 +270,7 @@ export class InboxService {
           reason: 'answered',
           payload: { approvalId: id, answeredAttemptId: row.subjectRef },
         });
-        requeueExecution(state, step, `Question ${id} answered by ${actor}`, task);
+        requeueExecution(tx, state, step, `Question ${id} answered by ${actor}`, task);
       },
     );
     this.onCommit();
@@ -851,16 +850,18 @@ function requireAttemptRow(tx: Tx, id: string): typeof schema.attempts.$inferSel
 }
 
 /**
- * Re-queues the Stage `task` runs in (`execution`, or `integration` for the
- * Integration Task) once a Blocker is cleared, so the next claim picks it up.
+ * Re-queues the Stage `task` runs in (`execution`, or `integration` or
+ * `integration_review` for the Integration Task) once a Blocker is cleared,
+ * so the next claim picks it up.
  */
 function requeueExecution(
+  tx: Tx,
   state: JobState,
   step: StageRunStepper,
   reason: string,
-  task: { kind: string },
+  task: { id: string },
 ): void {
-  const stageId = stageOfTask(TaskKindSchema.parse(task.kind));
+  const stageId = stageIdOfTask(tx, task.id);
   const stage = state.stageRuns.filter((r) => r.stageId === stageId).at(-1);
   if (stage?.state === 'waiting_human' || stage?.state === 'blocked') {
     step(stage, 'queued', { reason });
@@ -897,6 +898,7 @@ function applyGrant(
       payload: { approvalId: item.id, grant, maxAttempts: to, attemptId: blocker.attemptId },
     });
     requeueExecution(
+      tx,
       state,
       step,
       `Blocker Approval ${item.id}: ${actor} granted +${String(grant)}`,
@@ -980,6 +982,7 @@ function applyRework(
     payload: { approvalId: item.id, attemptId: blocker.attemptId, nextAttempt: used + 1 },
   });
   requeueExecution(
+    tx,
     state,
     step,
     `Blocker Approval ${item.id}: ${actor} chose Rework with guidance`,
@@ -1034,6 +1037,7 @@ function applyRetry(
     payload: { approvalId: item.id, attemptId: attempt.id, process },
   });
   requeueExecution(
+    tx,
     state,
     step,
     `Blocker Approval ${item.id}: ${actor} chose a Retry (process ${process})`,
