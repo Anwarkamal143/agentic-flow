@@ -115,7 +115,7 @@ Every blocked or waiting stage run stores `resume_stage_id` (usually itself) and
 | `verifying` | Factory-run verification commands and path gate in progress |
 | `in_review` | Independent review in progress |
 | `changes_requested` | A gate failed and routes back to this task, creating a new attempt |
-| `approved` | **All task gates passed on `head_sha` X.** Not yet integrated. |
+| `approved` | **All task gates passed on `head_sha` X.** Not yet integrated. Feedback on the open PR sends the Integration Task back to `changes_requested` (ADR-0039). |
 | `integrated` | Merged into the job integration branch. **Terminal success.** |
 | `blocked` | A Blocker holds the Task (e.g. `awaiting_human` for a Question, a cap reached, `base_merge_conflict`, `recovery_uncertain`). No process is alive; the Worktree is kept. |
 | `failed` | A non-routable end, such as `invalid_output` after its one re-prompt or `factory_error`. Hitting a cap is never `failed`; it is a human Blocker (§4.6). |
@@ -206,7 +206,7 @@ events(seq INTEGER PK AUTOINCREMENT, ts, entity_kind, entity_id, job_id?, type,
 audit_log(id, ts, actor, action, target, before_json, after_json, policy_ref, correlation_id)
 ```
 
-Added in Phase C: pull_requests, pr_checks (written only by the runtime: the `pull_request` Stage and the GitHub poller; the views read only these rows).
+Added in Phase C: pull_requests, pr_checks, pr_feedback (written only by the runtime: the `pull_request` Stage, the GitHub poller and the Inbox; the views read only these rows).
 
 ```
 pull_requests(id, job_id, repository_id, task_id, owner, name, number, url, state,
@@ -223,6 +223,11 @@ pr_checks(id, pull_request_id, head_sha, source, name, status, conclusion, outco
          -- one per (pull request, head, source, name): the newest check run of a name or
          --   status of a context; source: check_run | status;
          --   outcome: pending | success | neutral | skipped | failure
+pr_feedback(id, job_id, pull_request_id, source, external_id, author, review_state?, path?,
+            url?, kind, body, created_at, observed_at, attempt_id?)          -- [Phase C, #60]
+         -- one per (pull request, source, external id); source: review | issue_comment |
+         --   review_comment | inbox; kind: trigger | context; body redacted, untrusted
+         --   GitHub text; attempt_id: the Rework Attempt that carried it (ADR-0039)
 ```
 
 Added in v1: organizations, users, memberships, budgets, usage_records, skills, recipes (as DB rows), notifications. Write a table's migration only in the phase that uses it.

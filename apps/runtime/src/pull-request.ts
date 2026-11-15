@@ -18,6 +18,7 @@ import {
   combineVerdicts,
   evidenceSource,
   EvidenceVerdictSchema,
+  factoryMarker,
   InboxQuestionSchema,
   integrationBranch,
   isCurrent,
@@ -47,6 +48,7 @@ import { integrationSources } from './integration.js';
 import { latestArtifact } from './plan-approval.js';
 import { openMergeApproval, skipMergeStages } from './merge-approval.js';
 import { latestStageRun } from './replan.js';
+import { describeTriggers, ensureComment, triggersAnswered } from './pr-feedback.js';
 import { createHash } from 'node:crypto';
 
 /** The Task scheduler, which runs this Stage. */
@@ -172,7 +174,11 @@ export interface PullRequestDeps {
   log: (message: string) => void;
   /** `true` once the runtime is shutting down: the Stage is left `running` for the next start. */
   closed: () => boolean;
-  /** Test-only: `pull_request.after_create` kills the runtime once GitHub created the PR, before it is recorded. */
+  /**
+   * Test-only: `pull_request.after_create` kills the runtime once GitHub created the PR, before it
+   * is recorded; `pull_request.after_comment`, once the factory's comment on an updated PR was
+   * posted, before the update is recorded (ADR-0039).
+   */
   crashAt?: CrashPoint | undefined;
   /** Waits between tries of a transient GitHub failure (ms); tests shorten it. */
   retryDelaysMs?: readonly number[];
@@ -235,8 +241,25 @@ export async function runPullRequest(
       const coordinates = coordinatesOf(repo);
       if (coordinates === null) continue; // delivered locally (the report says so)
       const branch = integrationBranch(jobId);
-      if (recordedPullRequest(db, jobId, repo.id, branch) !== undefined) continue;
+      const recorded = recordedPullRequest(db, jobId, repo.id, branch);
       const attempt = approvedAttempt(db, task);
+      if (recorded !== undefined) {
+        // Feedback was reworked (ADR-0039): the same PR is updated in place, once per new head.
+        if (recorded.state !== 'open' || recorded.pushedSha === attempt.headSha) continue;
+        if (!stillRunning(db, stageRunId) || deps.closed()) return;
+        const updated = await updateInPlace(deps, {
+          job,
+          task,
+          repo,
+          coordinates,
+          branch,
+          recorded,
+          attempt,
+          stageRunId,
+        });
+        if (!updated) return; // shutting down: resumed at the next start
+        continue;
+      }
       if (!stillRunning(db, stageRunId) || deps.closed()) return;
 
       const body = renderPullRequestBody(
@@ -361,23 +384,174 @@ async function push(
 }
 
 /** Runs `tryOnce` until it is not a transient failure or the tries run out; `undefined` once shutting down. */
-async function withRetries(
+function withRetries<T extends { kind: string }>(
   deps: PullRequestDeps,
-  tryOnce: () => Promise<EnsuredPullRequest>,
-): Promise<EnsuredPullRequest | undefined> {
+  tryOnce: () => Promise<T | { kind: 'failed'; failure: GitHubFailure }>,
+): Promise<T | { kind: 'failed'; failure: GitHubFailure } | undefined> {
+  return retryTransient(deps, tryOnce, (r) => ('failure' in r ? r.failure : undefined));
+}
+
+/** {@link withRetries} for a GitHub port call's result. */
+function withResultRetries<R extends { ok: true } | { ok: false; failure: GitHubFailure }>(
+  deps: PullRequestDeps,
+  tryOnce: () => Promise<R>,
+): Promise<R | undefined> {
+  return retryTransient(deps, tryOnce, (r) => (r.ok ? undefined : r.failure));
+}
+
+async function retryTransient<R>(
+  deps: PullRequestDeps,
+  tryOnce: () => Promise<R>,
+  failureOf: (result: R) => GitHubFailure | undefined,
+): Promise<R | undefined> {
   const delays = deps.retryDelaysMs ?? RETRY_DELAYS_MS;
   for (let n = 0; ; n++) {
     const result = await tryOnce();
+    const failure = failureOf(result);
     const delay = delays[n];
-    if (result.kind !== 'failed' || result.failure.kind === 'refused' || delay === undefined) {
+    if (failure === undefined || failure.kind === 'refused' || delay === undefined) {
       return result;
     }
     deps.log(
-      `pull_request: GitHub ${describeFailure(result.failure)}; trying again in ${String(delay)} ms`,
+      `pull_request: GitHub ${describeFailure(failure)}; trying again in ${String(delay)} ms`,
     );
     await new Promise((resolve) => setTimeout(resolve, delay));
     if (deps.closed()) return undefined;
   }
+}
+
+/**
+ * Updates the recorded PR in place after a feedback Rework (ADR-0039): the
+ * new approved head is pushed to the Integration Branch (a fast-forward,
+ * never forced), the body is rendered again and PATCHed, and a comment with
+ * the marker `pull_request.updated:<stage run>` says what changed. Each step
+ * can be redone: a push of the same head is a no-op, the PATCH sends the same
+ * body, and the comment is looked up by its marker first. Then the row
+ * records the new head, with no gate yet (the poller evaluates it again).
+ * `false` once shutting down.
+ */
+async function updateInPlace(
+  deps: PullRequestDeps,
+  r: {
+    job: typeof schema.jobs.$inferSelect;
+    task: TaskRow;
+    repo: RepositoryRow;
+    coordinates: GitHubCoordinates;
+    branch: string;
+    recorded: typeof schema.pullRequests.$inferSelect;
+    attempt: AttemptRow & { headSha: string };
+    stageRunId: string;
+  },
+): Promise<boolean> {
+  const { db, github } = deps;
+  const { job, task, repo, coordinates, branch, recorded, attempt } = r;
+  // Re-read first: nobody polled the PR while the Rework ran, so it may have been merged,
+  // closed, or pushed to meanwhile. Nothing is pushed to a PR that is no longer the one we left.
+  const fresh = await withResultRetries(deps, () =>
+    github.getPullRequest(coordinates, recorded.number),
+  );
+  if (fresh === undefined) return false;
+  if (!fresh.ok) {
+    throw new DeliveryFailed(
+      `could not re-read ${repoLabel(coordinates)}#${String(recorded.number)} before updating it: ${deps.redact(describeFailure(fresh.failure))}`,
+    );
+  }
+  if (fresh.notModified) throw new Error('an unconditional read answered 304');
+  const onGitHub = fresh.value;
+  if (onGitHub.merged || onGitHub.state !== 'open') {
+    throw new DeliveryFailed(
+      `${repoLabel(coordinates)}#${String(recorded.number)} was ${onGitHub.merged ? 'merged' : 'closed'} on GitHub while the feedback was reworked: the Rework's head ${attempt.headSha} was not pushed`,
+    );
+  }
+  if (onGitHub.head.sha !== recorded.pushedSha && onGitHub.head.sha !== attempt.headSha) {
+    throw new DeliveryFailed(
+      `${repoLabel(coordinates)}#${String(recorded.number)} has head ${onGitHub.head.sha}, not the ${recorded.pushedSha} the factory pushed: someone else pushed to ${branch}, so the Rework was not pushed over it`,
+    );
+  }
+  await push(deps.redact, repo.clonePath, coordinates, attempt.headSha, branch);
+  const body = renderPullRequestBody(
+    pullRequestBodyInput(db, deps.artifacts, job, task, attempt),
+    deps.redact,
+  );
+  const patched = await withResultRetries(deps, () =>
+    github.updatePullRequest(coordinates, recorded.number, { body }),
+  );
+  if (patched === undefined) return false;
+  if (!patched.ok) {
+    throw new DeliveryFailed(
+      `GitHub refused the body of ${repoLabel(coordinates)}#${String(recorded.number)}: ${deps.redact(describeFailure(patched.failure))}`,
+    );
+  }
+  const pushedBefore = db
+    .select({ n: schema.attempts.n })
+    .from(schema.attempts)
+    .where(
+      and(eq(schema.attempts.taskId, task.id), eq(schema.attempts.headSha, recorded.pushedSha)),
+    )
+    .orderBy(desc(schema.attempts.n))
+    .get();
+  const answered = triggersAnswered(db, task.id, pushedBefore?.n ?? 0);
+  const marker = factoryMarker(job.id, `pull_request.updated:${r.stageRunId}`);
+  const text = [
+    `The Software Factory updated this pull request in place after ${describeTriggers(answered)}.`,
+    `The Integration Branch moved from \`${recorded.pushedSha}\` to \`${attempt.headSha}\` (a fast-forward), the factory's commands and the Integration Review passed on the new head, and the description was rendered again. The Merge Gate is evaluated again on it.`,
+    '',
+    marker,
+    '',
+  ].join('\n');
+  const commented = await withRetries(deps, () =>
+    ensureComment(github, coordinates, recorded.number, marker, deps.redact(text)),
+  );
+  if (commented === undefined) return false;
+  if (commented.kind === 'failed') {
+    throw new DeliveryFailed(
+      `GitHub refused the factory's comment on ${repoLabel(coordinates)}#${String(recorded.number)}: ${deps.redact(describeFailure(commented.failure))}`,
+    );
+  }
+  if (commented.kind === 'created' && deps.crashAt === 'pull_request.after_comment') {
+    process.kill(process.pid, 'SIGKILL');
+  }
+  const now = new Date().toISOString();
+  changeJob(db, { jobId: job.id, expectedVersion: 'current', actor: ACTOR }, (tx) => {
+    const updated = tx
+      .update(schema.pullRequests)
+      .set({
+        pushedSha: attempt.headSha,
+        headSha: attempt.headSha,
+        headSeenAt: now,
+        mergeableState: null,
+        gateJson: null,
+        gateEvaluatedAt: null,
+        bodySha256: bodyHash(body),
+        version: sql`${schema.pullRequests.version} + 1`,
+      })
+      .where(
+        and(
+          eq(schema.pullRequests.id, recorded.id),
+          eq(schema.pullRequests.version, recorded.version),
+        ),
+      )
+      .run();
+    if (updated.changes !== 1)
+      throw new Error(`pull request ${recorded.id} changed under its update`);
+    appendEvent(tx, {
+      entityKind: 'pull_request',
+      entityId: recorded.id,
+      jobId: job.id,
+      type: 'pull_request.updated',
+      actor: ACTOR,
+      payload: {
+        number: recorded.number,
+        fromSha: recorded.pushedSha,
+        headSha: attempt.headSha,
+        commentId: commented.comment.id,
+        comment: commented.kind,
+        answers: answered.map((f) => f.id),
+      },
+    });
+  });
+  deps.onCommit();
+  return true;
 }
 
 function describeFailure(failure: GitHubFailure): string {

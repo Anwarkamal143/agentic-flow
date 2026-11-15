@@ -244,7 +244,7 @@ describe('the human_approval Merge Policy (C3)', { timeout: 150_000 }, () => {
     );
     expect(first.gate?.conditions.find((c) => c.id === 'checks')?.status).toBe('pending');
     const waiting = await openItem(rt, 'merge');
-    expect(optionIds(waiting)).toEqual(['cancel_job']);
+    expect(optionIds(waiting)).toEqual(['request_changes', 'cancel_job']);
     expect((await decide(rt, waiting, 'merge')).status).toBe(400);
 
     // A failing check: still no merge option.
@@ -254,11 +254,11 @@ describe('the human_approval Merge Policy (C3)', { timeout: 150_000 }, () => {
       (pr) => pr.gate?.conditions.find((c) => c.id === 'checks')?.status === 'fail',
       'the checks condition to fail',
     );
-    expect(optionIds(await openItem(rt, 'merge'))).toEqual(['cancel_job']);
+    expect(optionIds(await openItem(rt, 'merge'))).toEqual(['request_changes', 'cancel_job']);
 
     // Green: merge is offered beside cancel_job; the policy still waits and nothing is merged.
     const offered = await greenAndOffered(rt, gh, head);
-    expect(optionIds(offered)).toEqual(['merge', 'cancel_job']);
+    expect(optionIds(offered)).toEqual(['merge', 'request_changes', 'cancel_job']);
     const green = await pullRequest(rt, job.id);
     const policy = green.gate?.conditions.find((c) => c.id === 'policy');
     expect(policy?.status).toBe('pending');
@@ -474,6 +474,6 @@ describe('the human_approval Merge Policy (C3)', { timeout: 150_000 }, () => {
       'the checks to pass',
     );
     expect(green.gate?.conditions.find((c) => c.id === 'policy')?.reason).toMatch(/^never_auto/);
-    expect(optionIds(await openItem(rt, 'merge'))).toEqual(['cancel_job']);
+    expect(optionIds(await openItem(rt, 'merge'))).toEqual(['request_changes', 'cancel_job']);
   });
 });

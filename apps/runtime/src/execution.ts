@@ -33,6 +33,7 @@ import {
   type AttemptCause,
   type AnsweredQuestion,
   type GrantGuidance,
+  type PrFeedbackEntry,
   type AttemptFinding,
   type Blocker,
   type HarnessLogContent,
@@ -127,6 +128,7 @@ import {
 import { routeByFaultOrigin, type FaultRouteInput } from './fault-route.js';
 import { answersAfter, openQuestionItem } from './questions.js';
 import { guidanceAfter } from './blocker-approvals.js';
+import { feedbackForAttempt, markFeedbackCarried } from './pr-feedback.js';
 import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
@@ -664,6 +666,8 @@ export class TaskScheduler {
     // Every grant's guidance so far on this Task (ADR-0026).
     const guidance =
       previous === undefined ? [] : db.transaction((tx) => guidanceAfter(tx, previous));
+    // Feedback on the open PR this Rework of the Integration Task answers (ADR-0039).
+    const feedback = feedbackForAttempt(db, task, previous);
     const { wallClockMs } = this;
     let worktree: {
       id: string;
@@ -736,6 +740,7 @@ export class TaskScheduler {
       priorFindings,
       answers,
       guidance,
+      prFeedback: feedback.entries,
     });
     await this.withClone(clone, async () => {
       await excludeResultFile(clone);
@@ -843,8 +848,10 @@ export class TaskScheduler {
             priorFindings: priorFindings.length,
             answers: answers.length,
             guidance: guidance.length,
+            prFeedback: feedback.entries.length,
           },
         });
+        markFeedbackCarried(tx, feedback.rowIds, attemptId);
         stepTask(
           tx,
           { jobId: job.id, actor: ACTOR },
@@ -977,6 +984,7 @@ export class TaskScheduler {
       priorFindings: [],
       answers: [],
       guidance: [],
+      prFeedback: [],
     });
     const portBase = changeJob(
       db,
@@ -1611,6 +1619,7 @@ export class TaskScheduler {
     priorFindings: AttemptFinding[];
     answers: AnsweredQuestion[];
     guidance: GrantGuidance[];
+    prFeedback: PrFeedbackEntry[];
   }): TaskPacket {
     const { job, task, definition, repo } = input;
     const artifacts = this.opts.artifacts.listForJob(job.id).filter((a) => a.stageRunId !== null);
@@ -1663,6 +1672,7 @@ export class TaskScheduler {
         priorFindings: input.priorFindings,
         answers: input.answers,
         guidance: input.guidance,
+        prFeedback: input.prFeedback,
       },
       limits: { maxTurns: MAX_TURNS, wallClockS: input.wallClockMs / 1000 },
       // The developer may ask (ARCHITECTURE §7 Question rules); the reviewer never can.
