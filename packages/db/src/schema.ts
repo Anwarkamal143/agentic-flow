@@ -233,6 +233,14 @@ export const tasks = sqliteTable(
     blockerJson: text('blocker_json'),
     /** Why a `cancelled` Task was cancelled (`TaskCancelReason`); null in every other state. */
     cancelReason: text('cancel_reason'),
+    /**
+     * The approved Integration Task's next Attempt merges the moved default branch in
+     * (cause `base_merge`, ADR-0041). Set when the move is seen, cleared once that
+     * Attempt is recorded or its merge-in conflicts.
+     */
+    baseMergeRequested: integer('base_merge_requested', { mode: 'boolean' })
+      .notNull()
+      .default(false),
     version: integer('version').notNull(),
   },
   // A key is unique within its Plan: a replaced Plan's Task may share a key with the new one (ADR-0019).
@@ -442,6 +450,13 @@ export const reviews = sqliteTable(
     artifactId: text('artifact_id')
       .notNull()
       .references(() => artifacts.id),
+    /**
+     * The approving Review this row re-anchors to its `(head_sha, base_sha)` after a base
+     * merge-in left the diff unchanged (ADR-0041); no reviewer ran for it. Null otherwise.
+     */
+    reanchoredFromReviewId: text('reanchored_from_review_id').references(
+      (): AnySQLiteColumn => reviews.id,
+    ),
     createdAt: text('created_at').notNull(),
   },
   (t) => [

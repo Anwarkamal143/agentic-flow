@@ -7,8 +7,11 @@
  * For each PR of the Job it re-reads the PR first, never trusting the rows:
  * - already merged (by a human, or by a merge whose result a crash lost):
  *   recorded as merged with GitHub's merge SHA, never merged twice;
- * - closed, or its head or base no longer the approved SHAs: the approval is
- *   stale and `merge` fails (`delivery_failed`);
+ * - only its base moved (C2, ADR-0041): the base is merged into the
+ *   Integration Branch (`startBaseMergeIn`), `merge` is superseded, and the
+ *   Merge Gate and the approval follow on the new head; nothing is merged;
+ * - closed, or its head no longer the approved SHA: the approval is stale and
+ *   `merge` fails (`delivery_failed`);
  * - otherwise merged with the Repository's method, pinned to the approved head
  *   (GitHub refuses if the head moved). A method GitHub refuses raises the
  *   `merge_method_refused` Blocker; a transient failure is retried later.
@@ -27,9 +30,11 @@ import {
   pendingMerges,
   recordFactoryMerge,
   refuseMergeMethod,
+  repositoryOf,
   startMerge,
 } from './merge-approval.js';
 import { PassLoop } from './pass-loop.js';
+import { defaultBranchTip, startBaseMergeIn } from './base-change.js';
 
 export interface MergerDeps {
   db: FactoryDb;
@@ -106,6 +111,37 @@ export class Merger {
           recordFactoryMerge(tx, state, step, pr.id, seen.mergeCommitSha, 'already_merged');
         });
         continue;
+      }
+      // The base moved after approval (C2): merge it in; nothing merges until the Merge
+      // Gate is evaluated again on the new head (ADR-0041). The base is the default
+      // branch's head on GitHub, not the PR's `base.sha` (ARCHITECTURE §14).
+      if (seen.state === 'open' && seen.head.sha === approved.headSha) {
+        let tip: string | undefined;
+        try {
+          tip = await defaultBranchTip(repositoryOf(db, pr), repo);
+        } catch (err) {
+          return this.retryLater(what, 'base read', {
+            kind: 'transient',
+            status: null,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        }
+        const merging =
+          tip !== undefined &&
+          this.change(jobId, (tx, state, step) =>
+            startBaseMergeIn(tx, state, step, {
+              taskId: pr.taskId,
+              observedBaseSha: tip,
+              seen: 'pre_merge',
+              actor: MERGER,
+            }),
+          );
+        if (merging) {
+          this.deps.log(
+            `merger: ${what}: the base moved to ${String(tip)} after the merge was approved; merging it in, nothing was merged`,
+          );
+          return true;
+        }
       }
       const stale =
         seen.state !== 'open'

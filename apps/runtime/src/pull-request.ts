@@ -49,6 +49,7 @@ import { latestArtifact } from './plan-approval.js';
 import { openMergeApproval, skipMergeStages } from './merge-approval.js';
 import { latestStageRun } from './replan.js';
 import { describeTriggers, ensureComment, triggersAnswered } from './pr-feedback.js';
+import { defaultBranchTip, startBaseMergeIn } from './base-change.js';
 import { createHash } from 'node:crypto';
 
 /** The Task scheduler, which runs this Stage. */
@@ -261,6 +262,27 @@ export async function runPullRequest(
         continue;
       }
       if (!stillRunning(db, stageRunId) || deps.closed()) return;
+      // Before the first push (C2, ADR-0041): a default branch that moved since the
+      // Integration Branch was verified is merged in first; nothing stale is pushed.
+      const tip = await remoteDefaultHead(deps.redact, repo, coordinates);
+      if (tip !== attempt.baseSha) {
+        const merging = changeJob(
+          db,
+          { jobId, expectedVersion: 'current', actor: ACTOR },
+          (tx, state, step) =>
+            startBaseMergeIn(tx, state, step, {
+              taskId: task.id,
+              observedBaseSha: tip,
+              seen: 'pre_push',
+              actor: ACTOR,
+            }),
+        );
+        deps.onCommit();
+        if (merging) return;
+        throw new DeliveryFailed(
+          `${repo.defaultBranch} of ${repoLabel(coordinates)} is at ${tip}, not the ${attempt.baseSha} the Integration Branch was verified on, and the base could not be merged in: nothing stale is pushed`,
+        );
+      }
 
       const body = renderPullRequestBody(
         pullRequestBodyInput(db, deps.artifacts, job, task, attempt),
@@ -383,6 +405,32 @@ async function push(
   }
 }
 
+/**
+ * The default branch's head on GitHub (`git ls-remote`, git's own credentials,
+ * nothing fetched into the clone). A failure, or no such branch, fails the Stage.
+ */
+async function remoteDefaultHead(
+  redact: Redactor,
+  repo: RepositoryRow,
+  coordinates: GitHubCoordinates,
+): Promise<string> {
+  let sha: string | undefined;
+  try {
+    sha = await defaultBranchTip(repo, coordinates);
+  } catch (err) {
+    const output = (err instanceof Error ? err.message : String(err)).replace(/\s*\n\s*/g, ' ');
+    throw new DeliveryFailed(
+      `could not read ${repo.defaultBranch} of ${repoLabel(coordinates)} before the first push: ${redact(output)}`,
+    );
+  }
+  if (sha === undefined) {
+    throw new DeliveryFailed(
+      `${repoLabel(coordinates)} has no ${repo.defaultBranch} branch to open a pull request against`,
+    );
+  }
+  return sha;
+}
+
 /** Runs `tryOnce` until it is not a transient failure or the tries run out; `undefined` once shutting down. */
 function withRetries<T extends { kind: string }>(
   deps: PullRequestDeps,
@@ -492,9 +540,17 @@ async function updateInPlace(
     .get();
   const answered = triggersAnswered(db, task.id, pushedBefore?.n ?? 0);
   const marker = factoryMarker(job.id, `pull_request.updated:${r.stageRunId}`);
+  const reanchored =
+    currentReview(db, attempt)?.reanchoredFromReviewId != null
+      ? 'the Integration Review was re-anchored to it (merging the base in left the reviewed diff unchanged, so no reviewer ran)'
+      : 'the Integration Review passed on it';
+  const why =
+    answered.length === 0 && attempt.cause === 'base_merge'
+      ? `the default branch moved: the factory merged ${repo.defaultBranch} (\`${attempt.baseSha}\`) into the Integration Branch with a merge commit (never a rebase)`
+      : describeTriggers(answered);
   const text = [
-    `The Software Factory updated this pull request in place after ${describeTriggers(answered)}.`,
-    `The Integration Branch moved from \`${recorded.pushedSha}\` to \`${attempt.headSha}\` (a fast-forward), the factory's commands and the Integration Review passed on the new head, and the description was rendered again. The Merge Gate is evaluated again on it.`,
+    `The Software Factory updated this pull request in place after ${why}.`,
+    `The Integration Branch moved from \`${recorded.pushedSha}\` to \`${attempt.headSha}\` (a fast-forward), the factory's commands passed on the new head, ${reanchored}, and the description was rendered again. The Merge Gate is evaluated again on it.`,
     '',
     marker,
     '',
@@ -518,6 +574,8 @@ async function updateInPlace(
       .set({
         pushedSha: attempt.headSha,
         headSha: attempt.headSha,
+        // The base as GitHub said in the re-read: a merged-in base (ADR-0041) is recorded too.
+        baseSha: onGitHub.base.sha,
         headSeenAt: now,
         mergeableState: null,
         gateJson: null,

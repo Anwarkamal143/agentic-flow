@@ -180,7 +180,8 @@ artifacts(id, job_id, task_id?, attempt_id?, kind, content_hash, path, schema_ve
          -- kind: discovery | spec | plan | task_result | review | qa | report | log
 acceptance_criteria(id, job_id, code /*AC-01*/, text, mandatory)
 tasks(id, job_id, repository_id, key, title, packet_json, state, priority /*low|normal|high*/,
-      max_attempts, max_retries, max_questions, cancel_reason?, plan_artifact_id, version)
+      max_attempts, max_retries, max_questions, cancel_reason?, plan_artifact_id,
+      base_merge_requested /*Phase C, ADR-0041*/, version)
 task_dependencies(task_id, depends_on_task_id)
 attempts(id, task_id, n, state, harness_id, session_ref, worktree_id,
          base_sha, head_sha, started_at, finished_at, exit_reason, usage_json)
@@ -191,7 +192,8 @@ verification_runs(id, attempt_id, command_key, command, head_sha, exit_code,
                   started_at, duration_ms, output_artifact_id)
 evidence(id, attempt_id, criterion_id?, kind, verdict, head_sha, base_sha, artifact_id)
          -- verdict: pass | fail | blocked | not_tested | not_applicable(+justification)
-reviews(id, attempt_id, reviewer_harness_id, head_sha, outcome, artifact_id)
+reviews(id, attempt_id, reviewer_harness_id, head_sha, outcome, artifact_id,
+        reanchored_from_review_id? /*a re-anchored Review: no reviewer ran; Phase C, ADR-0041*/)
 review_findings(id, review_id, severity, fault_origin, location, problem, why,
                 recommendation, blocking)
 approvals(id, job_id, task_id?, kind, subject_ref, question, options_json, recommended,
@@ -385,7 +387,7 @@ Loop (every 1–2 s, plus a wake-up after any relevant event):
 ## 14. Git, staleness and delivery [Phase C]
 
 - **Integration:** approved task branches merge into `factory/<job-id>/integration` (the job integration branch; `factory/<job-id>` would clash with the Task Branch refs under it) in dependency order. The branch belongs to the Job's Integration Task (one per Job and Repository), created by the factory, not the planner. After each merge, the affected verification re-runs on the integration branch. A conflict creates an `integration` task (role: integration agent) or asks a human, depending on policy. [Phase C builds the human route only: the `base_merge_conflict` Blocker; the integration agent is an extension point.] Then the **integration review** (§9) runs on the integration branch before any PR is opened.
-- **Staleness:** before the PR is opened and before merge, compare `base_sha` with the remote default branch. If the base moved, merge the base into the integration branch (never rebase it). A published integration branch is rewritten only through the `integration_rewrite` Blocker Approval (§8.1), never by the factory's own judgment. **Every gate with an old `(head, base)` pair is stale** and re-runs (verification and CI always; review only if the diff changed beyond the merge itself, or when policy says always).
+- **Staleness:** before the first push, on every poll while the PR is open, and right before merge, compare `base_sha` with the remote default branch. If the base moved, merge the base into the integration branch (never rebase it), in the Integration Task's `base_merge` Attempt (ADR-0041). A conflict is the `base_merge_conflict` Blocker. The Review is re-anchored (a new Review row for the new SHAs pointing to the original, no reviewer run) when `git patch-id --stable` of the diff from the merge-base to the head is unchanged and `review.rerunOnBaseChange` is `if_diff_changed` (the default); otherwise the Integration Review re-runs. A published integration branch is rewritten only through the `integration_rewrite` Blocker Approval (§8.1), never by the factory's own judgment. **Every gate with an old `(head, base)` pair is stale** and re-runs (verification and CI always; review only if the diff changed beyond the merge itself, or when policy says always).
 - **PR feedback loop:** the poller reads PR reviews and comments. A human "changes requested", or a comment addressed to the factory, creates a rework attempt on the integration branch and updates the PR in place. Comment text is untrusted: it is shown to the agent as context and never treated as instructions about permissions.
 - **Transport:** one GitHub port, REST over `fetch` at a configurable API base URL. Authentication is a **token reference** (`gh` or `env:NAME`) resolved for each request, never stored, and taught to redaction. A Repository's coordinates (`owner/name`) come from a github.com remote or `repo add --github` (ADR-0033).
 - **Local-first:** GitHub is **polled** (conditional requests with ETag, 30–60 s while a PR is open). Webhooks or a tunnel are optional [Later].

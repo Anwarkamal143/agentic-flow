@@ -561,6 +561,12 @@ function ReviewPanel({ review: r, attempt }: { review: Review; attempt: Attempt 
         <h4 className="text-sm font-medium">Independent review</h4>
         <State value={r.outcome} />
         {stale && <Badge variant="warning">stale: the Attempt&apos;s head or base changed</Badge>}
+        {r.reanchoredFrom !== null && (
+          <Badge variant="outline" data-testid="review-reanchored">
+            re-anchored from {r.reanchoredFrom}: the base merge-in left the diff unchanged, no
+            reviewer ran
+          </Badge>
+        )}
         <span className="text-xs text-muted-foreground">
           {r.reviewer.harnessId} {r.reviewer.version ?? '(version unknown)'} · at{' '}
           <Sha value={r.headSha} /> on <Sha value={r.baseSha} /> · {formatTime(r.createdAt)}

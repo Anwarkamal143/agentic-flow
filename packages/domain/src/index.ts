@@ -8,6 +8,7 @@ import { TaskCancelReasonSchema, TaskStateSchema } from './execution.js';
 import { BlockerSchema } from './rework.js';
 import { GitHubCoordinatesSchema, parseCoordinates } from './github.js';
 import { TaskKindSchema } from './integration.js';
+import { ReviewRerunOnBaseChangeSchema } from './base-change.js';
 import {
   EffectiveMergePolicySchema,
   MergeMethodSchema,
@@ -57,6 +58,7 @@ export * from './integration.js';
 export * from './pull-request.js';
 export * from './merge-gate.js';
 export * from './pr-feedback.js';
+export * from './base-change.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -120,6 +122,11 @@ export const ProjectConfigSchema = z
     maxReplans: z.number().int().min(0).max(10).optional(),
     /** Task concurrency limits (ARCHITECTURE §12). A Job may override them at creation. */
     concurrency: ConcurrencyOverrideSchema.optional(),
+    /** How a Review follows a moved base (ADR-0041): `rerunOnBaseChange`, `if_diff_changed` by default. */
+    review: z
+      .object({ rerunOnBaseChange: ReviewRerunOnBaseChangeSchema.optional() })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -484,6 +491,11 @@ export const EffectiveConfigSchema = z.object({
     }),
   /** The Merge Policy (ADR-0038). Jobs created before #59 were all `never_auto`, the only policy then. */
   mergePolicy: EffectiveMergePolicySchema.default({ value: 'never_auto', source: 'repository' }),
+  /** `review.rerunOnBaseChange` (ADR-0041). Jobs created before #62 get the recipe default. */
+  reviewRerunOnBaseChange: effectiveValue(ReviewRerunOnBaseChangeSchema).default({
+    value: 'if_diff_changed',
+    source: 'recipe',
+  }),
 });
 export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
 
@@ -554,6 +566,10 @@ export function resolveEffectiveConfig(levels: {
         : { value: project.maxReplans, source: 'project' },
     concurrency: { perRepository: limit('perRepository'), perJob: limit('perJob') },
     mergePolicy: levels.mergePolicy ?? { value: 'never_auto', source: 'repository' },
+    reviewRerunOnBaseChange:
+      project.review?.rerunOnBaseChange === undefined
+        ? { value: 'if_diff_changed', source: 'recipe' }
+        : { value: project.review.rerunOnBaseChange, source: 'project' },
   };
 }
 

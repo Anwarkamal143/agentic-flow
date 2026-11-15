@@ -18,6 +18,7 @@ import {
   isBlocking,
   isCurrent,
   ReviewPacketSchema,
+  ReviewOutcomeSchema,
   ReviewProposalSchema,
   schemaIssues,
   SpecificationProposalSchema,
@@ -271,7 +272,18 @@ export type Reviewed =
       sessionRef: string | null;
       harnessId: string;
     }
-  | { kind: 'failed'; exitReason: 'review_failed' | 'invalid_output'; detail: string };
+  | { kind: 'failed'; exitReason: 'review_failed' | 'invalid_output'; detail: string }
+  /**
+   * A base merge-in left the reviewed diff unchanged (ADR-0041): `original`, the
+   * approving Review of the head before, is re-anchored to the new SHAs; no reviewer ran.
+   */
+  | {
+      kind: 'reanchored';
+      original: typeof schema.reviews.$inferSelect;
+      reason: string;
+      /** `git patch-id --stable` of the diff, the same before and after the merge-in (`null`: empty). */
+      patchId: string | null;
+    };
 
 /** One reviewer Harness Run, as the review asks the Task scheduler to run it. */
 export interface ReviewerRunInput {
@@ -452,7 +464,18 @@ export function finishReview(
     const definition = TaskDefinitionSchema.parse(JSON.parse(task.definitionJson));
     const criteria = reviewedCriteria(tx, jobId, input.scope, definition);
     let review: ApprovalInput['review'] = null;
-    if (reviewed.kind === 'valid' && content !== undefined) {
+    if (reviewed.kind === 'reanchored') {
+      review = recordReanchoredReview(tx, {
+        jobId,
+        taskId,
+        attemptId,
+        at: { headSha: reviewedHead, baseSha: base },
+        original: reviewed.original,
+        reason: reviewed.reason,
+        patchId: reviewed.patchId,
+        criteria,
+      });
+    } else if (reviewed.kind === 'valid' && content !== undefined) {
       const { value } = reviewed;
       const template = templateOf(reviewed.packet.scope);
       const artifact = deps.artifacts.record(
@@ -566,6 +589,104 @@ export function finishReview(
     end(tx, state, step, outcome);
   });
   deps.onCommit();
+}
+
+/**
+ * Records `original` re-anchored to `at` for `attemptId` (ADR-0041): a new
+ * Review row pointing to it (`reanchored_from_review_id`), with the original's
+ * reviewer, template, packet, outcome, Artifact and Findings, and its
+ * criterion verdicts as Evidence on the new SHAs. No reviewer ran. Returns the
+ * review as the approval rule reads it.
+ */
+function recordReanchoredReview(
+  tx: Tx,
+  input: {
+    jobId: string;
+    taskId: string;
+    attemptId: string;
+    at: GateRef;
+    original: typeof schema.reviews.$inferSelect;
+    reason: string;
+    patchId: string | null;
+    criteria: readonly CriterionRow[];
+  },
+): NonNullable<ApprovalInput['review']> {
+  const { jobId, taskId, attemptId, at, original } = input;
+  const reviewId = newId('rev');
+  tx.insert(schema.reviews)
+    .values({
+      ...original,
+      id: reviewId,
+      attemptId,
+      sessionRef: null,
+      headSha: at.headSha,
+      baseSha: at.baseSha,
+      reanchoredFromReviewId: original.id,
+      createdAt: new Date().toISOString(),
+    })
+    .run();
+  const findings = tx
+    .select()
+    .from(schema.reviewFindings)
+    .where(eq(schema.reviewFindings.reviewId, original.id))
+    .orderBy(asc(schema.reviewFindings.position))
+    .all();
+  for (const f of findings) {
+    tx.insert(schema.reviewFindings)
+      .values({ ...f, id: newId('fnd'), reviewId })
+      .run();
+  }
+  const verdicts = tx
+    .select()
+    .from(schema.evidence)
+    .where(and(eq(schema.evidence.reviewId, original.id), eq(schema.evidence.kind, 'criterion')))
+    .all();
+  for (const criterion of input.criteria) {
+    const verdict = verdicts.find((e) => e.criterionId === criterion.id);
+    tx.insert(schema.evidence)
+      .values({
+        id: newId('evd'),
+        attemptId,
+        kind: 'criterion',
+        criterionId: criterion.id,
+        reviewId,
+        verdict: verdict?.verdict ?? 'not_tested',
+        detail:
+          verdict === undefined
+            ? `the re-anchored review ${original.id} gave no verdict`
+            : `${verdict.detail} (re-anchored from review ${original.id})`,
+        headSha: at.headSha,
+        baseSha: at.baseSha,
+        artifactId: original.artifactId,
+      })
+      .run();
+  }
+  const blocking = findings.filter((f) => f.blocking).length;
+  appendEvent(tx, {
+    entityKind: 'review',
+    entityId: reviewId,
+    jobId,
+    type: 'review.reanchored',
+    actor: ACTOR,
+    payload: {
+      taskId,
+      attemptId,
+      reanchoredFrom: original.id,
+      fromHeadSha: original.headSha,
+      fromBaseSha: original.baseSha,
+      headSha: at.headSha,
+      baseSha: at.baseSha,
+      outcome: original.outcome,
+      patchId: input.patchId,
+      reason: input.reason,
+    },
+  });
+  return {
+    outcome: ReviewOutcomeSchema.parse(original.outcome),
+    blockingFindings: blocking,
+    headSha: at.headSha,
+    baseSha: at.baseSha,
+  };
 }
 
 /** The approval rule's input, read from what is recorded for the Attempt. */
