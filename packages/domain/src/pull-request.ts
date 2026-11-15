@@ -200,6 +200,42 @@ export function pullRequestRecovery(
   return hasFactoryMarker(found.body, jobId) ? 'adopt' : 'uncertain';
 }
 
+/** What a human chose on an `integration_rewrite` Blocker Approval to publish a rebuilt Integration Branch (#65). */
+export const IntegrationRewriteRouteSchema = z.enum(['force_push_with_lease', 'new_pr']);
+export type IntegrationRewriteRoute = z.infer<typeof IntegrationRewriteRouteSchema>;
+
+/**
+ * What the `pull_request` Stage does with the PR it recorded for a Repository
+ * (#65, ARCHITECTURE §8.1 and §14, Q25), once the Integration Task's approved
+ * head is known. Pure.
+ *
+ * - `open`: no PR is recorded; the first push, needing no approval (nothing was published).
+ * - `none`: the PR already has the head, or is no longer open.
+ * - `update`: the head descends from the one the factory pushed: a fast-forward, the PR updated in place.
+ * - `needs_approval`: a rebuilt Integration Task (a Replan or a re-specification) whose head does
+ *   not descend from the pushed one: publishing it rewrites the PR's branch, so it waits on the
+ *   human Blocker `integration_rewrite`. The factory never force-pushes on its own judgment.
+ * - `force_push` / `new_pr`: the route a human chose on that Blocker.
+ */
+export function pullRequestDelivery(input: {
+  recorded: { state: PullRequestState; pushedSha: string; taskId: string } | null;
+  /** The approved Integration Task, and its approved head. */
+  taskId: string;
+  headSha: string;
+  /** `headSha` holds the recorded `pushedSha` (a push would be a fast-forward). */
+  fastForward: boolean;
+  /** The route a human chose for this Task's head, if any. */
+  rewrite: IntegrationRewriteRoute | null;
+}): 'open' | 'none' | 'update' | 'needs_approval' | 'force_push' | 'new_pr' {
+  const { recorded } = input;
+  if (recorded === null) return 'open';
+  if (recorded.state !== 'open' || recorded.pushedSha === input.headSha) return 'none';
+  if (recorded.taskId === input.taskId || input.fastForward) return 'update';
+  if (input.rewrite === 'force_push_with_lease') return 'force_push';
+  if (input.rewrite === 'new_pr') return 'new_pr';
+  return 'needs_approval';
+}
+
 export const PullRequestStateSchema = z.enum(['open', 'closed', 'merged']);
 export type PullRequestState = z.infer<typeof PullRequestStateSchema>;
 
@@ -221,6 +257,11 @@ export const PullRequestRecordSchema = z.object({
   baseSha: z.string(),
   /** The last head the factory pushed. */
   pushedSha: z.string(),
+  /**
+   * The number of the PR the factory opened in its place (`new_pr` on an
+   * `integration_rewrite` Blocker, #65), or null while it is the current one.
+   */
+  replacedByNumber: z.number().int().nullable(),
   /** `true` when recovery adopted a PR the factory had opened before a crash. */
   adopted: z.boolean(),
   createdAt: z.string(),

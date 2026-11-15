@@ -6,6 +6,7 @@
  * a human actor decides.
  */
 import { approveForeignRewrite } from './foreign-push.js';
+import { approveIntegrationRewrite } from './pull-request.js';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import { rmSync } from 'node:fs';
 import {
@@ -424,6 +425,15 @@ export class InboxService {
     if (input.option === 'rerun_checks') return this.rerunChecksFromItem(item, input, actor);
 
     if (input.option === 'reopen_pr') return this.reopenFromItem(item, input, actor);
+
+    if (input.option === 'force_push_with_lease' || input.option === 'new_pr') {
+      // A human chooses how a rebuilt Integration Branch is published (#65).
+      const route = input.option;
+      this.decideOnly(item, input, actor, null, (tx, state, step) => {
+        approveIntegrationRewrite(tx, state, step, { item, route, actor });
+      });
+      return this.get(item.id);
+    }
 
     if (input.option === 'adopt_rewrite') {
       // A human approves the foreign rewrite of the Integration Branch (ADR-0042).

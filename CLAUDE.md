@@ -41,7 +41,7 @@ If these documents conflict: `CLAUDE.md` > `ROADMAP.md` > `ARCHITECTURE.md` > `P
 ## 3. Git rules (for your own work on this repo, and for the factory's behavior)
 
 - Never work on, force-push, or rewrite protected branches.
-- Factory branches are named `factory/<job-id>/<task-id>-<slug>`, and each implementation task gets its own worktree. The Job's Integration Branch is `factory/<job-id>/integration`.
+- Factory branches are named `factory/<job-id>/<task-id>-<slug>`, and each implementation task gets its own worktree. The Job's Integration Branch is `factory/<job-id>/integration`; after a human's `new_pr` on an `integration_rewrite` Blocker it is `factory/<job-id>/integration-<n>` (n = 2, 3, ...). The replaced branch is left as published.
 - Never discard uncommitted changes or delete a worktree that holds unreviewed work.
 - Commit logical units. Keep PRs to one coherent capability.
 

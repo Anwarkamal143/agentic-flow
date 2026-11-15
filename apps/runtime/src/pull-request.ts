@@ -19,34 +19,42 @@ import {
   evidenceSource,
   EvidenceVerdictSchema,
   factoryMarker,
+  InboxDecisionSchema,
   InboxQuestionSchema,
   integrationBranch,
+  IntegrationRewriteRouteSchema,
   isCurrent,
   PlanProposalSchema,
   PullRequestRecordSchema,
+  pullRequestDelivery,
   pullRequestRecovery,
+  PullRequestStateSchema,
   pullRequestTitle,
   renderPullRequestBody,
   SpecificationProposalSchema,
   TaskDefinitionSchema,
+  BlockerSchema,
   type Blocker,
   type GitHubCoordinates,
+  type IntegrationRewriteRoute,
   type PullRequestBodyInput,
   type PullRequestRecord,
   type Redactor,
 } from '@factory/domain';
 import { git } from '@factory/git';
 import type { GitHubFailure, GitHubPort, PullRequest } from '@factory/github';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
 import { currentCriteria, currentSpec } from './criteria.js';
 import type { CrashPoint } from './closure.js';
 import { changeJob, readJobState, type JobState, type StageRunStepper } from './engine.js';
 import { newId } from './ids.js';
+import { ApiFailure } from './errors.js';
 import { integrationSources } from './integration.js';
 import { latestArtifact } from './plan-approval.js';
-import { openMergeApproval, skipMergeStages } from './merge-approval.js';
+import { openMergeApproval, publishedBranchNumber, skipMergeStages } from './merge-approval.js';
+import { openBlockerItem } from './blocker-approvals.js';
 import { latestStageRun } from './replan.js';
 import { describeTriggers, ensureComment, triggersAnswered } from './pr-feedback.js';
 import { defaultBranchTip, startBaseMergeIn } from './base-change.js';
@@ -59,6 +67,7 @@ const ACTOR = 'system:scheduler';
 type TaskRow = typeof schema.tasks.$inferSelect;
 type AttemptRow = typeof schema.attempts.$inferSelect;
 type RepositoryRow = typeof schema.repositories.$inferSelect;
+type PullRequestRow = typeof schema.pullRequests.$inferSelect;
 
 /** The github.com git URL of a Repository's coordinates: what the factory pushes to. */
 export function githubRemoteUrl(repo: GitHubCoordinates): string {
@@ -213,6 +222,375 @@ export function nextPullRequest(db: FactoryDb): { id: string; jobId: string } | 
 /** Thrown out of the Stage's work: GitHub or git refused something retrying won't fix. */
 class DeliveryFailed extends Error {}
 
+interface DeliveryTarget {
+  job: typeof schema.jobs.$inferSelect;
+  task: TaskRow;
+  repo: RepositoryRow;
+  coordinates: GitHubCoordinates;
+  attempt: AttemptRow & { headSha: string };
+  stageRunId: string;
+}
+
+/**
+ * The first push to `branch` and its PR, opened (or adopted, by its marker).
+ * Before it, a default branch that moved since the Integration Branch was
+ * verified is merged in first (C2, ADR-0041): nothing stale is pushed. With
+ * `replacing` (`new_pr` on an `integration_rewrite` Blocker, #65), the old PR
+ * is closed first with a marked comment saying why, and its row is marked
+ * replaced in the transaction that records the new one. `false` when the
+ * Stage stops here (shutting down, a base merge-in, a foreign PR).
+ */
+async function openPullRequest(
+  deps: PullRequestDeps,
+  r: DeliveryTarget & {
+    branch: string;
+    replacing?: { recorded: PullRequestRow; approvalId: string };
+  },
+): Promise<boolean> {
+  const { db } = deps;
+  const { job, task, repo, coordinates, attempt, branch, stageRunId } = r;
+  const jobId = job.id;
+  const tip = await remoteDefaultHead(deps.redact, repo, coordinates);
+  if (tip !== attempt.baseSha) {
+    const merging = changeJob(
+      db,
+      { jobId, expectedVersion: 'current', actor: ACTOR },
+      (tx, state, step) =>
+        startBaseMergeIn(tx, state, step, {
+          taskId: task.id,
+          observedBaseSha: tip,
+          seen: 'pre_push',
+          actor: ACTOR,
+        }),
+    );
+    deps.onCommit();
+    if (merging) return false;
+    throw new DeliveryFailed(
+      `${repo.defaultBranch} of ${repoLabel(coordinates)} is at ${tip}, not the ${attempt.baseSha} the Integration Branch was verified on, and the base could not be merged in: nothing stale is pushed`,
+    );
+  }
+  if (r.replacing !== undefined) {
+    const closed = await closeReplacedPullRequest(deps, { ...r, replacing: r.replacing });
+    if (!closed) return false;
+  }
+
+  const body = renderPullRequestBody(
+    pullRequestBodyInput(db, deps.artifacts, job, task, attempt, null, branch),
+    deps.redact,
+  );
+  // The first push of anything, only once no PR is on the branch (never a foreign PR's).
+  const ensured = await withRetries(deps, () =>
+    ensurePullRequest(
+      deps.github,
+      coordinates,
+      {
+        jobId,
+        head: branch,
+        base: repo.defaultBranch,
+        title: pullRequestTitle(job.title),
+        body,
+      },
+      () => push(deps.redact, repo.clonePath, coordinates, attempt.headSha, branch),
+    ),
+  );
+  if (ensured === undefined) return false; // shutting down: resumed at the next start
+  if (ensured.kind === 'failed') {
+    throw new DeliveryFailed(
+      `GitHub refused the pull request for ${repoLabel(coordinates)}: ${deps.redact(describeFailure(ensured.failure))}`,
+    );
+  }
+  if (ensured.kind === 'uncertain') {
+    waitOnForeignPullRequest(deps, stageRunId, jobId, task, attempt, coordinates, ensured.pr);
+    return false;
+  }
+  if (ensured.kind === 'created' && deps.crashAt === 'pull_request.after_create') {
+    process.kill(process.pid, 'SIGKILL');
+  }
+  recordPullRequest(deps, {
+    jobId,
+    task,
+    repo,
+    coordinates,
+    branch,
+    pushedSha: attempt.headSha,
+    pr: ensured.pr,
+    adopted: ensured.kind === 'adopted',
+    body,
+    replacing: r.replacing,
+  });
+  return true;
+}
+
+/**
+ * `new_pr` (#65): the old PR is closed on GitHub with a comment carrying the
+ * marker `pull_request.replaced:<approval>` that says why and where the new
+ * one is. Each step can be redone: the comment is looked up by its marker
+ * first, and a PR already closed is not closed again. Its branch is left as
+ * it is. A PR merged meanwhile fails the Stage. `false` once shutting down.
+ */
+async function closeReplacedPullRequest(
+  deps: PullRequestDeps,
+  r: DeliveryTarget & {
+    branch: string;
+    replacing: { recorded: PullRequestRow; approvalId: string };
+  },
+): Promise<boolean> {
+  const { github } = deps;
+  const { job, coordinates, attempt, branch } = r;
+  const { recorded, approvalId } = r.replacing;
+  const name = `${repoLabel(coordinates)}#${String(recorded.number)}`;
+  const fresh = await withResultRetries(deps, () =>
+    github.getPullRequest(coordinates, recorded.number),
+  );
+  if (fresh === undefined) return false;
+  if (!fresh.ok) {
+    throw new DeliveryFailed(
+      `could not re-read ${name} before closing it: ${deps.redact(describeFailure(fresh.failure))}`,
+    );
+  }
+  if (fresh.notModified) throw new Error('an unconditional read answered 304');
+  if (fresh.value.merged) {
+    throw new DeliveryFailed(
+      `${name} was merged on GitHub while the rebuilt Integration Branch waited: no new pull request was opened`,
+    );
+  }
+  const marker = factoryMarker(job.id, `pull_request.replaced:${approvalId}`);
+  const text = [
+    `The Software Factory closed this pull request: a Replan rebuilt the Integration Branch, and the rebuilt branch (\`${attempt.headSha}\`) does not descend from \`${recorded.pushedSha}\`, the head published here.`,
+    `Rather than force-push \`${recorded.headBranch}\`, a human chose to open a new pull request from \`${branch}\`. This branch is left as it is.`,
+    '',
+    marker,
+    '',
+  ].join('\n');
+  const commented = await withRetries(deps, () =>
+    ensureComment(github, coordinates, recorded.number, marker, deps.redact(text)),
+  );
+  if (commented === undefined) return false;
+  if (commented.kind === 'failed') {
+    throw new DeliveryFailed(
+      `GitHub refused the factory's comment on ${name}: ${deps.redact(describeFailure(commented.failure))}`,
+    );
+  }
+  if (fresh.value.state === 'open') {
+    const closed = await withResultRetries(deps, () =>
+      github.updatePullRequest(coordinates, recorded.number, { state: 'closed' }),
+    );
+    if (closed === undefined) return false;
+    if (!closed.ok) {
+      throw new DeliveryFailed(
+        `GitHub refused to close ${name}: ${deps.redact(describeFailure(closed.failure))}`,
+      );
+    }
+  }
+  return true;
+}
+
+/** Whether `head` holds `ancestor` in the Factory Clone: a push of `head` over it is a fast-forward. */
+async function descendsFrom(clonePath: string, head: string, ancestor: string): Promise<boolean> {
+  if (head === ancestor) return true;
+  try {
+    await git(['merge-base', '--is-ancestor', ancestor, head], { cwd: clonePath });
+    return true;
+  } catch {
+    return false; // not an ancestor, or not in the clone: either way not a fast-forward
+  }
+}
+
+/** The pull request currently recorded for (Job, Repository): not one closed and replaced (#65). */
+function currentPullRequest(
+  db: FactoryDb | Tx,
+  jobId: string,
+  repositoryId: string,
+): PullRequestRow | undefined {
+  return db
+    .select()
+    .from(schema.pullRequests)
+    .where(
+      and(
+        eq(schema.pullRequests.jobId, jobId),
+        eq(schema.pullRequests.repositoryId, repositoryId),
+        isNull(schema.pullRequests.replacedById),
+      ),
+    )
+    .get();
+}
+
+/** The branch a new PR replacing `recorded` is opened on: the next `integration-<n>` (#65). */
+function nextPublishedBranch(db: FactoryDb | Tx, recorded: PullRequestRow): string {
+  return integrationBranch(recorded.jobId, publishedBranchNumber(db, recorded) + 1);
+}
+
+/** A human's decision on the `integration_rewrite` Blocker of Integration Task `taskId`, if any (#65). */
+export interface RewriteDecision {
+  route: IntegrationRewriteRoute;
+  approvalId: string;
+  decidedBy: string;
+}
+
+/** The newest decided `integration_rewrite` Blocker Approval of the Integration Task `taskId`. */
+export function decidedRewrite(db: FactoryDb | Tx, taskId: string): RewriteDecision | undefined {
+  const rows = db
+    .select()
+    .from(schema.approvals)
+    .where(
+      and(
+        eq(schema.approvals.taskId, taskId),
+        eq(schema.approvals.kind, 'blocker'),
+        eq(schema.approvals.state, 'decided'),
+      ),
+    )
+    .orderBy(desc(sql`"approvals"."rowid"`))
+    .all();
+  for (const row of rows) {
+    if (row.decisionJson === null) continue;
+    const decision = InboxDecisionSchema.parse(JSON.parse(row.decisionJson));
+    const route = IntegrationRewriteRouteSchema.safeParse(decision.option);
+    if (route.success) {
+      return { route: route.data, approvalId: row.id, decidedBy: row.decidedBy ?? 'unknown' };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * `force_push_with_lease` or `new_pr` on an `integration_rewrite` Blocker
+ * Approval (#65), in the deciding transaction: refused (409) unless
+ * `pull_request` still waits on that Blocker. The decision is written to
+ * `audit_log` with the old and new heads (and the lease, for a force-push),
+ * and `pull_request` is queued again to carry it out.
+ */
+export function approveIntegrationRewrite(
+  tx: Tx,
+  state: JobState,
+  step: StageRunStepper,
+  input: {
+    item: { id: string; stageRunId: string | null; taskId: string | null };
+    route: IntegrationRewriteRoute;
+    actor: string;
+  },
+): void {
+  const { item, route, actor } = input;
+  const run = state.stageRuns.find((r) => r.id === item.stageRunId);
+  const blocker =
+    run?.blockerJson == null ? undefined : BlockerSchema.parse(JSON.parse(run.blockerJson));
+  if (
+    run?.stageId !== 'pull_request' ||
+    run.state !== 'waiting_human' ||
+    blocker?.reason !== 'integration_rewrite'
+  ) {
+    throw new ApiFailure(
+      409,
+      'not_integration_rewrite',
+      'pull_request no longer waits on a rebuilt Integration Branch',
+    );
+  }
+  const task = tx.select().from(schema.tasks).where(eq(schema.tasks.id, blocker.taskId)).get();
+  const attempt = tx
+    .select()
+    .from(schema.attempts)
+    .where(eq(schema.attempts.id, blocker.attemptId))
+    .get();
+  if (task === undefined || attempt?.headSha == null) {
+    throw new Error(`integration_rewrite Blocker names no approved head (${blocker.attemptId})`);
+  }
+  const recorded = currentPullRequest(tx, task.jobId, task.repositoryId);
+  if (recorded === undefined) throw new Error(`Job ${task.jobId} has no pull request to rewrite`);
+  const branch = route === 'new_pr' ? nextPublishedBranch(tx, recorded) : recorded.headBranch;
+  const auditId = newId('aud');
+  const action = `integration_rewrite.${route}`;
+  const policyRef = `inbox:${item.id}/${route}`;
+  tx.insert(schema.auditLog)
+    .values({
+      id: auditId,
+      ts: new Date().toISOString(),
+      actor,
+      action,
+      target: `pull_request:${recorded.id}`,
+      jobId: task.jobId,
+      beforeJson: JSON.stringify({
+        number: recorded.number,
+        branch: recorded.headBranch,
+        headSha: recorded.pushedSha,
+      }),
+      afterJson: JSON.stringify({
+        branch,
+        headSha: attempt.headSha,
+        ...(route === 'force_push_with_lease' ? { lease: recorded.pushedSha } : {}),
+      }),
+      policyRef,
+      correlationId: item.id,
+    })
+    .run();
+  appendEvent(tx, {
+    entityKind: 'pull_request',
+    entityId: recorded.id,
+    jobId: task.jobId,
+    type: 'audit.recorded',
+    actor,
+    payload: {
+      auditId,
+      action,
+      fromSha: recorded.pushedSha,
+      headSha: attempt.headSha,
+      branch,
+      policyRef,
+    },
+  });
+  step(run, 'queued', {
+    reason:
+      route === 'new_pr'
+        ? `${actor} chose a new pull request on ${branch} for the rebuilt Integration Branch`
+        : `${actor} approved force-pushing the rebuilt Integration Branch with a lease pinned to ${recorded.pushedSha}`,
+  });
+}
+
+/**
+ * The rebuilt Integration Branch would rewrite the open PR's branch (#65,
+ * Q25): `pull_request` waits on the human Blocker `integration_rewrite`, and
+ * its Blocker Approval offers force-push with lease (recommended), a new PR,
+ * or cancelling the Job. Nothing is pushed.
+ */
+function waitOnRewrite(
+  deps: PullRequestDeps,
+  r: DeliveryTarget & { recorded: PullRequestRow },
+): void {
+  const { job, task, coordinates, attempt, recorded, stageRunId } = r;
+  const name = `${repoLabel(coordinates)}#${String(recorded.number)}`;
+  changeJob(
+    deps.db,
+    { jobId: job.id, expectedVersion: 'current', actor: ACTOR },
+    (tx, state, step) => {
+      const run = state.stageRuns.find((s) => s.id === stageRunId);
+      if (run?.state !== 'running') return;
+      const blocker: Blocker = {
+        kind: 'human',
+        reason: 'integration_rewrite',
+        detail: `a Replan rebuilt the Integration Branch at ${attempt.headSha}, which does not descend from ${recorded.pushedSha}, the head the factory published on ${recorded.headBranch} for pull request ${name} (${recorded.url}, open): publishing it rewrites that branch`,
+        requiredAction: `decide the Blocker Approval in the Inbox: force-push with a lease pinned to ${recorded.pushedSha} (recommended; audited; the PR is updated in place), open a new PR on ${nextPublishedBranch(tx, recorded)} (the old one is closed with a comment), or cancel the Job. The factory never force-pushes on its own`,
+        taskId: task.id,
+        attemptId: attempt.id,
+        createdAt: new Date().toISOString(),
+      };
+      step(run, 'waiting_human', { blocker });
+      openBlockerItem(tx, { jobId: job.id, actor: ACTOR }, task, blocker, { stageRunId: run.id });
+      appendEvent(tx, {
+        entityKind: 'pull_request',
+        entityId: recorded.id,
+        jobId: job.id,
+        type: 'pull_request.rewrite_needed',
+        actor: ACTOR,
+        payload: {
+          number: recorded.number,
+          pushedSha: recorded.pushedSha,
+          headSha: attempt.headSha,
+          taskId: task.id,
+        },
+      });
+    },
+  );
+  deps.onCommit();
+}
+
 /**
  * Pushes each approved Integration Branch whose Repository has GitHub
  * coordinates and opens (or adopts) its PR, recording each in
@@ -242,92 +620,57 @@ export async function runPullRequest(
     for (const { task, repo } of integrationTasksOf(db, jobId)) {
       const coordinates = coordinatesOf(repo);
       if (coordinates === null) continue; // delivered locally (the report says so)
-      const branch = integrationBranch(jobId);
-      const recorded = recordedPullRequest(db, jobId, repo.id, branch);
+      const recorded = currentPullRequest(db, jobId, repo.id);
       const attempt = approvedAttempt(db, task);
-      if (recorded !== undefined) {
-        // Feedback was reworked (ADR-0039): the same PR is updated in place, once per new head.
-        if (recorded.state !== 'open' || recorded.pushedSha === attempt.headSha) continue;
-        if (!stillRunning(db, stageRunId) || deps.closed()) return;
-        const updated = await updateInPlace(deps, {
-          job,
-          task,
-          repo,
-          coordinates,
-          branch,
-          recorded,
-          attempt,
-          stageRunId,
-        });
-        if (!updated) return; // shutting down: resumed at the next start
+      const rewrite = decidedRewrite(db, task.id);
+      const route = pullRequestDelivery({
+        recorded:
+          recorded === undefined
+            ? null
+            : {
+                state: PullRequestStateSchema.parse(recorded.state),
+                pushedSha: recorded.pushedSha,
+                taskId: recorded.taskId,
+              },
+        taskId: task.id,
+        headSha: attempt.headSha,
+        fastForward:
+          recorded !== undefined &&
+          (await descendsFrom(repo.clonePath, attempt.headSha, recorded.pushedSha)),
+        rewrite: rewrite?.route ?? null,
+      });
+      if (route === 'none') continue;
+      if (!stillRunning(db, stageRunId) || deps.closed()) return;
+      const target = { job, task, repo, coordinates, attempt, stageRunId };
+      if (route === 'open') {
+        if (!(await openPullRequest(deps, { ...target, branch: integrationBranch(jobId) }))) return;
         continue;
       }
-      if (!stillRunning(db, stageRunId) || deps.closed()) return;
-      // Before the first push (C2, ADR-0041): a default branch that moved since the
-      // Integration Branch was verified is merged in first; nothing stale is pushed.
-      const tip = await remoteDefaultHead(deps.redact, repo, coordinates);
-      if (tip !== attempt.baseSha) {
-        const merging = changeJob(
-          db,
-          { jobId, expectedVersion: 'current', actor: ACTOR },
-          (tx, state, step) =>
-            startBaseMergeIn(tx, state, step, {
-              taskId: task.id,
-              observedBaseSha: tip,
-              seen: 'pre_push',
-              actor: ACTOR,
-            }),
-        );
-        deps.onCommit();
-        if (merging) return;
-        throw new DeliveryFailed(
-          `${repo.defaultBranch} of ${repoLabel(coordinates)} is at ${tip}, not the ${attempt.baseSha} the Integration Branch was verified on, and the base could not be merged in: nothing stale is pushed`,
-        );
-      }
-
-      const body = renderPullRequestBody(
-        pullRequestBodyInput(db, deps.artifacts, job, task, attempt),
-        deps.redact,
-      );
-      // The first push of anything, only once no PR is on the branch (never a foreign PR's).
-      const ensured = await withRetries(deps, () =>
-        ensurePullRequest(
-          deps.github,
-          coordinates,
-          {
-            jobId,
-            head: branch,
-            base: repo.defaultBranch,
-            title: pullRequestTitle(job.title),
-            body,
-          },
-          () => push(deps.redact, repo.clonePath, coordinates, attempt.headSha, branch),
-        ),
-      );
-      if (ensured === undefined) return; // shutting down: resumed at the next start
-      if (ensured.kind === 'failed') {
-        throw new DeliveryFailed(
-          `GitHub refused the pull request for ${repoLabel(coordinates)}: ${deps.redact(describeFailure(ensured.failure))}`,
-        );
-      }
-      if (ensured.kind === 'uncertain') {
-        waitOnForeignPullRequest(deps, stageRunId, jobId, task, attempt, coordinates, ensured.pr);
+      if (recorded === undefined) throw new Error(`a ${route} without a recorded pull request`);
+      if (route === 'needs_approval') {
+        // A rebuilt Integration Branch (#65, Q25): never force-pushed on the factory's judgment.
+        waitOnRewrite(deps, { ...target, recorded });
         return;
       }
-      if (ensured.kind === 'created' && deps.crashAt === 'pull_request.after_create') {
-        process.kill(process.pid, 'SIGKILL');
+      if (route === 'new_pr') {
+        if (rewrite === undefined) throw new Error('new_pr without a decision');
+        const opened = await openPullRequest(deps, {
+          ...target,
+          branch: nextPublishedBranch(db, recorded),
+          replacing: { recorded, approvalId: rewrite.approvalId },
+        });
+        if (!opened) return;
+        continue;
       }
-      recordPullRequest(deps, {
-        jobId,
-        task,
-        repo,
-        coordinates,
-        branch,
-        pushedSha: attempt.headSha,
-        pr: ensured.pr,
-        adopted: ensured.kind === 'adopted',
-        body,
+      // Feedback was reworked (ADR-0039), the base merged in (ADR-0041), or a human approved
+      // force-pushing the rebuilt branch (#65): the same PR is updated in place.
+      const updated = await updateInPlace(deps, {
+        ...target,
+        branch: recorded.headBranch,
+        recorded,
+        force: route === 'force_push' && rewrite !== undefined ? rewrite : null,
       });
+      if (!updated) return; // shutting down: resumed at the next start
     }
   } catch (err) {
     if (!(err instanceof DeliveryFailed)) throw err;
@@ -403,6 +746,38 @@ async function push(
     // git's output carries `remote:` lines GitHub wrote: untrusted, redacted, one line.
     const output = (err instanceof Error ? err.message : String(err)).replace(/\s*\n\s*/g, ' ');
     throw new DeliveryFailed(`could not push ${branch} to ${repoLabel(repo)}: ${redact(output)}`);
+  }
+}
+
+/**
+ * Publishes a rebuilt Integration Branch a human approved (#65): a force-push
+ * of `sha` to `branch` with its lease pinned to `lease`, the last head the
+ * factory pushed. If the branch moved since (someone else pushed), git
+ * refuses it and the Stage fails with what was found: nothing is overwritten.
+ */
+async function forcePushWithLease(
+  redact: Redactor,
+  clonePath: string,
+  repo: GitHubCoordinates,
+  p: { sha: string; branch: string; lease: string; seen: string },
+): Promise<void> {
+  try {
+    await git(
+      [
+        'push',
+        '--porcelain',
+        `--force-with-lease=refs/heads/${p.branch}:${p.lease}`,
+        githubRemoteUrl(repo),
+        `${p.sha}:refs/heads/${p.branch}`,
+      ],
+      { cwd: clonePath },
+    );
+  } catch (err) {
+    const output = (err instanceof Error ? err.message : String(err)).replace(/\s*\n\s*/g, ' ');
+    const moved = p.seen !== p.lease ? ` (GitHub shows ${p.seen})` : '';
+    throw new DeliveryFailed(
+      `the force-push of ${p.branch} to ${repoLabel(repo)} was refused: its lease is pinned to ${p.lease}, the last head the factory pushed, and the branch is no longer there${moved}. Someone else pushed to it, so nothing was overwritten: ${redact(output)}`,
+    );
   }
 }
 
@@ -490,10 +865,16 @@ async function updateInPlace(
     recorded: typeof schema.pullRequests.$inferSelect;
     attempt: AttemptRow & { headSha: string };
     stageRunId: string;
+    /**
+     * A human approved force-pushing a rebuilt Integration Branch (#65): the
+     * push is forced with a lease pinned to `recorded.pushedSha`, the last
+     * head the factory pushed. `null`: a fast-forward, never forced.
+     */
+    force: RewriteDecision | null;
   },
 ): Promise<boolean> {
   const { db, github } = deps;
-  const { job, task, repo, coordinates, branch, recorded, attempt } = r;
+  const { job, task, repo, coordinates, branch, recorded, attempt, force } = r;
   // Re-read first: nobody polled the PR while the Rework ran, so it may have been merged,
   // closed, or pushed to meanwhile. Nothing is pushed to a PR that is no longer the one we left.
   const fresh = await withResultRetries(deps, () =>
@@ -509,20 +890,33 @@ async function updateInPlace(
   const onGitHub = fresh.value;
   if (onGitHub.merged || onGitHub.state !== 'open') {
     throw new DeliveryFailed(
-      `${repoLabel(coordinates)}#${String(recorded.number)} was ${onGitHub.merged ? 'merged' : 'closed'} on GitHub while the feedback was reworked: the Rework's head ${attempt.headSha} was not pushed`,
+      `${repoLabel(coordinates)}#${String(recorded.number)} was ${onGitHub.merged ? 'merged' : 'closed'} on GitHub while ${force === null ? 'the feedback was reworked' : 'the rebuilt Integration Branch waited'}: the head ${attempt.headSha} was not pushed`,
     );
   }
-  // The head the factory last pushed, or a foreign head it fetched and verified since (ADR-0042):
-  // a push from either is a fast-forward over nobody's work.
-  const known = new Set([recorded.pushedSha, attempt.headSha, ...foreignHeadsOf(db, task.id)]);
-  if (!known.has(onGitHub.head.sha)) {
-    throw new DeliveryFailed(
-      `${repoLabel(coordinates)}#${String(recorded.number)} has head ${onGitHub.head.sha}, not the ${recorded.pushedSha} the factory pushed: someone else pushed to ${branch}, so the Rework was not pushed over it`,
-    );
+  if (force !== null) {
+    // The lease, not this read, decides (#65): git refuses the push unless the branch is still at
+    // the head the factory last pushed. A redo after the push went through pushes nothing.
+    if (onGitHub.head.sha !== attempt.headSha) {
+      await forcePushWithLease(deps.redact, repo.clonePath, coordinates, {
+        sha: attempt.headSha,
+        branch,
+        lease: recorded.pushedSha,
+        seen: onGitHub.head.sha,
+      });
+    }
+  } else {
+    // The head the factory last pushed, or a foreign head it fetched and verified since (ADR-0042):
+    // a push from either is a fast-forward over nobody's work.
+    const known = new Set([recorded.pushedSha, attempt.headSha, ...foreignHeadsOf(db, task.id)]);
+    if (!known.has(onGitHub.head.sha)) {
+      throw new DeliveryFailed(
+        `${repoLabel(coordinates)}#${String(recorded.number)} has head ${onGitHub.head.sha}, not the ${recorded.pushedSha} the factory pushed: someone else pushed to ${branch}, so the Rework was not pushed over it`,
+      );
+    }
+    await push(deps.redact, repo.clonePath, coordinates, attempt.headSha, branch);
   }
-  await push(deps.redact, repo.clonePath, coordinates, attempt.headSha, branch);
   const body = renderPullRequestBody(
-    pullRequestBodyInput(db, deps.artifacts, job, task, attempt),
+    pullRequestBodyInput(db, deps.artifacts, job, task, attempt, null, branch),
     deps.redact,
   );
   const patched = await withResultRetries(deps, () =>
@@ -550,14 +944,19 @@ async function updateInPlace(
       : 'the Integration Review passed on it';
   const foreign = answered.length === 0 && attempt.cause === 'foreign_push';
   const why =
-    answered.length === 0 && attempt.cause === 'base_merge'
-      ? `the default branch moved: the factory merged ${repo.defaultBranch} (\`${attempt.baseSha}\`) into the Integration Branch with a merge commit (never a rebase)`
+    force !== null
+      ? `a Replan rebuilt the Integration Branch from the current base, and ${force.decidedBy} approved force-pushing it (Inbox Item ${force.approvalId})`
+      : answered.length === 0 && attempt.cause === 'base_merge'
+        ? `the default branch moved: the factory merged ${repo.defaultBranch} (\`${attempt.baseSha}\`) into the Integration Branch with a merge commit (never a rebase)`
+        : foreign
+          ? 'someone else pushed to the Integration Branch: the factory fetched that head and never overwrote it'
+          : describeTriggers(answered);
+  const moved =
+    force !== null
+      ? `The Integration Branch moved from \`${recorded.pushedSha}\` to \`${attempt.headSha}\` with a force-push whose lease was pinned to \`${recorded.pushedSha}\` (not a fast-forward: the commits published before are no longer on the branch), the factory's commands passed on the new head`
       : foreign
-        ? 'someone else pushed to the Integration Branch: the factory fetched that head and never overwrote it'
-        : describeTriggers(answered);
-  const moved = foreign
-    ? `The Integration Branch is at \`${attempt.headSha}\`, the foreign head (listed under Foreign commits in the description); the factory's path-scope Gate and commands passed on it`
-    : `The Integration Branch moved from \`${recorded.pushedSha}\` to \`${attempt.headSha}\` (a fast-forward), the factory's commands passed on the new head`;
+        ? `The Integration Branch is at \`${attempt.headSha}\`, the foreign head (listed under Foreign commits in the description); the factory's path-scope Gate and commands passed on it`
+        : `The Integration Branch moved from \`${recorded.pushedSha}\` to \`${attempt.headSha}\` (a fast-forward), the factory's commands passed on the new head`;
   const text = [
     `The Software Factory updated this pull request in place after ${why}.`,
     `${moved}, ${reanchored}, and the description was rendered again. The Merge Gate is evaluated again on it.`,
@@ -582,6 +981,8 @@ async function updateInPlace(
     const updated = tx
       .update(schema.pullRequests)
       .set({
+        // A rebuilt Integration Task's PR is now its own (#65).
+        taskId: task.id,
         pushedSha: attempt.headSha,
         headSha: attempt.headSha,
         // The base as GitHub said in the re-read: a merged-in base (ADR-0041) is recorded too.
@@ -612,6 +1013,8 @@ async function updateInPlace(
         number: recorded.number,
         fromSha: recorded.pushedSha,
         headSha: attempt.headSha,
+        forced: force !== null,
+        ...(force === null ? {} : { approvalId: force.approvalId, taskId: task.id }),
         commentId: commented.comment.id,
         comment: commented.kind,
         answers: answered.map((f) => f.id),
@@ -635,21 +1038,6 @@ function describeFailure(failure: GitHubFailure): string {
 /** The SHA-256 of a PR body, to tell whether a re-rendering differs from what was sent. */
 export function bodyHash(body: string): string {
   return createHash('sha256').update(body).digest('hex');
-}
-
-/** The pull request recorded for (Job, Repository, head branch), if any. */
-function recordedPullRequest(db: FactoryDb, jobId: string, repositoryId: string, branch: string) {
-  return db
-    .select()
-    .from(schema.pullRequests)
-    .where(
-      and(
-        eq(schema.pullRequests.jobId, jobId),
-        eq(schema.pullRequests.repositoryId, repositoryId),
-        eq(schema.pullRequests.headBranch, branch),
-      ),
-    )
-    .get();
 }
 
 /** The Integration Task's passed Attempt: the head the Integration Review approved (or its skip rule). */
@@ -679,6 +1067,8 @@ function recordPullRequest(
     adopted: boolean;
     /** The body the factory sent (its hash tells the poller when a re-rendering differs). */
     body: string;
+    /** The PR this one replaces (`new_pr`, #65): closed on GitHub, marked replaced here. */
+    replacing?: { recorded: PullRequestRow; approvalId: string } | undefined;
   },
 ): void {
   const id = newId('pr');
@@ -724,6 +1114,29 @@ function recordPullRequest(
         base: r.pr.base.ref,
         headSha: r.pr.head.sha,
         pushedSha: r.pushedSha,
+        ...(r.replacing === undefined ? {} : { replaces: r.replacing.recorded.id }),
+      },
+    });
+    if (r.replacing === undefined) return;
+    const old = r.replacing.recorded;
+    const replaced = tx
+      .update(schema.pullRequests)
+      .set({ state: 'closed', replacedById: id, version: sql`${schema.pullRequests.version} + 1` })
+      .where(and(eq(schema.pullRequests.id, old.id), isNull(schema.pullRequests.replacedById)))
+      .run();
+    if (replaced.changes !== 1) throw new Error(`pull request ${old.id} was already replaced`);
+    appendEvent(tx, {
+      entityKind: 'pull_request',
+      entityId: old.id,
+      jobId: r.jobId,
+      type: 'pull_request.replaced',
+      actor: ACTOR,
+      payload: {
+        number: old.number,
+        replacedBy: id,
+        replacedByNumber: r.pr.number,
+        head: r.branch,
+        approvalId: r.replacing.approvalId,
       },
     });
   });
@@ -815,6 +1228,8 @@ export function pullRequestBodyInput(
   attempt: AttemptRow & { headSha: string },
   /** The checks condition the poller recorded; `null` before the first poll. */
   ci: PullRequestBodyInput['ci'] = null,
+  /** The branch the PR is on: `integration-<n>` after a `new_pr` (#65). */
+  branch: string = integrationBranch(job.id),
 ): PullRequestBodyInput {
   const spec = currentSpec(db, job.id);
   if (spec === undefined) throw new Error(`Job ${job.id} has no current Specification`);
@@ -870,7 +1285,7 @@ export function pullRequestBodyInput(
     jobId: job.id,
     title: job.title,
     spec: { problem: specification.problem, objective: specification.objective },
-    branch: integrationBranch(job.id),
+    branch,
     headSha: attempt.headSha,
     baseSha: attempt.baseSha,
     merged: sources.map((s) => ({ key: s.key, branch: s.branch })),
@@ -947,8 +1362,17 @@ export function toPullRequestRecord(
     .where(and(eq(schema.prChecks.pullRequestId, row.id), eq(schema.prChecks.headSha, row.headSha)))
     .orderBy(asc(schema.prChecks.source), asc(schema.prChecks.name))
     .all();
+  const replacedBy =
+    row.replacedById === null
+      ? undefined
+      : db
+          .select({ number: schema.pullRequests.number })
+          .from(schema.pullRequests)
+          .where(eq(schema.pullRequests.id, row.replacedById))
+          .get();
   return PullRequestRecordSchema.parse({
     ...row,
+    replacedByNumber: replacedBy?.number ?? null,
     changesRequestedBy: JSON.parse(row.changesRequestedJson) as unknown,
     gate: row.gateJson === null ? null : (JSON.parse(row.gateJson) as unknown),
     checks,

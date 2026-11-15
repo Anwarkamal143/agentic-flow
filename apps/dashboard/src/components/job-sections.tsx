@@ -186,6 +186,11 @@ export function PullRequests({ pullRequests }: { pullRequests: PullRequestRecord
                   {pr.adopted ? (
                     <span className="ml-2 text-xs text-muted-foreground">adopted on recovery</span>
                   ) : null}
+                  {pr.replacedByNumber === null ? null : (
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {`replaced by #${String(pr.replacedByNumber)}`}
+                    </span>
+                  )}
                 </TableCell>
                 <TableCell>
                   <State value={pr.state} />

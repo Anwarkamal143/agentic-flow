@@ -131,6 +131,14 @@ export const BlockerReasonSchema = z.enum([
    * own. Cleared when polling sees the PR open again.
    */
   'pr_closed',
+  /**
+   * A Replan or a re-specification rebuilt the Integration Branch while its
+   * PR is open (#65, Q25): the rebuilt branch doesn't descend from the head
+   * the factory pushed, so publishing it rewrites the PR's branch. Held by
+   * `pull_request`; a human decides (force-push with lease, a new PR, or
+   * cancel). The factory never force-pushes on its own judgment.
+   */
+  'integration_rewrite',
 ]);
 
 /**

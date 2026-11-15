@@ -1,0 +1,1 @@
+ALTER TABLE `pull_requests` ADD `replaced_by_id` text;

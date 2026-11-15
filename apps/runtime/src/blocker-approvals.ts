@@ -11,6 +11,7 @@ import { appendEvent, schema, type Tx } from '@factory/db';
 import {
   blockerItemTitle,
   blockerOptions,
+  blockerRecommended,
   InboxDecisionSchema,
   TaskPacketSchema,
   type ApprovalKind,
@@ -62,7 +63,7 @@ export function openBlockerItem(
       questionsJson: null,
       why: `${blocker.detail}. ${blocker.requiredAction}.`,
       optionsJson: JSON.stringify(options),
-      recommended: null,
+      recommended: blockerRecommended(blocker.reason),
       evidenceJson: '[]',
       state: 'open',
       deferred: false,

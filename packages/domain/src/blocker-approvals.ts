@@ -114,6 +114,22 @@ const REOPEN_PR: ApprovalOption = {
   agentProposed: false,
 };
 
+const FORCE_PUSH_WITH_LEASE: ApprovalOption = {
+  id: 'force_push_with_lease',
+  label: 'Force-push with lease',
+  description:
+    "Publish the rebuilt Integration Branch to the open PR's branch with a force-push whose lease is pinned to the last head the factory pushed: if anyone pushed to the branch since, the push is refused and reported, and nothing is overwritten. The same PR is updated in place (its description rendered again, a comment says what changed). The old and new heads are written to the audit log.",
+  agentProposed: false,
+};
+
+const NEW_PR: ApprovalOption = {
+  id: 'new_pr',
+  label: 'Open a new PR',
+  description:
+    'Leave the published branch as it is: close the old PR with a comment saying why, and open a new PR from the rebuilt branch on the next factory/<job-id>/integration-<n> branch. Written to the audit log.',
+  agentProposed: false,
+};
+
 /** The Blocker reasons that open a Blocker Approval, with their options (§8.1). */
 const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   rework_cap_reached: [GRANT, REPLAN, CANCEL_JOB],
@@ -130,7 +146,19 @@ const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   foreign_push_rewrite: [ADOPT_REWRITE, CANCEL_JOB],
   // Never cancelled on its own (Q16): a human reopens it or cancels.
   pr_closed: [REOPEN_PR, CANCEL_JOB],
+  // Never forced on the factory's own judgment (#65, Q25): a human chooses.
+  integration_rewrite: [FORCE_PUSH_WITH_LEASE, NEW_PR, CANCEL_JOB],
 };
+
+/** The option a Blocker Approval recommends, if any (§8.1). */
+const RECOMMENDED: Partial<Record<BlockerReason, string>> = {
+  integration_rewrite: FORCE_PUSH_WITH_LEASE.id,
+};
+
+/** The option the Blocker Approval of `reason` recommends, or `null`. */
+export function blockerRecommended(reason: BlockerReason): string | null {
+  return RECOMMENDED[reason] ?? null;
+}
 
 /**
  * The fixed options of the Blocker Approval a Blocker opens, or `undefined`
@@ -165,6 +193,7 @@ const INTEGRATION_TITLES: Partial<Record<BlockerReason, string>> = {
   foreign_push_out_of_scope: 'has a foreign push outside the writable scope',
   foreign_push_rewrite: 'was rewritten by a foreign push that drops approved commits',
   pr_closed: "can't be merged: its pull request was closed without merging",
+  integration_rewrite: 'was rebuilt: publishing it rewrites the open pull request',
 };
 
 /** The line a Blocker Approval shows in a list. */

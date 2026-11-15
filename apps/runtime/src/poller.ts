@@ -347,7 +347,15 @@ function renderedBody(
     throw new Error(`pull request ${row.id} has no approved Integration Task`);
   }
   return renderPullRequestBody(
-    pullRequestBodyInput(db, artifacts, job, task, { ...attempt, headSha: attempt.headSha }, ci),
+    pullRequestBodyInput(
+      db,
+      artifacts,
+      job,
+      task,
+      { ...attempt, headSha: attempt.headSha },
+      ci,
+      row.headBranch,
+    ),
     redact,
   );
 }
