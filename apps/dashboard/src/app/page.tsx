@@ -1,8 +1,8 @@
-import type { JobSummary } from '@factory/domain';
+import type { GitHubState, JobSummary } from '@factory/domain';
 import Link from 'next/link';
 import { connection } from 'next/server';
 import { LiveRefresh } from '@/components/live';
-import { RuntimeUnavailableNotice } from '@/components/states';
+import { GitHubPauseNotice, RuntimeUnavailableNotice } from '@/components/states';
 import { Badge } from '@/components/ui/badge';
 import {
   Table,
@@ -13,13 +13,14 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { formatTime, humanize, stateVariant } from '@/lib/format';
-import { listJobs, RuntimeUnavailable } from '@/lib/runtime';
+import { githubState, listJobs, RuntimeUnavailable } from '@/lib/runtime';
 
 export default async function JobsPage() {
   await connection();
   let jobs: JobSummary[];
+  let github: GitHubState;
   try {
-    jobs = await listJobs();
+    [jobs, github] = await Promise.all([listJobs(), githubState()]);
   } catch (err) {
     if (err instanceof RuntimeUnavailable)
       return <RuntimeUnavailableNotice message={err.message} />;
@@ -34,6 +35,7 @@ export default async function JobsPage() {
         <h1 className="text-xl font-semibold">Jobs</h1>
         <LiveRefresh />
       </div>
+      <GitHubPauseNotice github={github} />
       {sorted.length === 0 ? (
         <p className="rounded-xl border p-5 text-sm text-muted-foreground">
           No Jobs yet. Create one with <code>factory job create --repo &lt;id&gt; --title …</code>

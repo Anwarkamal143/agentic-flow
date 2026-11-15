@@ -14,6 +14,7 @@ import {
   RegisterRepositoryInputSchema,
   type ApiError,
   type Billing,
+  type GitHubState,
   type JobLogEntry,
 } from '@factory/domain';
 import { Hono, type Context } from 'hono';
@@ -50,11 +51,15 @@ export interface RuntimeStatus {
     /** Claude Code's billing (ADR-0015); `null` for a Harness without one. */
     billing: Billing | null;
   } | null;
+  /** The GitHub-wide state: the rate-limit pause in force, if any (ADR-0045). */
+  github: GitHubState;
 }
 
 export interface AppDeps {
   token: string;
   status(): RuntimeStatus;
+  /** The persisted GitHub-wide state (ADR-0045). */
+  github(): GitHubState;
   /** Runs the environment checks (tools, credential presence). */
   doctor(): Promise<DoctorReport>;
   repositories: RepositoryService;
@@ -87,6 +92,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get('/v1/status', (c) => c.json(deps.status()));
+  app.get('/v1/github', (c) => c.json(deps.github()));
 
   app.get('/v1/doctor', async (c) => c.json(await deps.doctor()));
 

@@ -21,6 +21,7 @@ import {
   AttemptTailSchema,
   AttemptSchema,
   FactoryEventSchema,
+  GitHubStateSchema,
   JobSchema,
   JobSummarySchema,
   ReviewSchema,
@@ -35,6 +36,7 @@ import {
   type AttemptTail,
   type Attempt,
   type FactoryEvent,
+  type GitHubState,
   type Job,
   type JobSummary,
   type PullRequestRecord,
@@ -113,6 +115,11 @@ async function get<T extends z.ZodType>(path: string, schema: T): Promise<z.infe
   const res = await call(path, { method: 'GET' });
   if (!res.ok) throw new RuntimeApiError(res.status, path);
   return schema.parse(await res.json());
+}
+
+/** The persisted GitHub-wide state: the rate-limit pause in force, if any (ADR-0045). */
+export function githubState(): Promise<GitHubState> {
+  return get('/v1/github', GitHubStateSchema);
 }
 
 export function listJobs(): Promise<JobSummary[]> {

@@ -9,10 +9,11 @@ import {
 } from '@/components/job-sections';
 import { JobTimeline } from '@/components/live';
 import { PlanViewCard } from '@/components/plan-view';
-import { RuntimeUnavailableNotice } from '@/components/states';
+import { GitHubPauseNotice, RuntimeUnavailableNotice } from '@/components/states';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import type { PlanView } from '@factory/domain';
+import type { GitHubState, PlanView } from '@factory/domain';
 import {
+  githubState,
   jobDetail,
   planView,
   RuntimeApiError,
@@ -25,9 +26,10 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
   const { id } = await params;
   let detail: JobDetail;
   let plan: PlanView | null;
+  let github: GitHubState;
   try {
     detail = await jobDetail(id);
-    plan = await planView(id);
+    [plan, github] = await Promise.all([planView(id), githubState()]);
   } catch (err) {
     if (err instanceof RuntimeApiError && err.status === 404) notFound();
     if (err instanceof RuntimeUnavailable)
@@ -38,6 +40,7 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
 
   return (
     <div className="space-y-6">
+      <GitHubPauseNotice github={github} />
       <JobOverview job={job} />
       <StageRuns job={job} />
       <PullRequests pullRequests={pullRequests} />

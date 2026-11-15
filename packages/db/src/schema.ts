@@ -707,3 +707,21 @@ export const prFeedback = sqliteTable(
   },
   (t) => [uniqueIndex('pr_feedback_identity').on(t.pullRequestId, t.source, t.externalId)],
 );
+
+/**
+ * The GitHub-wide state (#66, ADR-0045): one row, `id = 'github'`. While
+ * `paused_until` is set and in the future, the runtime makes no GitHub API
+ * call (a rate limit is capacity, not failure). Written only by the runtime,
+ * with `github.paused`, `github.pause_extended` or `github.resumed` in the
+ * same transaction.
+ */
+export const githubState = sqliteTable('github_state', {
+  id: text('id').primaryKey(),
+  /** GitHub's reset time; null while calls are made. */
+  pausedUntil: text('paused_until'),
+  /** When the pause in force started; null with no pause. */
+  pausedAt: text('paused_at'),
+  /** The HTTP status of the rate-limit response that set the pause (429 or 403). */
+  pauseStatus: integer('pause_status'),
+  updatedAt: text('updated_at').notNull(),
+});

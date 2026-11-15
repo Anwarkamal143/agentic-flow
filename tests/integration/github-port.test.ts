@@ -327,3 +327,49 @@ describe('GitHub port: the token reference', () => {
     expect(gh.requests, 'nothing was sent without a token').toHaveLength(2);
   });
 });
+
+describe('GitHub port: the rate-limit gate (#66, ADR-0045)', () => {
+  /** A gate as the runtime keeps it: the latest reset it was told of. */
+  function gate() {
+    let pause: { until: string; status: number } | null = null;
+    const told: { status: number; resetAt: string }[] = [];
+    return {
+      told,
+      current: () => pause,
+      limited: (limit: { status: number; resetAt: string }) => {
+        told.push(limit);
+        pause = { until: limit.resetAt, status: limit.status };
+      },
+    };
+  }
+
+  it('reports a rate limit to the gate, then sends nothing until the reset', async () => {
+    const { gh } = await setup();
+    const rateLimit = gate();
+    const port = new GitHubPort({ apiBaseUrl: gh.url, token: fixedToken, rateLimit });
+    const resetAt = new Date(Math.ceil(Date.now() / 1000) * 1000 + 60_000);
+    gh.simulate({ kind: 'rate_limit', status: 429, resetAt });
+    await port.getBranchHead(REPO, 'main');
+    expect(rateLimit.told).toEqual([{ status: 429, resetAt: resetAt.toISOString() }]);
+
+    const sent = gh.requests.length;
+    const paused = { kind: 'rate_limited', status: 429, resetAt: resetAt.toISOString() };
+    expect(failureOf(await port.getBranchHead(REPO, 'main'))).toEqual(paused);
+    expect(failureOf(await port.createComment(REPO, 1, 'hello'))).toEqual(paused);
+    expect(gh.requests.length, 'no request while paused').toBe(sent);
+  });
+
+  it('sends again once the pause it holds is over', async () => {
+    const { gh } = await setup();
+    const port = new GitHubPort({
+      apiBaseUrl: gh.url,
+      token: fixedToken,
+      rateLimit: {
+        current: () => ({ until: new Date(Date.now() - 1_000).toISOString(), status: 429 }),
+        limited: () => undefined,
+      },
+    });
+    const head = await port.getBranchHead(REPO, 'main');
+    expect(head.ok).toBe(true);
+  });
+});

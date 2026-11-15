@@ -122,6 +122,10 @@ _Avoid_: Login, subscription, key
 The period during which a subscription-mode Harness Account is paused after the Harness reported a usage limit. New work for that account waits until it resets, and this is never a failure.
 _Avoid_: Quota, rate limit (on its own), allowance
 
+**GitHub Pause**:
+The factory-wide stop on GitHub API calls after GitHub answered with a rate limit. It lasts until GitHub's reset time, then calls resume on their own. Like a Usage Window, it is capacity and never a failure: no Stage Run changes and no Blocker is raised.
+_Avoid_: GitHub outage, GitHub failure
+
 **Worktree**:
 The isolated checkout of a Repository where exactly one Task is carried out.
 _Avoid_: Workspace, sandbox, environment

@@ -54,6 +54,7 @@ import { CRASH_POINTS, TaskScheduler } from './execution.js';
 import { recoverTasks } from './recovery.js';
 import { CleanupWorker, openMissingCleanupItems } from './cleanup.js';
 import { Merger } from './merger.js';
+import { GitHubPauseGate } from './github-pause.js';
 import { GitHubPoller } from './poller.js';
 import { applyLeaseKnobs, parseLeaseKnobs } from './sweeper.js';
 
@@ -249,10 +250,20 @@ const scheduler = new StageScheduler({
   },
   log: (message) => process.stderr.write(`factory runtime: ${message}\n`),
 });
+// A rate limit pauses every GitHub call until the reset (ADR-0045).
+const githubPause = new GitHubPauseGate({
+  db: database.db,
+  onChange: () => {
+    notify();
+    poller.wake();
+  },
+  log,
+});
 // The token reference is resolved for each request, never held (ADR-0033).
 const githubPort = new GitHubPort({
   apiBaseUrl: github.apiBaseUrl,
   token: () => githubToken.resolve(),
+  rateLimit: githubPause,
 });
 // Carries out the cleanup a human decided after a cancel: Worktrees, the PR, its branch (ADR-0043).
 const cleanup = new CleanupWorker(
@@ -286,6 +297,7 @@ if (tasks.leaseHolder !== holder) throw new Error('lease holders disagree');
 const poller = new GitHubPoller({
   db: database.db,
   github: githubPort,
+  pause: githubPause,
   artifacts,
   redact,
   pollIntervalMs: github.pollIntervalMs,
@@ -346,7 +358,9 @@ const app = createApp({
             credentials: detection.credentials,
             billing: config.harness?.id === 'claude-code' ? config.harness.billing : null,
           },
+    github: { pause: githubPause.state() },
   }),
+  github: () => ({ pause: githubPause.state() }),
   doctor: () =>
     runDoctor(
       process.env,
@@ -390,6 +404,7 @@ const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requested
   scheduler.start();
   tasks.start();
   cleanup.start();
+  githubPause.start();
   poller.start();
   merger.start();
   writeRuntimeRecord(home, {
@@ -419,6 +434,7 @@ function shutdown(reason: string): void {
   force.unref();
   // Ends every SSE stream; events written from here on are released at the next start.
   outbox.close();
+  githubPause.close();
   // A Harness Run in flight is cancelled; its Stage Run is resumed at the next start.
   // So is a developer Harness Run or verification command; its Attempt is recovered at the next start.
   const stopped = Promise.all([

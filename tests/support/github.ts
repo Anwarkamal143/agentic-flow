@@ -30,6 +30,8 @@ export interface RecordedRequest {
   path: string;
   headers: Record<string, string | undefined>;
   body: unknown;
+  /** When it arrived (ms since the epoch). */
+  at: number;
   /** The status answered (304 for a matching ETag); unset while in flight or for a dropped connection. */
   status?: number;
 }
@@ -593,6 +595,7 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
       path: target.pathname + target.search,
       headers,
       body,
+      at: Date.now(),
     };
     requests.push(recorded);
     res.on('finish', () => {
