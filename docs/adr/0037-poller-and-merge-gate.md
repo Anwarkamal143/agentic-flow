@@ -53,7 +53,7 @@ Version 6 adds `merge_approval` and `merge` after `pull_request`. Versions 2 to 
 - **The PR body** gains a "CI checks" section: the checks condition and each check with its link. It reads "Not read from GitHub yet" at opening. After each poll the body is rendered again from the rows. When its SHA-256 differs from `body_sha256` (the body the factory last sent; set at opening), it is PATCHed and `pull_request.body_updated` recorded. A human's edit of the body is overwritten only when the factory's own rendering changes.
 - **Failures:** a failed read writes nothing and the next poll tries again. The GitHub-wide pause, `paused_until` and the exponential backoff are #66's.
 
-**A PR closed without merging** is recorded (`state: closed`), and the gate's `target` fails. The Job stays `waiting_human` on its `merge` item. The `reopen_pr` Question is #64's.
+**A PR closed without merging** is recorded (`state: closed`), and the gate's `target` fails. The Job stays `waiting_human` on its `merge` item. Since #64 (ADR-0043) a closed PR raises the `pr_closed` Blocker Approval (`reopen_pr`, `cancel_job`), and the poller keeps reading it so a reopen is seen.
 
 ## Schema (migration 0018)
 

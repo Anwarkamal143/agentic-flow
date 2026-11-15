@@ -63,6 +63,14 @@ describe('the option sets of a Blocker Approval', () => {
     );
   });
 
+  it('a PR closed without merging offers reopening it and cancelling the Job; nothing cancels on its own (#64, Q16)', () => {
+    expect(ids('pr_closed')).toEqual(['reopen_pr', 'cancel_job']);
+    expect(checkBlockerDecision({ option: 'reopen_pr' })).toEqual({ ok: true, grant: null });
+    expect(blockerItemTitle('integration', 'pr_closed', 'integration')).toBe(
+      "Integration Task can't be merged: its pull request was closed without merging",
+    );
+  });
+
   it('a live process turns "retry now" into "kill and retry"', () => {
     expect(KILL_AND_RETRY_OPTIONS.map((o) => o.id)).toEqual(['kill_and_retry', 'cancel_job']);
   });

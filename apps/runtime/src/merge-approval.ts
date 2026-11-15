@@ -44,7 +44,7 @@ import {
   type ObservedCheck,
   type PullRequestState,
 } from '@factory/domain';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { readJobState, type JobState, type StageRunStepper } from './engine.js';
 import { openBlockerItem } from './blocker-approvals.js';
@@ -350,7 +350,11 @@ export interface Observation {
   changesRequestedBy: string[];
 }
 
-/** The PRs the poller watches: open, of a Job whose `merge_approval` waits for the merge. */
+/**
+ * The PRs the poller watches: open or closed (not merged), of a Job whose
+ * `merge_approval` waits. A closed one is watched so a reopen on GitHub is
+ * seen (#64); once the Job is cancelled or merged, nothing of it is polled.
+ */
 export function trackedPullRequests(db: FactoryDb): PullRequestRow[] {
   return db
     .select({ pr: schema.pullRequests })
@@ -363,7 +367,7 @@ export function trackedPullRequests(db: FactoryDb): PullRequestRow[] {
         eq(schema.stageRuns.state, 'waiting_human'),
       ),
     )
-    .where(eq(schema.pullRequests.state, 'open'))
+    .where(inArray(schema.pullRequests.state, ['open', 'closed']))
     .orderBy(asc(sql`"pull_requests"."rowid"`))
     .all()
     .map((r) => r.pr);
@@ -641,8 +645,173 @@ export function recordPoll(
   }
   if (seen.state === 'merged' && before.state !== 'merged')
     completeMerge(tx, pr, state, step, opts.now);
+  // A closed PR goes first: while one is closed, a failed check waits behind it.
+  syncPrClosedBlocker(tx, pr.jobId, opts.now);
   syncCiBlocker(tx, pr.jobId, opts.now);
   return gate;
+}
+
+// ---- pr_closed (#64) -------------------------------------------------------------------------
+
+/** The Job's PRs closed on GitHub without merging. */
+function closedPullRequestsOfJob(tx: Tx | FactoryDb, jobId: string): PullRequestRow[] {
+  return pullRequestsOfJob(tx, jobId).filter((pr) => pr.state === 'closed');
+}
+
+/** What a `pr_closed` Blocker says: each closed PR with its link. */
+function prClosedDetail(closed: readonly PullRequestRow[]): string {
+  return `${closed.map((pr) => `pull request ${label(pr)} (${pr.url})`).join(', ')} was closed on GitHub without merging`;
+}
+
+function prClosedBlocker(
+  tx: Tx | FactoryDb,
+  closed: readonly PullRequestRow[],
+  now: string,
+): Blocker {
+  const [first] = closed;
+  if (first === undefined) throw new Error('a pr_closed Blocker names a closed pull request');
+  return {
+    kind: 'human',
+    reason: 'pr_closed',
+    detail: prClosedDetail(closed),
+    requiredAction:
+      'decide the Blocker Approval in the Inbox: reopen the PR, or cancel the Job. Nothing is cancelled on its own; reopening the PR on GitHub clears this too',
+    taskId: first.taskId,
+    attemptId: approvedAttemptOf(tx, first.taskId).id,
+    createdAt: now,
+  };
+}
+
+type PrClosedStep =
+  | { kind: 'none' }
+  | { kind: 'clear'; holder: StageRunRow; state: JobState }
+  | { kind: 'raise'; holder: StageRunRow; closed: PullRequestRow[] };
+
+/**
+ * Read-only: whether `merge_approval`'s Blocker is out of step with the PRs'
+ * states (Q16). `raise` when a PR is closed and the Blocker isn't `pr_closed`
+ * for exactly those PRs with its item open; `clear` when none is closed any
+ * more but the Blocker is still `pr_closed` (reopened on GitHub).
+ */
+export function prClosedBlockerStep(tx: Tx | FactoryDb, jobId: string): PrClosedStep {
+  const state = readJobState(tx, jobId);
+  const holder = latestStageRun(state, 'merge_approval');
+  if (holder?.state !== 'waiting_human') return { kind: 'none' };
+  const current = blockerOf(holder);
+  if (
+    current?.reason !== 'pr_closed' &&
+    current?.reason !== 'ci_failed' &&
+    current?.reason !== 'awaiting_merge'
+  ) {
+    return { kind: 'none' };
+  }
+  const closed = closedPullRequestsOfJob(tx, jobId);
+  if (closed.length === 0) {
+    return current.reason === 'pr_closed' ? { kind: 'clear', holder, state } : { kind: 'none' };
+  }
+  const same =
+    current.reason === 'pr_closed' &&
+    current.detail === prClosedDetail(closed) &&
+    openBlockerItemsOf(tx, holder.id).length > 0;
+  return same ? { kind: 'none' } : { kind: 'raise', holder, closed };
+}
+
+/** `merge_approval` waits on the merge again (a `pr_closed` Blocker cleared). */
+function awaitMergeAgain(tx: Tx, holder: StageRunRow, state: JobState, actor: string): void {
+  const prs = pullRequestsOfJob(tx, holder.jobId).filter((pr) => pr.state === 'open');
+  const [first] = prs;
+  if (first === undefined) return;
+  replaceStageBlocker(
+    tx,
+    holder,
+    awaitingMergeBlocker(tx, prs, first, mergePolicyOf(state)),
+    actor,
+  );
+}
+
+/**
+ * Keeps `merge_approval`'s Blocker in step with the PRs' states (#64, Q16),
+ * in the poll's transaction ({@link prClosedBlockerStep}). A PR closed
+ * without merging raises the human Blocker `pr_closed` and opens its Blocker
+ * Approval (reopen the PR, cancel the Job), superseding a `ci_failed` one.
+ * Once polling sees it open again, the item is superseded (it closes
+ * itself) and `merge_approval` waits on the merge again. Nothing cancels the
+ * Job on its own.
+ */
+function syncPrClosedBlocker(tx: Tx, jobId: string, now: string): void {
+  const next = prClosedBlockerStep(tx, jobId);
+  if (next.kind === 'none') return;
+  if (next.kind === 'clear') {
+    supersedeHeldBlockerItems(tx, next.holder, POLLER, 'the pull request was reopened on GitHub');
+    awaitMergeAgain(tx, next.holder, next.state, POLLER);
+    return;
+  }
+  supersedeHeldBlockerItems(tx, next.holder, POLLER, 'the pull request was closed on GitHub');
+  const blocker = prClosedBlocker(tx, next.closed, now);
+  replaceStageBlocker(tx, next.holder, blocker, POLLER);
+  const task = tx.select().from(schema.tasks).where(eq(schema.tasks.id, blocker.taskId)).get();
+  if (task === undefined) throw new Error(`no Task ${blocker.taskId}`);
+  openBlockerItem(tx, { jobId, actor: POLLER }, task, blocker, { stageRunId: next.holder.id });
+}
+
+/**
+ * The closed PRs a `reopen_pr` decision acts on: refused (409) once
+ * `merge_approval` no longer waits on a closed PR held by this item.
+ */
+export function requireClosedPullRequests(
+  tx: Tx | FactoryDb,
+  state: JobState,
+  item: Pick<ApprovalRow, 'stageRunId'>,
+): [PullRequestRow, ...PullRequestRow[]] {
+  const run = state.stageRuns.find((r) => r.id === item.stageRunId);
+  if (
+    run?.stageId !== 'merge_approval' ||
+    run.state !== 'waiting_human' ||
+    blockerOf(run)?.reason !== 'pr_closed'
+  ) {
+    throw new ApiFailure(409, 'not_pr_closed', 'merge_approval no longer waits on a closed PR');
+  }
+  const [first, ...rest] = closedPullRequestsOfJob(tx, state.job.id);
+  if (first === undefined) {
+    throw new ApiFailure(409, 'pr_not_closed', 'no pull request of the Job is closed any more');
+  }
+  return [first, ...rest];
+}
+
+/**
+ * GitHub reopened the PRs (`reopen_pr`, Q16), inside the decision's
+ * transaction after the item was marked decided: each row is recorded open
+ * (`pull_request.reopened`; its version bumped, so a poll read before is
+ * dropped) and `merge_approval` waits on the merge again. The Merge Gate is
+ * evaluated again by the next poll.
+ */
+export function recordReopened(
+  tx: Tx,
+  state: JobState,
+  reopened: readonly PullRequestRow[],
+  approvalId: string,
+  actor: string,
+): void {
+  for (const pr of reopened) {
+    const updated = tx
+      .update(schema.pullRequests)
+      .set({ state: 'open', version: sql`${schema.pullRequests.version} + 1` })
+      .where(and(eq(schema.pullRequests.id, pr.id), eq(schema.pullRequests.state, 'closed')))
+      .run();
+    if (updated.changes !== 1) continue; // A poll saw it open meanwhile.
+    appendEvent(tx, {
+      entityKind: 'pull_request',
+      entityId: pr.id,
+      jobId: pr.jobId,
+      type: 'pull_request.reopened',
+      actor,
+      payload: { approvalId, number: pr.number },
+    });
+  }
+  const holder = latestStageRun(state, 'merge_approval');
+  if (holder?.state === 'waiting_human' && blockerOf(holder)?.reason === 'pr_closed') {
+    awaitMergeAgain(tx, holder, state, actor);
+  }
 }
 
 // ---- ci_failed (#61) -------------------------------------------------------------------------

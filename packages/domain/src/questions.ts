@@ -11,11 +11,17 @@ import type { TaskResult } from './execution.js';
 import type { RuleIssue } from './proposals.js';
 import type { Blocker } from './rework.js';
 
-/** One question of an Inbox Question, as the agent asked it (redacted when stored). */
+/**
+ * One question of an Inbox Item: as the agent asked it (redacted when stored),
+ * or, on a `cleanup` item, as the factory asks it (ADR-0043).
+ */
 export const InboxQuestionSchema = z.object({
-  /** `q1`, `q2`, … in the Task Result's order; `scope` for a scope change request. */
+  /**
+   * `q1`, `q2`, … in the Task Result's order; `scope` for a scope change
+   * request; `worktrees`, `pull_request`, `remote_branch` on a cleanup item.
+   */
   id: z.string(),
-  source: z.enum(['question', 'scope_change_request']),
+  source: z.enum(['question', 'scope_change_request', 'cleanup']),
   text: z.string(),
   /** The agent's proposed answers; a human may also answer in free text. */
   options: z.array(z.string()),
@@ -23,8 +29,8 @@ export const InboxQuestionSchema = z.object({
   recommended: z.string().nullable(),
   /** A blocking question must be answered; a non-blocking one is optional. */
   blocking: z.boolean(),
-  /** Always `true`: the question and its options come from an agent. */
-  agentProposed: z.literal(true),
+  /** `true` when an agent asked it (every `question` item's); `false` for the factory's own (cleanup). */
+  agentProposed: z.boolean(),
   /** For a scope change request: the paths the agent asked for (never granted). */
   paths: z.array(z.string()),
 });

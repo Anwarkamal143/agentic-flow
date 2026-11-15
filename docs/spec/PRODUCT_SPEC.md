@@ -150,7 +150,7 @@ Merge policies per repo: `never_auto` (default), `human_approval`, `auto_if_low_
 - `never_auto`: the factory never merges. A human merges on GitHub, and polling detects it.
 - `human_approval`: the factory merges after an Inbox Approval.
 
-While it waits on either, the Job is `waiting_human` with a human-kind Blocker. A PR closed without merging opens an Inbox Question and never auto-cancels the Job.
+While it waits on either, the Job is `waiting_human` with a human-kind Blocker. A PR closed without merging never auto-cancels the Job: it opens an Inbox Approval (the human Blocker `pr_closed`) that offers to reopen the PR or cancel the Job. The item closes itself when polling sees the PR reopened on GitHub. If GitHub refuses the reopen, the item says so and still offers cancelling the Job.
 
 The merge gate requires all of these: the correct repo, base and head; the reviewed SHA equals the PR head; required CI checks are green; there are no blocking review findings or unresolved "changes requested" reviews; there are no conflicts; branch protection is satisfied; and an approval, if policy requires one.
 
@@ -187,7 +187,7 @@ Agent analytics never rank agents on raw counts. They show sample size and mark 
 
 Cancelling a job: stop the running attempts (graceful, then forced), release the leases, set the worktrees to `preserved`, and mark open approvals `cancelled`. **Then ask the human** about each external side effect: close the PRs? delete the remote branches? Never delete local unreviewed work automatically.
 
-In Phase B (no PRs yet) this is one cleanup approval per Job, created after the steps above: "discard the N preserved worktrees?", default keep. Discard happens only on that explicit decision, and task branches are always kept. Phase C adds the PR and remote-branch questions to the same item, so it asks three separate questions, each defaulting to keep: discard the preserved worktrees? close the PR? delete the remote branch? A PR kept or closed gets a marked comment, polling stops either way, and the remote branch is deleted only on an explicit yes.
+This is one cleanup item per Job, created after the steps above. It asks three separate questions, each defaulting to keep: discard the preserved worktrees? close the PR? delete the remote branch? It asks only those that apply (without a PR, only the worktree question), and a question left unanswered keeps. Each change happens only on an explicit answer: a discard removes the worktree directories (leftovers are first kept as a WIP commit on the task branch), and the remote branch is deleted only on an explicit yes (not while the PR is kept open, since deleting it would close the PR). Task branches are always kept locally. Polling stops at the cancel, and each PR, kept open or closed, gets a marked comment saying the factory stopped tracking it.
 
 ## 13. Onboarding [v1; MVP = `factory init` + `factory doctor`]
 

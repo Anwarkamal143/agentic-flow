@@ -1,6 +1,6 @@
 # Cancel cleanup: one `cleanup` Inbox Item, then a discard from the decision
 
-**Status:** accepted (#48, Phase B, ROADMAP exit test B7). Routine and reversible choices inside PRODUCT_SPEC §12, ARCHITECTURE §10 and the Phase B grilling (Q8). Builds on ADR-0012 (cancel in two steps, group SIGTERM then SIGKILL), ADR-0016 (Inbox Items) and ADR-0020 (capacity tokens).
+**Status:** accepted (#48, Phase B, ROADMAP exit test B7). **Extended by ADR-0043 (#64):** the item now asks separate questions (`worktrees`, `pull_request`, `remote_branch`, each defaulting to keep) and is answered through `/answer`, not decided `keep | discard`; an item opened before that is still decided as below. Routine and reversible choices inside PRODUCT_SPEC §12, ARCHITECTURE §10 and the Phase B grilling (Q8). Builds on ADR-0012 (cancel in two steps, group SIGTERM then SIGKILL), ADR-0016 (Inbox Items) and ADR-0020 (capacity tokens).
 
 ## Order
 

@@ -125,6 +125,12 @@ export const BlockerReasonSchema = z.enum([
    * rewrite of a published Integration Branch needs a human's Approval.
    */
   'foreign_push_rewrite',
+  /**
+   * The PR was closed on GitHub without merging (#64, Q16): `merge_approval`
+   * waits for a human to reopen it or cancel the Job; nothing cancels on its
+   * own. Cleared when polling sees the PR open again.
+   */
+  'pr_closed',
 ]);
 
 /**

@@ -132,7 +132,9 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
           {EXPIRY[item.expiresPolicy]} Version {item.version}.
         </p>
         {item.state === 'open' ? (
-          item.kind === 'question' ? (
+          item.kind === 'cleanup' && item.questions !== null ? (
+            <CleanupForm item={item} returnTo={context.returnTo} />
+          ) : item.kind === 'question' ? (
             <AnswerForm item={item} returnTo={context.returnTo} />
           ) : (
             <ItemActions item={item} returnTo={context.returnTo} />
@@ -152,16 +154,26 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
   );
 }
 
-/** A `question` item's questions, each labelled as the agent's, with the answers once given. */
+/**
+ * An item's questions with the answers once given: a `question` item's,
+ * labelled as the agent's, or a `cleanup` item's, the factory's own.
+ */
 function Questions({ item }: { item: Approval }) {
   const answers = item.decision?.answers ?? [];
+  const byAgent = (item.questions ?? []).some((q) => q.agentProposed);
   return (
     <div className="text-sm">
       <p className="text-xs text-muted-foreground">
         Questions{' '}
-        <Badge variant="warning" className="ml-1">
-          proposed by an agent
-        </Badge>
+        {byAgent ? (
+          <Badge variant="warning" className="ml-1">
+            proposed by an agent
+          </Badge>
+        ) : (
+          <Badge variant="secondary" className="ml-1">
+            asked by the factory; unanswered keeps
+          </Badge>
+        )}
       </p>
       <ol className="space-y-2" data-testid="questions">
         {(item.questions ?? []).map((q) => {
@@ -186,14 +198,19 @@ function Questions({ item }: { item: Approval }) {
               {q.options.length > 0 && (
                 <span className="block text-muted-foreground">
                   Options: {q.options.join(' · ')}
-                  {q.recommended !== null && ` (recommended by the agent: ${q.recommended})`}
+                  {q.recommended !== null &&
+                    (q.agentProposed
+                      ? ` (recommended by the agent: ${q.recommended})`
+                      : ` (default: ${q.recommended})`)}
                 </span>
               )}
               {item.decision !== null && (
                 <span className="block">
                   Answer:{' '}
                   {a === undefined
-                    ? 'not answered'
+                    ? q.agentProposed
+                      ? 'not answered'
+                      : `not answered (${q.recommended ?? 'keep'})`
                     : a.option !== undefined
                       ? `option ${a.option}`
                       : a.text}
@@ -267,6 +284,62 @@ function AnswerForm({ item, returnTo }: { item: Approval; returnTo: string }) {
         </p>
         <button type="submit" className={`${button} bg-primary text-primary-foreground`}>
           Send answers
+        </button>
+      </form>
+      <form method="post" action={`/api/inbox/${item.id}/${item.deferred ? 'undefer' : 'defer'}`}>
+        <input type="hidden" name="expectedVersion" value={version} />
+        <input type="hidden" name="return" value={returnTo} />
+        <button type="submit" className={button}>
+          {item.deferred ? 'Undefer' : 'Defer'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+/**
+ * A `cleanup` item's form (ADR-0043): per question, its options only (no free
+ * text), the default (keep) checked, then one submit (`answer`). A question
+ * left at keep is sent unanswered, so only an explicit choice does anything.
+ */
+function CleanupForm({ item, returnTo }: { item: Approval; returnTo: string }) {
+  const version = String(item.version);
+  return (
+    <div className="flex flex-wrap items-end gap-4 border-t pt-4">
+      <form
+        method="post"
+        action={`/api/inbox/${item.id}/answer`}
+        className="w-full space-y-4"
+        data-testid="cleanup-form"
+      >
+        <input type="hidden" name="expectedVersion" value={version} />
+        <input type="hidden" name="subjectRef" value={item.subjectRef} />
+        <input type="hidden" name="return" value={returnTo} />
+        {(item.questions ?? []).map((q) => (
+          <fieldset key={q.id} className="space-y-1 text-sm">
+            <legend className="font-medium">{q.text}</legend>
+            {q.options.map((o) => (
+              <label key={o} className="mr-4 inline-flex items-center gap-1">
+                <input
+                  type="radio"
+                  name={`choice.${q.id}`}
+                  value={o === q.recommended ? '' : o}
+                  defaultChecked={o === q.recommended}
+                />
+                {o}
+                {q.recommended === o && (
+                  <span className="text-xs text-muted-foreground">(default)</span>
+                )}
+              </label>
+            ))}
+          </fieldset>
+        ))}
+        <p className="text-xs text-muted-foreground">
+          Nothing is removed, closed or deleted unless you choose it. Task Branches are always kept
+          in the Factory Clone, and each PR gets a comment saying the factory stopped tracking it.
+        </p>
+        <button type="submit" className={`${button} bg-primary text-primary-foreground`}>
+          Clean up
         </button>
       </form>
       <form method="post" action={`/api/inbox/${item.id}/${item.deferred ? 'undefer' : 'defer'}`}>

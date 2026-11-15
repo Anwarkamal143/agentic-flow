@@ -17,8 +17,11 @@ export const dynamic = 'force-dynamic';
 
 const ID = /^[A-Za-z0-9_-]{1,100}$/;
 const ACTIONS: readonly InboxAction[] = ['decide', 'answer', 'defer', 'undefer'];
-/** A question id (`q1`…, `scope`) in an answer form's field names. */
-const QUESTION_ID = /^(?:q\d{1,3}|scope)$/;
+/**
+ * A question id in an answer form's field names: a Question's (`q1`…,
+ * `scope`) or a cleanup item's (`worktrees`, `pull_request`, `remote_branch`).
+ */
+const QUESTION_ID = /^(?:q\d{1,3}|scope|worktrees|pull_request|remote_branch)$/;
 /** The radio value that means "my own answer, in the text box". */
 const OWN_ANSWER = '__text';
 /** Where a change may send the browser back to: the Inbox or one of its items. */

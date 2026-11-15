@@ -106,6 +106,14 @@ const ADOPT_REWRITE: ApprovalOption = {
   agentProposed: false,
 };
 
+const REOPEN_PR: ApprovalOption = {
+  id: 'reopen_pr',
+  label: 'Reopen the PR',
+  description:
+    'Ask GitHub to reopen the pull request; the Merge Gate is evaluated again at the next poll. If GitHub refuses, the item says why and stays open, and cancelling the Job remains. Reopening it on GitHub yourself closes this item too.',
+  agentProposed: false,
+};
+
 /** The Blocker reasons that open a Blocker Approval, with their options (§8.1). */
 const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   rework_cap_reached: [GRANT, REPLAN, CANCEL_JOB],
@@ -120,6 +128,8 @@ const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   foreign_push_out_of_scope: [REWORK_OVER_FOREIGN, CANCEL_JOB],
   // No "restore our head": that would overwrite the foreign push.
   foreign_push_rewrite: [ADOPT_REWRITE, CANCEL_JOB],
+  // Never cancelled on its own (Q16): a human reopens it or cancels.
+  pr_closed: [REOPEN_PR, CANCEL_JOB],
 };
 
 /**
@@ -154,6 +164,7 @@ const INTEGRATION_TITLES: Partial<Record<BlockerReason, string>> = {
   ci_failed: "can't be merged: a required check failed",
   foreign_push_out_of_scope: 'has a foreign push outside the writable scope',
   foreign_push_rewrite: 'was rewritten by a foreign push that drops approved commits',
+  pr_closed: "can't be merged: its pull request was closed without merging",
 };
 
 /** The line a Blocker Approval shows in a list. */

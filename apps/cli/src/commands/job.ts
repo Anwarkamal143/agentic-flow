@@ -201,19 +201,40 @@ export async function jobReplan(id: string, opts: { feedback: string }): Promise
 
 /**
  * The Job's `cleanup` Inbox Item, opened once the cancel stopped everything
- * (ADR-0027): its id and how to decide it, or why there is none.
+ * (ADR-0027, ADR-0043): its id, each question it asks, and how to answer it,
+ * or why there is none.
  */
 async function writeCleanupItem(api: RuntimeClient, jobId: string): Promise<void> {
   const items = await api.json<Approval[]>('GET', '/v1/inbox?all=true');
   const item = items.find((i) => i.jobId === jobId && i.kind === 'cleanup');
   if (item === undefined) {
-    process.stdout.write('No cleanup Approval: the cancel left no preserved Worktree.\n');
+    process.stdout.write(
+      'No cleanup Approval: the cancel left no preserved Worktree, open PR or remote branch.\n',
+    );
+    return;
+  }
+  const questions = item.questions ?? [];
+  if (questions.length === 0) {
+    // An item opened before its questions (ADR-0027) is decided keep | discard.
+    process.stdout.write(
+      [
+        `Cleanup Approval ${item.id}: ${item.question} (default: ${item.recommended ?? 'keep'}; Task Branches are always kept)`,
+        `  decide: factory inbox decide ${item.id} keep|discard --expect-version ${String(item.version)}`,
+        '',
+      ].join('\n'),
+    );
     return;
   }
   process.stdout.write(
     [
-      `Cleanup Approval ${item.id}: ${item.question} (default: ${item.recommended ?? 'keep'}; Task Branches are always kept)`,
-      `  decide: factory inbox decide ${item.id} keep|discard --expect-version ${String(item.version)}`,
+      `Cleanup Approval ${item.id}: ${item.question}`,
+      ...questions.map(
+        (q) => `  ${q.id}: ${q.text} (${q.options.join('|')}; default: ${q.recommended ?? 'keep'})`,
+      ),
+      '  Task Branches are always kept; a question you leave unanswered keeps.',
+      `  answer: factory inbox answer ${item.id} ${questions
+        .map((q) => `--answer ${q.id}=${q.options.find((o) => o !== q.recommended) ?? ''}`)
+        .join(' ')} --expect-version ${String(item.version)}`,
       '',
     ].join('\n'),
   );
