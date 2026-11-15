@@ -4,7 +4,7 @@
 
 ## Merge, never rebase
 
-When the default branch moves under the Integration Branch, the factory merges it in: one two-parent commit with parents (the approved integration head, the new base), made with `merge-tree --write-tree` and `commit-tree` in the Factory Clone, as the integration merge is (ADR-0034). It never rebases. A rebase would rewrite commits the PR has already published, so the update would need a force-push. Every head the factory pushes descends from the one before, so the PR is updated with a fast-forward (ADR-0039) and nobody's checkout breaks. The cost is a merge commit in the history per move. That is GitHub's own "Update branch" behaviour, and a squash merge of the PR removes it. Rewriting a published Integration Branch stays behind the `integration_rewrite` Blocker Approval (ARCHITECTURE §8.1), which is not built here.
+When the default branch moves under the Integration Branch, the factory merges it in: one two-parent commit with parents (the approved integration head, the new base), made with `merge-tree --write-tree` and `commit-tree` in the Factory Clone, as the integration merge is (ADR-0034). It never rebases. A rebase would rewrite commits the PR has already published, so the update would need a force-push. Every head the factory pushes descends from the one before, so the PR is updated with a fast-forward (ADR-0039) and nobody's checkout breaks. The cost is a merge commit in the history per move. That is GitHub's own "Update branch" behaviour, and a squash merge of the PR removes it. Rewriting a published Integration Branch stays behind the `integration_rewrite` Blocker Approval (ARCHITECTURE §8.1, ADR-0044).
 
 When the new base is already in the head, nothing is merged (`mergedIn: false` on `attempt.started`) and the head stays as it is. Verification still re-runs, because the `(head, base)` pair changed.
 
@@ -33,7 +33,7 @@ No Harness runs. Under the clone lock the default branch is fetched and merged i
 - It does not count toward `maxAttempts`, because the base moving is not a verdict on the work. If its verification fails, it is routed like any Attempt, for example to a developer Rework on the Integration Branch.
 - If it is interrupted, it is verified again in place as a new `base_merge` Attempt, never handed to a Harness. The same applies if the runtime crashed between the merge and the Attempt's row: the flag is still set, so the merge is redone from the approved head.
 
-A conflict is the human Blocker `base_merge_conflict` on the Task (subject the Task, no Attempt, ADR-0034), with `replan` and `cancel_job`. A Replan rebuilds the Integration Branch, and that new branch is not a descendant of the published one, so pushing it to the open PR is refused. That route needs `integration_rewrite`, which is later.
+A conflict is the human Blocker `base_merge_conflict` on the Task (subject the Task, no Attempt, ADR-0034), with `replan` and `cancel_job`. A Replan rebuilds the Integration Branch, and that new branch is not a descendant of the published one, so it waits on the `integration_rewrite` Blocker Approval (#65, ADR-0044).
 
 ## Re-anchor or re-run the Review (Q12)
 

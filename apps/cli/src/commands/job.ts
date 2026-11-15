@@ -435,6 +435,11 @@ function writePullRequests(pullRequests: PullRequestRecord[]): void {
       `    ${pr.headBranch} → ${pr.baseBranch}, head ${pr.headSha.slice(0, 12)} (pushed ${pr.pushedSha.slice(0, 12)})` +
         (pr.adopted ? ', adopted on recovery' : ''),
     );
+    if (pr.replacedByNumber !== null) {
+      lines.push(
+        `    closed by the factory and replaced by #${String(pr.replacedByNumber)} (a new PR for the rebuilt Integration Branch)`,
+      );
+    }
     if (pr.mergeSha !== null) lines.push(`    merged on GitHub as ${pr.mergeSha}`);
     lines.push(`    last polled ${pr.lastPolledAt ?? 'never (not polled yet)'}`);
     if (pr.gate !== null) {

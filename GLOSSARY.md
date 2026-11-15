@@ -175,7 +175,7 @@ The branch a single Task's work is committed to, inside its Worktree.
 _Avoid_: Feature branch, work branch
 
 **Integration Branch**:
-The per-Job, per-Repository branch where a Job's approved Task Branches are combined before delivery. It is the Integration Task's branch and the head of the Job's pull request. When the base branch moves, the base is merged into it. Once it is a pull request's head it is rewritten only with a human's Approval.
+The per-Job, per-Repository branch where a Job's approved Task Branches are combined before delivery. It is the Integration Task's branch and the head of the Job's pull request. When the base branch moves, the base is merged into it. Once it is a pull request's head it is rewritten only with a human's Approval: a force-push with a lease, or a new pull request on a new branch (`factory/<job-id>/integration-2`, and so on), the old pull request closed and replaced.
 _Avoid_: Job branch, release branch
 
 **Integration Task**:

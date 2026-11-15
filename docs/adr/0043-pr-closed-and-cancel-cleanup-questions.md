@@ -61,4 +61,4 @@ Each step is idempotent by its row or its event, so a crash resumes where it sto
 - GitHub's refusal is reported with its top-level `message` ("Validation Failed"). The `errors[].message` detail (for example "state cannot be changed") is not read.
 - While the PR is closed its `merge` item stays open next to the `pr_closed` item, offering what it offered before.
 - A refused cleanup step waits for the next runtime start. The worker records why, but the item shows nothing of it (the events do).
-- Once `integration_rewrite`'s `new_pr` exists, an old closed PR of the same Job will need to stop counting as closed (it would raise `pr_closed`). That route is not built yet.
+- ~~Once `integration_rewrite`'s `new_pr` exists, an old closed PR of the same Job will need to stop counting as closed.~~ Done in #65 (ADR-0044): a replaced PR (`replaced_by_id`) is left out of `pr_closed`, `ci_failed`, the Merge Gate and polling.

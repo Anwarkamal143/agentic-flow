@@ -38,7 +38,7 @@ So the `foreign_push` Attempt's setup, under the clone lock, checks out nothing 
 - **Adopt the rewrite** (`adopt_rewrite`). `approveForeignRewrite` sets `tasks.foreign_rewrite_approved_sha` to the named rewrite, writes an `integration_rewrite.adopted` audit row with its `audit.recorded` event, and readies the Task. The next `foreign_push` Attempt adopts a fetched head that holds that rewrite (a push on top of it is adopted too; another rewrite is blocked again). It records the dropped approved commits (`authoredCommitsBetween`, `rewrite..approved`) in `attempts.dropped_commits_json`, then verifies and reviews like any foreign push. The approval is cleared when the Attempt is recorded (migration 0024).
 - **Cancel the Job.**
 
-There is no "restore our head" option: it would overwrite the foreign push. The `integration_rewrite` Blocker of ARCHITECTURE §8.1, the factory's own rewrite of a published branch, is not this one and is still not built.
+There is no "restore our head" option: it would overwrite the foreign push. The `integration_rewrite` Blocker of ARCHITECTURE §8.1, the factory's own rewrite of a published branch, is not this one (ADR-0044).
 
 ## Out of scope: the `foreign_push_out_of_scope` Blocker
 

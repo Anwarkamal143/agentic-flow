@@ -22,9 +22,14 @@ export type TaskKind = z.infer<typeof TaskKindSchema>;
 /** The Integration Task's key. Unique per (Plan, Repository); a Plan Task may share it (its kind differs). */
 export const INTEGRATION_TASK_KEY = 'integration';
 
-/** The Integration Branch of a Job (ARCHITECTURE §14; `factory/<job-id>` would clash with its Task Branches). */
-export function integrationBranch(jobId: string): string {
-  return `factory/${jobId}/integration`;
+/**
+ * The Integration Branch of a Job (ARCHITECTURE §14; `factory/<job-id>` would
+ * clash with its Task Branches). `n` > 1 names the branch a new PR is opened
+ * on after a human chose `new_pr` on an `integration_rewrite` Blocker (#65):
+ * `factory/<job-id>/integration-2`, and so on.
+ */
+export function integrationBranch(jobId: string, n = 1): string {
+  return n <= 1 ? `factory/${jobId}/integration` : `factory/${jobId}/integration-${String(n)}`;
 }
 
 /** A Stage a Task's Attempts run in. */

@@ -627,6 +627,12 @@ export const pullRequests = sqliteTable(
     gateEvaluatedAt: text('gate_evaluated_at'),
     /** SHA-256 of the body the factory last sent; it is PATCHed when the rendering differs. */
     bodySha256: text('body_sha256'),
+    /**
+     * The PR opened in its place (`new_pr` on an `integration_rewrite` Blocker,
+     * #65): this one was closed by the factory, so it no longer counts as the
+     * Job's PR (no `pr_closed`, no polling, no Merge Gate). Null while current.
+     */
+    replacedById: text('replaced_by_id'),
     version: integer('version').notNull(),
   },
   (t) => [

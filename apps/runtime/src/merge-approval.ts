@@ -44,7 +44,7 @@ import {
   type ObservedCheck,
   type PullRequestState,
 } from '@factory/domain';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { readJobState, type JobState, type StageRunStepper } from './engine.js';
 import { openBlockerItem } from './blocker-approvals.js';
@@ -84,13 +84,45 @@ function approvedAttemptOf(tx: Tx | FactoryDb, taskId: string) {
   return { ...attempt, headSha: attempt.headSha };
 }
 
+/** The Job's current PRs: a PR the factory closed and replaced (`new_pr`, #65) is not one of them. */
 function pullRequestsOfJob(tx: Tx | FactoryDb, jobId: string): PullRequestRow[] {
   return tx
     .select()
     .from(schema.pullRequests)
-    .where(eq(schema.pullRequests.jobId, jobId))
+    .where(and(eq(schema.pullRequests.jobId, jobId), isNull(schema.pullRequests.replacedById)))
     .orderBy(asc(sql`"pull_requests"."rowid"`))
     .all();
+}
+
+/**
+ * The branch the factory publishes `pr`'s Integration Branch on: the first,
+ * then one more for each PR of the Job and Repository it closed and replaced
+ * (`new_pr`, #65).
+ */
+export function publishedBranchOf(
+  tx: Tx | FactoryDb,
+  pr: Pick<PullRequestRow, 'jobId' | 'repositoryId'>,
+): string {
+  return integrationBranch(pr.jobId, publishedBranchNumber(tx, pr));
+}
+
+/** The `n` of {@link publishedBranchOf}'s `factory/<job-id>/integration-<n>` (1 for the first). */
+export function publishedBranchNumber(
+  tx: Tx | FactoryDb,
+  pr: Pick<PullRequestRow, 'jobId' | 'repositoryId'>,
+): number {
+  const replaced = tx
+    .select({ id: schema.pullRequests.id })
+    .from(schema.pullRequests)
+    .where(
+      and(
+        eq(schema.pullRequests.jobId, pr.jobId),
+        eq(schema.pullRequests.repositoryId, pr.repositoryId),
+        isNotNull(schema.pullRequests.replacedById),
+      ),
+    )
+    .all().length;
+  return replaced + 1;
 }
 
 export const label = (pr: Pick<PullRequestRow, 'owner' | 'name' | 'number'>) =>
@@ -367,7 +399,12 @@ export function trackedPullRequests(db: FactoryDb): PullRequestRow[] {
         eq(schema.stageRuns.state, 'waiting_human'),
       ),
     )
-    .where(inArray(schema.pullRequests.state, ['open', 'closed']))
+    .where(
+      and(
+        inArray(schema.pullRequests.state, ['open', 'closed']),
+        isNull(schema.pullRequests.replacedById),
+      ),
+    )
     .orderBy(asc(sql`"pull_requests"."rowid"`))
     .all()
     .map((r) => r.pr);
@@ -461,7 +498,7 @@ export function gateOf(
       owner: repo.githubOwner ?? '',
       name: repo.githubName ?? '',
       baseBranch: repo.defaultBranch,
-      headBranch: integrationBranch(pr.jobId),
+      headBranch: publishedBranchOf(tx, pr),
     },
     reviewedHeadSha: attempt.headSha,
     checks,
