@@ -40,8 +40,10 @@ import {
   type StageRun,
   type Task,
   type WorkflowSnapshot,
+  type PullRequestRecord,
 } from '@factory/domain';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { pullRequestsOf } from './pull-request.js';
 import { changeJob, changeJobIn, readJobState, stepTask, type JobState } from './engine.js';
 import { ApiFailure } from './errors.js';
 import { attemptFindings } from './findings.js';
@@ -444,6 +446,12 @@ export class JobService {
         createdAt: r.createdAt,
       } satisfies Record<keyof Review, unknown>),
     );
+  }
+
+  /** The Job's pull requests, as the runtime recorded them (ADR-0036). */
+  pullRequests(jobId: string): PullRequestRecord[] {
+    this.get(jobId); // 404 for an unknown Job
+    return pullRequestsOf(this.db, jobId);
   }
 
   worktrees(jobId: string): Worktree[] {

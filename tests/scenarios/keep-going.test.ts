@@ -234,17 +234,18 @@ describe(
       // Nothing to integrate or review: both are skipped, never left pending (ADR-0035).
       expect(
         job.stageRuns
-          .filter((s) => ['integration', 'integration_review'].includes(s.stageId))
+          .filter((s) => ['integration', 'integration_review', 'pull_request'].includes(s.stageId))
           .map((s) => [s.stageId, s.state]),
       ).toEqual([
         ['integration', 'skipped'],
         ['integration_review', 'skipped'],
+        ['pull_request', 'skipped'],
       ]);
       expect(job.stageRuns.find((s) => s.stageId === 'closure')?.state).toBe('succeeded');
 
       // The Delivery Report v3: says plainly that the Job failed, lists every Task, offers D only.
       const report = await reportOf(rt, job.id);
-      expect(report.reportVersion).toBe(4);
+      expect(report.reportVersion).toBe(5);
       expect(report.outcome).toBe('failed');
       expect(report.statement).toMatch(/The Job failed/);
       expect(report.statement).toMatch(/partial results/);

@@ -113,6 +113,15 @@ export type PlanTaskProposal = z.infer<typeof PlanTaskProposalSchema>;
 
 export const PlanProposalSchema = z.object({
   tasks: z.array(PlanTaskProposalSchema).min(1).max(50),
+  /**
+   * How to roll the change back, if the Plan supports one. The PR body shows
+   * it; without it the PR says "None supported." and never invents one (ADR-0036).
+   */
+  rollback: text
+    .optional()
+    .describe(
+      'How to roll this change back, only if the Plan supports a rollback; omit otherwise.',
+    ),
 });
 export type PlanProposal = z.infer<typeof PlanProposalSchema>;
 

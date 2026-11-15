@@ -47,6 +47,7 @@ export const FEATURE_STAGES = [
   'execution',
   'integration',
   'integration_review',
+  'pull_request',
   'closure',
 ];
 

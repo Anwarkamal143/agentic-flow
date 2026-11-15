@@ -6,6 +6,7 @@ import type {
   Evidence,
   Finding,
   Job,
+  PullRequestRecord,
   Review,
   Task,
 } from '@factory/domain';
@@ -135,6 +136,64 @@ export function StageRuns({ job }: { job: Job }) {
                     </span>
                   )}
                   {run.blocker !== null && <BlockerNote blocker={run.blocker} />}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * The Job's pull requests (ADR-0036), from the rows the runtime recorded:
+ * never read live from GitHub on page load. Shown only once one exists.
+ */
+export function PullRequests({ pullRequests }: { pullRequests: PullRequestRecord[] }) {
+  if (pullRequests.length === 0) return null;
+  return (
+    <Card data-testid="pull-requests">
+      <CardHeader>
+        <CardTitle>Pull requests</CardTitle>
+        <CardDescription>As recorded by the factory; not read live from GitHub.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Pull request</TableHead>
+              <TableHead>State</TableHead>
+              <TableHead>Branches</TableHead>
+              <TableHead>Head</TableHead>
+              <TableHead>Last polled</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {pullRequests.map((pr) => (
+              <TableRow key={pr.id} data-testid={`pull-request-${String(pr.number)}`}>
+                <TableCell>
+                  <a
+                    className="underline underline-offset-2"
+                    href={pr.url}
+                    rel="noopener noreferrer"
+                    target="_blank"
+                  >
+                    {`${pr.owner}/${pr.name}#${String(pr.number)}`}
+                  </a>
+                  {pr.adopted ? (
+                    <span className="ml-2 text-xs text-muted-foreground">adopted on recovery</span>
+                  ) : null}
+                </TableCell>
+                <TableCell>
+                  <State value={pr.state} />
+                </TableCell>
+                <TableCell className="font-mono text-xs">
+                  {pr.headBranch} → {pr.baseBranch}
+                </TableCell>
+                <TableCell className="font-mono text-xs">{shortSha(pr.headSha)}</TableCell>
+                <TableCell>
+                  {pr.lastPolledAt === null ? 'not polled yet' : formatTime(pr.lastPolledAt)}
                 </TableCell>
               </TableRow>
             ))}

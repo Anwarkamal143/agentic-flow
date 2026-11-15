@@ -183,6 +183,7 @@ describe('Plan Edit', () => {
       ['execution', 'pending'],
       ['integration', 'pending'],
       ['integration_review', 'pending'],
+      ['pull_request', 'pending'],
       ['closure', 'pending'],
     ]);
 
@@ -272,6 +273,7 @@ describe('request changes', () => {
       ['execution', 'pending'],
       ['integration', 'pending'],
       ['integration_review', 'pending'],
+      ['pull_request', 'pending'],
       ['closure', 'pending'],
     ]);
 

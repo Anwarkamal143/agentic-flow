@@ -10,6 +10,7 @@ import type {
   Job,
   RequestReplanInput,
   JobSummary,
+  PullRequestRecord,
   Repository,
   Review,
   Task,
@@ -96,17 +97,20 @@ export async function jobShow(id: string, opts: { json: boolean }): Promise<numb
     return 0;
   }
   const path = `/v1/jobs/${encodeURIComponent(id)}`;
-  const [criteria, tasks, attempts, worktrees, artifacts, reviews] = await Promise.all([
-    api.json<AcceptanceCriterion[]>('GET', `${path}/acceptance-criteria`),
-    api.json<Task[]>('GET', `${path}/tasks`),
-    api.json<Attempt[]>('GET', `${path}/attempts`),
-    api.json<Worktree[]>('GET', `${path}/worktrees`),
-    api.json<Artifact[]>('GET', `${path}/artifacts`),
-    api.json<Review[]>('GET', `${path}/reviews`),
-  ]);
+  const [criteria, tasks, attempts, worktrees, artifacts, reviews, pullRequests] =
+    await Promise.all([
+      api.json<AcceptanceCriterion[]>('GET', `${path}/acceptance-criteria`),
+      api.json<Task[]>('GET', `${path}/tasks`),
+      api.json<Attempt[]>('GET', `${path}/attempts`),
+      api.json<Worktree[]>('GET', `${path}/worktrees`),
+      api.json<Artifact[]>('GET', `${path}/artifacts`),
+      api.json<Review[]>('GET', `${path}/reviews`),
+      api.json<PullRequestRecord[]>('GET', `${path}/pull-requests`),
+    ]);
   writeJob(job);
   writePlan(criteria, tasks);
   writeAttempts(tasks, attempts, worktrees, reviews);
+  writePullRequests(pullRequests);
   const report = artifacts.find((a) => a.kind === 'report');
   if (report !== undefined) {
     writeDelivery(
@@ -366,6 +370,21 @@ function writeAttempts(
   process.stdout.write(lines.join('\n') + '\n');
 }
 
+/** The Job's pull requests, as the runtime recorded them (never read live from GitHub). */
+function writePullRequests(pullRequests: PullRequestRecord[]): void {
+  if (pullRequests.length === 0) return;
+  const lines = ['Pull requests (as recorded by the factory):'];
+  for (const pr of pullRequests) {
+    lines.push(
+      `  ${pr.owner}/${pr.name}#${String(pr.number)}  ${pr.state.padEnd(7)} ${pr.url}`,
+      `    ${pr.headBranch} → ${pr.baseBranch}, head ${pr.headSha.slice(0, 12)} (pushed ${pr.pushedSha.slice(0, 12)})` +
+        (pr.adopted ? ', adopted on recovery' : ''),
+      `    last polled: ${pr.lastPolledAt ?? 'never (not polled yet)'}`,
+    );
+  }
+  process.stdout.write(lines.join('\n') + '\n');
+}
+
 function writeDelivery(report: DeliveryReport): void {
   const version: number = report.reportVersion;
   if (version < 3) {
@@ -376,7 +395,9 @@ function writeDelivery(report: DeliveryReport): void {
     return;
   }
   const lines = [
-    'Delivery (local branches in the Factory Clone):',
+    version >= 5 && report.pullRequests.length > 0
+      ? 'Delivery (a pull request on GitHub; the branches are also in the Factory Clone):'
+      : 'Delivery (local branches in the Factory Clone):',
     `  ${report.statement}`,
     `  clone: ${report.repository.clonePath}`,
   ];
@@ -408,6 +429,15 @@ function writeDelivery(report: DeliveryReport): void {
     if (integration.fetchCommand !== null) {
       lines.push(`    fetch from your checkout: ${integration.fetchCommand}`);
     }
+  }
+  for (const pr of version >= 5 ? report.pullRequests : []) {
+    lines.push(
+      `  Pull request ${pr.repository}#${String(pr.number)}: ${pr.state}, ${pr.url}` +
+        ` (${pr.headBranch} at ${pr.headSha.slice(0, 12)} → ${pr.baseBranch})` +
+        (pr.mergeSha === null
+          ? ', awaiting human merge'
+          : `, merged as ${pr.mergeSha.slice(0, 12)}`),
+    );
   }
   lines.push(...report.notes.map((n) => `  ${n}`));
   if (report.knownLimitations.length > 0) {

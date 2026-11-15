@@ -1,6 +1,12 @@
 import { notFound } from 'next/navigation';
 import { connection } from 'next/server';
-import { AcceptanceCriteria, JobOverview, StageRuns, Tasks } from '@/components/job-sections';
+import {
+  AcceptanceCriteria,
+  JobOverview,
+  PullRequests,
+  StageRuns,
+  Tasks,
+} from '@/components/job-sections';
 import { JobTimeline } from '@/components/live';
 import { PlanViewCard } from '@/components/plan-view';
 import { RuntimeUnavailableNotice } from '@/components/states';
@@ -28,12 +34,13 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
       return <RuntimeUnavailableNotice message={err.message} />;
     throw err;
   }
-  const { job, criteria, tasks, attempts, reviews, events } = detail;
+  const { job, criteria, tasks, attempts, reviews, pullRequests, events } = detail;
 
   return (
     <div className="space-y-6">
       <JobOverview job={job} />
       <StageRuns job={job} />
+      <PullRequests pullRequests={pullRequests} />
       <AcceptanceCriteria criteria={criteria} />
       {plan === null ? (
         <Card data-testid="plan" id="plan">

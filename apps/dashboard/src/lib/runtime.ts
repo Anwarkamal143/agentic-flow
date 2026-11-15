@@ -15,6 +15,7 @@ import {
   ApprovalSchema,
   ArtifactSchema,
   PlanViewSchema,
+  PullRequestRecordSchema,
   ProjectSchema,
   RepositorySchema,
   AttemptTailSchema,
@@ -36,6 +37,7 @@ import {
   type FactoryEvent,
   type Job,
   type JobSummary,
+  type PullRequestRecord,
   type Review,
   type Task,
 } from '@factory/domain';
@@ -124,6 +126,8 @@ export interface JobDetail {
   tasks: Task[];
   attempts: Attempt[];
   reviews: Review[];
+  /** The Job's pull requests, as the runtime recorded them (no live GitHub read). */
+  pullRequests: PullRequestRecord[];
   events: FactoryEvent[];
 }
 
@@ -131,14 +135,15 @@ export async function jobDetail(id: string): Promise<JobDetail> {
   const base = `/v1/jobs/${encodeURIComponent(id)}`;
   // The Job first: an unknown id is a 404 before anything else is asked.
   const job = await get(base, JobSchema);
-  const [criteria, tasks, attempts, reviews, events] = await Promise.all([
+  const [criteria, tasks, attempts, reviews, pullRequests, events] = await Promise.all([
     get(`${base}/acceptance-criteria`, z.array(AcceptanceCriterionSchema)),
     get(`${base}/tasks`, z.array(TaskSchema)),
     get(`${base}/attempts`, z.array(AttemptSchema)),
     get(`${base}/reviews`, z.array(ReviewSchema)),
+    get(`${base}/pull-requests`, z.array(PullRequestRecordSchema)),
     jobEvents(base),
   ]);
-  return { job, criteria, tasks, attempts, reviews, events };
+  return { job, criteria, tasks, attempts, reviews, pullRequests, events };
 }
 
 /**

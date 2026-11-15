@@ -187,7 +187,7 @@ An independent review of a Job's combined change against its whole Specification
 _Avoid_: Final review, job review
 
 **Delivery**:
-Putting a Job's result in front of its owner: as pull requests, or before pull requests exist, as the local Task Branch plus a Delivery Report. Delivery is not deployment.
+Putting a Job's result in front of its owner: as pull requests, or, for a Repository with no GitHub remote (or a Job created before pull requests existed), as local branches in the Factory Clone plus a Delivery Report. Delivery is not deployment.
 _Avoid_: Release, deployment, shipping
 
 **Delivery Report**:
