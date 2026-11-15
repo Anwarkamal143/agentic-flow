@@ -85,6 +85,7 @@ interface ReportBody {
     url: string;
     headSha: string;
     mergeSha: string | null;
+    ci: { status: string; reason: string } | null;
   }[];
 }
 
@@ -217,9 +218,11 @@ describe('the pull request', { timeout: 120_000 }, () => {
     const created = await createJob(rt, repo.id);
     const job = await waitForJob(rt, created.id, settled, 90_000);
 
-    expect(job.status, rt.output()).toBe('completed');
+    // Open, it waits for a human merge on GitHub (merge_approval, ADR-0037).
+    expect(job.status, rt.output()).toBe('waiting_human');
     expect(stagesOf(job, 'integration_review')).toEqual(['succeeded']);
     expect(stagesOf(job, 'pull_request')).toEqual(['succeeded']);
+    expect(stagesOf(job, 'merge_approval')).toEqual(['waiting_human']);
 
     // The head the Integration Review approved, on the integration (head, base).
     const tasks = await json<TaskBody[]>(rt.request(`/v1/jobs/${job.id}/tasks`));
@@ -285,23 +288,28 @@ describe('the pull request', { timeout: 120_000 }, () => {
     );
     expect(opened).toBeGreaterThan(approvedAt);
 
-    // The Delivery Report v5 carries it.
+    // Once a human merges it on GitHub, the Job completes; the Delivery Report v6 carries it.
+    const mergeSha = gh.mergePullRequest(FULL_NAME, row.number);
+    const completed = await waitForJob(rt, job.id, (j) => j.status === 'completed', 30_000);
+    expect(stagesOf(completed, 'merge')).toEqual(['succeeded']);
     const report = await reportOf(rt, job.id);
-    expect(report.reportVersion).toBe(5);
+    expect(report.reportVersion).toBe(6);
     expect(report.outcome).toBe('completed');
     expect(report.pullRequests).toEqual([
       {
         repository: FULL_NAME,
         number: row.number,
         url: row.url,
-        state: 'open',
+        state: 'merged',
         headBranch: branch,
         baseBranch: repo.defaultBranch,
         headSha: approval?.headSha,
-        mergeSha: null,
+        mergeSha,
         adopted: false,
+        ci: report.pullRequests[0]?.ci ?? null,
       },
     ]);
+    expect(report.pullRequests[0]?.ci).not.toBeNull();
     expect(report.statement).toContain(row.url);
     expect(report.notes.join('\n')).not.toMatch(/not atomic/);
     expect(report.knownLimitations).not.toContain(
@@ -314,14 +322,14 @@ describe('the pull request', { timeout: 120_000 }, () => {
     expect(shown.stdout).toContain('Pull requests (as recorded by the factory):');
     expect(shown.stdout).toMatch(
       new RegExp(
-        `acme/tiny-ts#${String(row.number)}\\s+open\\s+${row.url.replace(/[.?]/g, '\\$&')}`,
+        `acme/tiny-ts#${String(row.number)}\\s+merged\\s+${row.url.replace(/[.?]/g, '\\$&')}`,
       ),
     );
     expect(shown.stdout).toMatch(/pull_request\s+succeeded/);
     const dash = await startDashboard(rt.home);
     const html = await dash.html(`/jobs/${job.id}`);
     expect(html).toContain(`href="${row.url}"`);
-    expect(text(html)).toMatch(new RegExp(`acme/tiny-ts#${String(row.number)} open`));
+    expect(text(html)).toMatch(new RegExp(`acme/tiny-ts#${String(row.number)} merged`));
     expect(text(html)).toContain('As recorded by the factory; not read live from GitHub.');
     // Nothing went upstream to the operator's own checkout.
     expect(git(src, ['branch', '--list', 'factory/*']).trim()).toBe('');
@@ -372,7 +380,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
 
     const job = await waitForJob(before, created.id, settled, 60_000);
 
-    expect(job.status, before.output()).toBe('completed');
+    expect(job.status, before.output()).toBe('waiting_human');
     expect(stagesOf(job, 'pull_request')).toEqual(['succeeded']);
     expect(gh.pullRequests(FULL_NAME), 'never a second PR').toHaveLength(1);
     const creates = gh.requests.filter((r) => r.method === 'POST' && /\/pulls$/.test(r.path));
@@ -383,9 +391,9 @@ describe('the pull request', { timeout: 120_000 }, () => {
     );
     expect(recorded).toEqual([expect.objectContaining({ number: pr?.number, adopted: true })]);
     const events = await json<EventBody[]>(before.request(`/v1/jobs/${job.id}/events?limit=1000`));
-    expect(events.filter((e) => e.type.startsWith('pull_request.')).map((e) => e.type)).toEqual([
-      'pull_request.adopted',
-    ]);
+    expect(
+      events.filter((e) => /^pull_request\.(opened|adopted)$/.test(e.type)).map((e) => e.type),
+    ).toEqual(['pull_request.adopted']);
   });
 
   it('raises recovery_uncertain for a PR on the head branch without the marker: never adopted, never pushed to', async () => {

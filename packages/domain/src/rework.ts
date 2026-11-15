@@ -107,6 +107,8 @@ export const BlockerReasonSchema = z.enum([
   'replan_cap_reached',
   'base_merge_conflict',
   'spec_finding_unresolved',
+  /** `merge_approval` waits for a human to merge the PR on GitHub (`never_auto`, #58). */
+  'awaiting_merge',
 ]);
 export type BlockerReason = z.infer<typeof BlockerReasonSchema>;
 

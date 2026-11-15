@@ -156,8 +156,8 @@ describe('integrationDefinition', () => {
 });
 
 describe('the feature Recipe', () => {
-  it('is version 5, with integration, integration_review then pull_request between execution and closure', () => {
-    expect(FEATURE_RECIPE.recipeVersion).toBe(5);
+  it('is version 6, with integration, integration_review, pull_request, merge_approval then merge between execution and closure', () => {
+    expect(FEATURE_RECIPE.recipeVersion).toBe(6);
     expect(FEATURE_RECIPE.stages.map((s) => s.id)).toEqual([
       'intake',
       'triage',
@@ -169,18 +169,22 @@ describe('the feature Recipe', () => {
       'integration',
       'integration_review',
       'pull_request',
+      'merge_approval',
+      'merge',
       'closure',
     ]);
   });
 
-  it('keeps versions 2, 3 and 4 as they were', () => {
+  it('keeps versions 2 to 5 as they were', () => {
     expect(featureRecipe(2).stages.map((s) => s.id)).not.toContain('integration');
     expect(featureRecipe(2).stages.at(-1)?.id).toBe('closure');
     expect(featureRecipe(3).stages.map((s) => s.id)).toContain('integration');
     expect(featureRecipe(3).stages.map((s) => s.id)).not.toContain('integration_review');
     expect(featureRecipe(4).stages.map((s) => s.id)).toContain('integration_review');
     expect(featureRecipe(4).stages.map((s) => s.id)).not.toContain('pull_request');
-    expect(featureRecipe(5)).toEqual(FEATURE_RECIPE);
+    expect(featureRecipe(5).stages.map((s) => s.id)).toContain('pull_request');
+    expect(featureRecipe(5).stages.map((s) => s.id)).not.toContain('merge_approval');
+    expect(featureRecipe(6)).toEqual(FEATURE_RECIPE);
   });
 });
 

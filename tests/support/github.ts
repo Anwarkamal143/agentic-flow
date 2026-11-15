@@ -30,6 +30,8 @@ export interface RecordedRequest {
   path: string;
   headers: Record<string, string | undefined>;
   body: unknown;
+  /** The status answered (304 for a matching ETag); unset while in flight or for a dropped connection. */
+  status?: number;
 }
 
 export interface FakeRemote {
@@ -545,7 +547,16 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
     for (const [k, v] of Object.entries(req.headers))
       headers[k] = Array.isArray(v) ? v.join(', ') : v;
     const method = req.method ?? 'GET';
-    requests.push({ method, path: target.pathname + target.search, headers, body });
+    const recorded: RecordedRequest = {
+      method,
+      path: target.pathname + target.search,
+      headers,
+      body,
+    };
+    requests.push(recorded);
+    res.on('finish', () => {
+      recorded.status = res.statusCode;
+    });
 
     // A forced 304 only ever answers a GET; other faults answer any method.
     const i = faults.findIndex(

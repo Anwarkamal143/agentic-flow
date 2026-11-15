@@ -211,6 +211,18 @@ export class InboxService {
       });
       return this.get(item.id);
     },
+    // Under never_auto the only decision is to cancel the Job; the merge itself is the
+    // human's, on GitHub, and the poller closes the item when it sees it (ADR-0037).
+    merge: async (item, input, actor) => {
+      this.decideOnly(item, input, actor, null, (tx) => {
+        const job = requireJob(tx, item.jobId);
+        if (TERMINAL_JOB_STATUSES.includes(JobStatusSchema.parse(job.status))) {
+          throw new ApiFailure(409, 'job_terminal', `Job ${job.id} is already ${job.status}`);
+        }
+      });
+      await this.cancelFromItem(item);
+      return this.get(item.id);
+    },
     cleanup: (item, input, actor) => {
       this.decideOnly(item, input, actor, null, (tx, _state, _step, row) => {
         applyCleanupDecision(tx, row, input.option);

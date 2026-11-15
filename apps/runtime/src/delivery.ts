@@ -23,6 +23,7 @@ import {
   TaskDefinitionSchema,
   TaskStateSchema,
   type DeliveryReport,
+  type PullRequestRecord,
 } from '@factory/domain';
 import { changedPaths, commitsBetween } from '@factory/git';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
@@ -65,7 +66,9 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     'Harness and verification output is not redacted yet.',
     pullRequests.length === 0
       ? 'Delivery is a local branch in the Factory Clone; nothing was pushed.'
-      : "The factory pushed only the Integration Branch and opened its pull request. It does not yet watch the pull request's checks, reviews or merge, and it never merges: merging is yours, on GitHub.",
+      : pullRequests.every((pr) => pr.state === 'merged')
+        ? 'The factory pushed only the Integration Branch and opened its pull request. Under the never_auto Merge Policy it never merges: it polled the pull request, its checks and its reviews, and saw the merge a human made on GitHub. Polling is not real time: what is shown is what the last poll read.'
+        : 'The factory pushed only the Integration Branch and opened its pull request, and never merged it (never_auto). The pull request was not merged when this report was written: what is shown is what the last poll read, and the pull request stays on GitHub as it is.',
   ];
 
   // Every Task of the newest Plan, and any earlier Task that got a Task Branch.
@@ -153,7 +156,9 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   const statement = pullRequestFailed
     ? `The Job failed: the Integration Branch was approved, but the factory could not push it or open its pull request (${pullRequestFailureOf(db, jobId)}). It is delivered locally instead: fetch the Integration Branch below.`
     : pullRequests.length > 0 && integration?.state === 'approved'
-      ? `The Job completed: every Task was approved, merged into ${integration.branch}, verified and reviewed again on its head, pushed, and opened as pull request ${opened}. It awaits your merge on GitHub.`
+      ? pullRequests.every((pr) => pr.state === 'merged')
+        ? `The Job completed: every Task was approved, merged into ${integration.branch}, verified and reviewed again on its head, pushed, opened as pull request ${opened}, and merged on GitHub as ${pullRequests.map((pr) => pr.mergeSha ?? 'unknown').join(', ')}.`
+        : `The Job completed: every Task was approved, merged into ${integration.branch}, verified and reviewed again on its head, pushed, and opened as pull request ${opened}. It awaits your merge on GitHub.`
       : integrationFailed
         ? `The Job failed: every Task was approved, but the Integration Task failed (${integration?.problem ?? 'no detail'}). The approved Task Branches are partial results: fetch the ${fetchCount} below.`
         : integration?.state === 'approved'
@@ -350,7 +355,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     }
   }
   return DeliveryReportSchema.parse({
-    reportVersion: 5,
+    reportVersion: 6,
     outcome,
     statement,
     job: { id: job.id, title: job.title },
@@ -373,11 +378,23 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       headBranch: pr.headBranch,
       baseBranch: pr.baseBranch,
       headSha: pr.pushedSha,
-      mergeSha: null,
+      mergeSha: pr.mergeSha,
       adopted: pr.adopted,
+      ci: ciOf(pr),
     })),
     knownLimitations: limitations,
   } satisfies DeliveryReport);
+}
+
+/** The Merge Gate's checks condition of a PR as last polled, with its checks. */
+function ciOf(pr: PullRequestRecord): DeliveryReport['pullRequests'][number]['ci'] {
+  const checks = pr.gate?.conditions.find((c) => c.id === 'checks');
+  if (checks === undefined) return null;
+  return {
+    status: checks.status,
+    reason: checks.reason,
+    checks: pr.checks.map((c) => ({ name: c.name, outcome: c.outcome, url: c.url })),
+  };
 }
 
 /** The reason the Job's newest Run of `stageId` was skipped with, if it was. */

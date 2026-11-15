@@ -224,6 +224,8 @@ describe('requested Replan', () => {
       ['integration', expect.any(String)],
       ['integration_review', expect.any(String)],
       ['pull_request', expect.any(String)],
+      ['merge_approval', expect.any(String)],
+      ['merge', expect.any(String)],
       ['closure', expect.any(String)],
     ]);
 

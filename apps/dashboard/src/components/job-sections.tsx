@@ -147,8 +147,10 @@ export function StageRuns({ job }: { job: Job }) {
 }
 
 /**
- * The Job's pull requests (ADR-0036), from the rows the runtime recorded:
- * never read live from GitHub on page load. Shown only once one exists.
+ * The Job's pull requests (ADR-0036, ADR-0037), from the rows the runtime
+ * recorded: never read live from GitHub on page load. Each shows the Merge
+ * Gate the poller last evaluated, each check with its link, and when GitHub
+ * was last polled. Shown only once one exists.
  */
 export function PullRequests({ pullRequests }: { pullRequests: PullRequestRecord[] }) {
   if (pullRequests.length === 0) return null;
@@ -158,7 +160,7 @@ export function PullRequests({ pullRequests }: { pullRequests: PullRequestRecord
         <CardTitle>Pull requests</CardTitle>
         <CardDescription>As recorded by the factory; not read live from GitHub.</CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-6">
         <Table>
           <TableHeader>
             <TableRow>
@@ -166,7 +168,7 @@ export function PullRequests({ pullRequests }: { pullRequests: PullRequestRecord
               <TableHead>State</TableHead>
               <TableHead>Branches</TableHead>
               <TableHead>Head</TableHead>
-              <TableHead>Last polled</TableHead>
+              <TableHead>Merge</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -192,15 +194,79 @@ export function PullRequests({ pullRequests }: { pullRequests: PullRequestRecord
                   {pr.headBranch} → {pr.baseBranch}
                 </TableCell>
                 <TableCell className="font-mono text-xs">{shortSha(pr.headSha)}</TableCell>
-                <TableCell>
-                  {pr.lastPolledAt === null ? 'not polled yet' : formatTime(pr.lastPolledAt)}
+                <TableCell className="font-mono text-xs">
+                  {pr.mergeSha === null ? 'not merged' : shortSha(pr.mergeSha)}
                 </TableCell>
               </TableRow>
             ))}
           </TableBody>
         </Table>
+        {pullRequests.map((pr) => (
+          <MergeGateView key={pr.id} pr={pr} />
+        ))}
       </CardContent>
     </Card>
+  );
+}
+
+/** One PR's Merge Gate and checks, as the poller last recorded them. */
+function MergeGateView({ pr }: { pr: PullRequestRecord }) {
+  const name = `${pr.owner}/${pr.name}#${String(pr.number)}`;
+  return (
+    <div className="space-y-2" data-testid={`merge-gate-${String(pr.number)}`}>
+      <p className="text-sm font-medium">
+        Merge Gate of {name}: {pr.gate === null ? 'not evaluated yet' : pr.gate.verdict}
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Last polled{' '}
+        {pr.lastPolledAt === null ? 'never (not polled yet)' : formatTime(pr.lastPolledAt)}
+        {pr.gateEvaluatedAt === null ? null : `; gate evaluated ${formatTime(pr.gateEvaluatedAt)}`}
+      </p>
+      {pr.gate === null ? null : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Condition</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Reason</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {pr.gate.conditions.map((c) => (
+              <TableRow key={c.id} data-testid={`gate-${c.id}`}>
+                <TableCell>{c.label}</TableCell>
+                <TableCell>
+                  <State value={c.status} />
+                </TableCell>
+                <TableCell className="text-xs">{c.reason}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+      <p className="text-sm font-medium">Checks on {shortSha(pr.headSha)}</p>
+      {pr.checks.length === 0 ? (
+        <Empty>None reported.</Empty>
+      ) : (
+        <ul className="space-y-1 text-sm">
+          {pr.checks.map((c) => (
+            <li key={`${c.source}:${c.name}`} data-testid={`check-${c.name}`}>
+              <span className="font-mono">{c.name}</span> <State value={c.outcome} />{' '}
+              {c.url !== null && /^https?:\/\//.test(c.url) ? (
+                <a
+                  className="underline underline-offset-2"
+                  href={c.url}
+                  rel="noopener noreferrer"
+                  target="_blank"
+                >
+                  details
+                </a>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

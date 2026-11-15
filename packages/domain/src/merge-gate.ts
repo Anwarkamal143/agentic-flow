@@ -1,0 +1,378 @@
+/**
+ * The Merge Gate (#58, ADR-0037; PRODUCT_SPEC §9, GLOSSARY): whether a Job's
+ * pull request may be merged, decided by plain code over persisted rows (the
+ * `pull_requests` and `pr_checks` rows the poller wrote, the approved
+ * Integration Task, the Repository). Each condition is pass, fail or pending,
+ * with a reason. Pure: the caller passes `now`.
+ */
+import { z } from 'zod';
+import type { ApprovalOption } from './approvals.js';
+
+/**
+ * The Merge Policy. `never_auto` (the default, Q5): the factory never merges;
+ * a human merges on GitHub. `human_approval` comes with C3 (#59).
+ */
+export const MergePolicySchema = z.enum(['never_auto']);
+export type MergePolicy = z.infer<typeof MergePolicySchema>;
+
+export const GateStatusSchema = z.enum(['pass', 'fail', 'pending']);
+export type GateStatus = z.infer<typeof GateStatusSchema>;
+
+export const MergeGateConditionIdSchema = z.enum([
+  'target',
+  'reviewed_head',
+  'checks',
+  'reviews',
+  'mergeable',
+  'policy',
+]);
+export type MergeGateConditionId = z.infer<typeof MergeGateConditionIdSchema>;
+
+export const MergeGateConditionSchema = z.object({
+  id: MergeGateConditionIdSchema,
+  label: z.string(),
+  status: GateStatusSchema,
+  reason: z.string(),
+});
+export type MergeGateCondition = z.infer<typeof MergeGateConditionSchema>;
+
+export const MergeGateSchema = z.object({
+  /** `fail` if any condition fails, else `pending` if any is pending, else `pass`. */
+  verdict: GateStatusSchema,
+  conditions: z.array(MergeGateConditionSchema),
+});
+export type MergeGate = z.infer<typeof MergeGateSchema>;
+
+/** A check's outcome as the gate reads it: a check run or the newest commit status of a context. */
+export const CheckOutcomeSchema = z.enum(['pending', 'success', 'neutral', 'skipped', 'failure']);
+export type CheckOutcome = z.infer<typeof CheckOutcomeSchema>;
+
+export interface MergeGateInput {
+  /** The PR as the poller last recorded it. */
+  pr: {
+    owner: string;
+    name: string;
+    state: 'open' | 'closed' | 'merged';
+    baseBranch: string;
+    headBranch: string;
+    headSha: string;
+    baseSha: string;
+    /** GitHub's `mergeable_state`; `null` until read. */
+    mergeableState: string | null;
+    /** When the factory first saw `headSha` as the PR head (the push): the grace window starts here. */
+    headSeenAt: string;
+  };
+  /** Where the PR must be: the Repository's coordinates and default branch, the Integration Branch. */
+  expected: { owner: string; name: string; baseBranch: string; headBranch: string };
+  /** The head the Integration Review approved (or its skip rule held on). */
+  reviewedHeadSha: string | null;
+  /** Every check reported on the PR head. */
+  checks: readonly { name: string; outcome: CheckOutcome }[];
+  /** The Repository's `requiredChecks`: when set, only these count, and each must report. */
+  requiredChecks: readonly string[];
+  /** How long after a push no check reported still means "wait" (default 2 min). */
+  graceMs: number;
+  now: string;
+  /** Blocking Findings still open on the approved Integration Attempt. */
+  blockingFindings: number;
+  /** GitHub users whose latest review is `CHANGES_REQUESTED`. */
+  changesRequestedBy: readonly string[];
+  policy: MergePolicy;
+}
+
+/** The default grace window: checks have 2 minutes after a push to report (Q13). */
+export const DEFAULT_CHECKS_GRACE_MS = 120_000;
+
+/** The reason of a checks condition that passed by grace. Evidence, the PR body and the report say it. */
+export const NO_CHECKS_REPORTED = 'no checks reported';
+
+const short = (sha: string) => sha.slice(0, 12);
+
+export function evaluateMergeGate(input: MergeGateInput): MergeGate {
+  const conditions: MergeGateCondition[] = [
+    target(input),
+    reviewedHead(input),
+    checks(input),
+    reviews(input),
+    mergeable(input),
+    policy(input),
+  ];
+  const verdict: GateStatus = conditions.some((c) => c.status === 'fail')
+    ? 'fail'
+    : conditions.some((c) => c.status === 'pending')
+      ? 'pending'
+      : 'pass';
+  return { verdict, conditions };
+}
+
+function target({ pr, expected }: MergeGateInput): MergeGateCondition {
+  const label = 'Correct repository, base and head';
+  const problems: string[] = [];
+  if (pr.owner !== expected.owner || pr.name !== expected.name) {
+    problems.push(`the PR is on ${pr.owner}/${pr.name}, not ${expected.owner}/${expected.name}`);
+  }
+  if (pr.baseBranch !== expected.baseBranch) {
+    problems.push(`its base is ${pr.baseBranch}, not ${expected.baseBranch}`);
+  }
+  if (pr.headBranch !== expected.headBranch) {
+    problems.push(`its head is ${pr.headBranch}, not ${expected.headBranch}`);
+  }
+  if (pr.state !== 'open') problems.push(`it is ${pr.state}`);
+  return problems.length === 0
+    ? {
+        id: 'target',
+        label,
+        status: 'pass',
+        reason: `${pr.owner}/${pr.name}: ${pr.headBranch} into ${pr.baseBranch}, open`,
+      }
+    : { id: 'target', label, status: 'fail', reason: problems.join('; ') };
+}
+
+function reviewedHead({ pr, reviewedHeadSha }: MergeGateInput): MergeGateCondition {
+  const label = 'The reviewed SHA is the PR head';
+  if (reviewedHeadSha === pr.headSha) {
+    return {
+      id: 'reviewed_head',
+      label,
+      status: 'pass',
+      reason: `the Integration Review approved ${short(pr.headSha)}, the PR head`,
+    };
+  }
+  return {
+    id: 'reviewed_head',
+    label,
+    status: 'fail',
+    reason:
+      reviewedHeadSha === null
+        ? `nothing reviewed is approved for the PR head ${short(pr.headSha)}`
+        : `the PR head ${short(pr.headSha)} is not the reviewed ${short(reviewedHeadSha)}`,
+  };
+}
+
+function checks(input: MergeGateInput): MergeGateCondition {
+  const label = 'Checks on the head are green';
+  const required = new Set(input.requiredChecks);
+  const counted =
+    required.size === 0 ? input.checks : input.checks.filter((c) => required.has(c.name));
+  const failed = counted.filter((c) => c.outcome === 'failure').map((c) => c.name);
+  if (failed.length > 0) {
+    return { id: 'checks', label, status: 'fail', reason: `failed: ${failed.join(', ')}` };
+  }
+  const missing = [...required].filter((name) => !input.checks.some((c) => c.name === name));
+  const pending = counted.filter((c) => c.outcome === 'pending').map((c) => c.name);
+  if (missing.length > 0 || pending.length > 0) {
+    const parts = [
+      ...(pending.length === 0 ? [] : [`pending: ${pending.join(', ')}`]),
+      ...(missing.length === 0 ? [] : [`required, not reported: ${missing.join(', ')}`]),
+    ];
+    return { id: 'checks', label, status: 'pending', reason: parts.join('; ') };
+  }
+  if (counted.length === 0) {
+    const endsAt = Date.parse(input.pr.headSeenAt) + input.graceMs;
+    if (Date.parse(input.now) < endsAt) {
+      return {
+        id: 'checks',
+        label,
+        status: 'pending',
+        reason: `no check reported on ${short(input.pr.headSha)} yet; the grace window ends at ${new Date(endsAt).toISOString()}`,
+      };
+    }
+    return {
+      id: 'checks',
+      label,
+      status: 'pass',
+      reason: `${NO_CHECKS_REPORTED} on ${short(input.pr.headSha)} within ${String(Math.round(input.graceMs / 1000))} s of the push`,
+    };
+  }
+  return {
+    id: 'checks',
+    label,
+    status: 'pass',
+    reason: counted.map((c) => `${c.name}: ${c.outcome}`).join(', '),
+  };
+}
+
+function reviews(input: MergeGateInput): MergeGateCondition {
+  const label = 'No blocking Findings or unresolved change requests';
+  const problems: string[] = [];
+  if (input.blockingFindings > 0) {
+    problems.push(
+      `${String(input.blockingFindings)} blocking Finding${input.blockingFindings === 1 ? '' : 's'} open`,
+    );
+  }
+  if (input.changesRequestedBy.length > 0) {
+    problems.push(`changes requested on GitHub by ${input.changesRequestedBy.join(', ')}`);
+  }
+  return problems.length === 0
+    ? {
+        id: 'reviews',
+        label,
+        status: 'pass',
+        reason: 'no blocking Finding and no unresolved CHANGES_REQUESTED review',
+      }
+    : { id: 'reviews', label, status: 'fail', reason: problems.join('; ') };
+}
+
+/** GitHub's `mergeable_state` values that mean branch protection is satisfied and nothing conflicts. */
+const MERGEABLE = new Set(['clean', 'unstable', 'has_hooks']);
+
+function mergeable({ pr }: MergeGateInput): MergeGateCondition {
+  const label = 'Branch protection satisfied, no conflicts';
+  const state = pr.mergeableState;
+  if (state !== null && MERGEABLE.has(state)) {
+    return { id: 'mergeable', label, status: 'pass', reason: `GitHub reports ${state}` };
+  }
+  if (state === 'dirty') {
+    return {
+      id: 'mergeable',
+      label,
+      status: 'fail',
+      reason: 'GitHub reports dirty: the PR conflicts with its base',
+    };
+  }
+  const why: Record<string, string> = {
+    blocked: 'GitHub reports blocked: branch protection is not satisfied yet',
+    behind: 'GitHub reports behind: branch protection wants the head up to date with the base',
+    draft: 'GitHub reports draft',
+  };
+  return {
+    id: 'mergeable',
+    label,
+    status: 'pending',
+    reason:
+      state === null
+        ? 'not read from GitHub yet'
+        : (why[state] ?? `GitHub reports ${state}: mergeability is not known yet`),
+  };
+}
+
+function policy(input: MergeGateInput): MergeGateCondition {
+  return {
+    id: 'policy',
+    label: 'The Merge Policy',
+    status: 'pending',
+    reason: `${input.policy}: the factory never merges; a human merges the PR on GitHub`,
+  };
+}
+
+export const CheckSourceSchema = z.enum(['check_run', 'status']);
+export type CheckSource = z.infer<typeof CheckSourceSchema>;
+
+/** One check on a PR head as the poller recorded it (`pr_checks`). */
+export const PrCheckSchema = z.object({
+  headSha: z.string(),
+  source: CheckSourceSchema,
+  name: z.string(),
+  /** GitHub's own status (check run) or state (commit status). */
+  status: z.string(),
+  conclusion: z.string().nullable(),
+  outcome: CheckOutcomeSchema,
+  url: z.string().nullable(),
+  observedAt: z.string(),
+});
+export type PrCheck = z.infer<typeof PrCheckSchema>;
+
+export type ObservedCheck = Omit<PrCheck, 'headSha' | 'observedAt'>;
+
+/** A completed check run's conclusion as the gate reads it; anything else red is a failure. */
+function runOutcome(status: string, conclusion: string | null): CheckOutcome {
+  if (status !== 'completed') return 'pending';
+  if (conclusion === 'success' || conclusion === 'neutral' || conclusion === 'skipped') {
+    return conclusion;
+  }
+  return 'failure';
+}
+
+function statusOutcome(state: string): CheckOutcome {
+  if (state === 'success') return 'success';
+  if (state === 'pending') return 'pending';
+  return 'failure';
+}
+
+/**
+ * The checks GitHub reports on a head, as the gate counts them: the newest
+ * check run of each name (highest id: a re-run replaces the earlier run) and
+ * the newest commit status of each context (GitHub lists them newest first).
+ * Sorted by source, then name, so equal observations compare equal.
+ */
+export function observedChecks(
+  runs: readonly {
+    id: number;
+    name: string;
+    status: string;
+    conclusion: string | null;
+    detailsUrl: string | null;
+  }[],
+  statuses: readonly { context: string; state: string; targetUrl: string | null }[],
+): ObservedCheck[] {
+  const newestRun = new Map<string, (typeof runs)[number]>();
+  for (const run of runs) {
+    const seen = newestRun.get(run.name);
+    if (seen === undefined || run.id > seen.id) newestRun.set(run.name, run);
+  }
+  const newestStatus = new Map<string, (typeof statuses)[number]>();
+  for (const st of statuses) if (!newestStatus.has(st.context)) newestStatus.set(st.context, st);
+  const out: ObservedCheck[] = [
+    ...[...newestRun.values()].map((r) => ({
+      source: 'check_run' as const,
+      name: r.name,
+      status: r.status,
+      conclusion: r.conclusion,
+      outcome: runOutcome(r.status, r.conclusion),
+      url: r.detailsUrl,
+    })),
+    ...[...newestStatus.values()].map((st) => ({
+      source: 'status' as const,
+      name: st.context,
+      status: st.state,
+      conclusion: null,
+      outcome: statusOutcome(st.state),
+      url: st.targetUrl,
+    })),
+  ];
+  return out.sort((a, b) =>
+    a.source === b.source ? a.name.localeCompare(b.name) : a.source.localeCompare(b.source),
+  );
+}
+
+/**
+ * The GitHub users whose latest review is `CHANGES_REQUESTED`: an
+ * unresolved change request. A later `APPROVED` or `DISMISSED` review by the
+ * same user resolves it; `COMMENTED` does not change it.
+ */
+export function unresolvedChangeRequests(
+  reviews: readonly { id: number; state: string; author: string | null }[],
+): string[] {
+  const latest = new Map<string, string>();
+  for (const r of [...reviews].sort((a, b) => a.id - b.id)) {
+    if (r.author === null || r.state === 'COMMENTED' || r.state === 'PENDING') continue;
+    latest.set(r.author, r.state);
+  }
+  return [...latest.entries()]
+    .filter(([, state]) => state === 'CHANGES_REQUESTED')
+    .map(([author]) => author)
+    .sort();
+}
+
+/**
+ * The options of a `merge` item under `never_auto` (Q15): the merge is the
+ * human's, on GitHub, and the poller closes the item when it sees it.
+ * `request_changes` comes with the PR feedback loop (#60).
+ */
+export const NEVER_AUTO_MERGE_OPTIONS: readonly ApprovalOption[] = [
+  {
+    id: 'cancel_job',
+    label: 'Cancel the Job',
+    description:
+      'Cancel the whole Job, as factory job cancel does: polling stops, Worktrees are preserved, branches kept. The PR stays open on GitHub.',
+    agentProposed: false,
+  },
+];
+
+/** What a `merge` item decides on: one PR at one `(head_sha, base_sha)`; any SHA change supersedes it. */
+export function mergeItemSubject(pullRequestId: string, headSha: string, baseSha: string): string {
+  return `${pullRequestId}@${headSha}..${baseSha}`;
+}
+
+/** The decision the poller records on a `merge` item when it sees the PR merged on GitHub. */
+export const MERGED_ON_GITHUB = 'merged_on_github';

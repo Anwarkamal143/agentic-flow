@@ -53,6 +53,7 @@ import { StageScheduler } from './scheduler.js';
 import { CRASH_POINTS, TaskScheduler } from './execution.js';
 import { recoverTasks } from './recovery.js';
 import { CleanupWorker, openMissingCleanupItems } from './cleanup.js';
+import { GitHubPoller } from './poller.js';
 import { applyLeaseKnobs, parseLeaseKnobs } from './sweeper.js';
 
 const ACTOR = 'system:runtime';
@@ -257,6 +258,11 @@ const scheduler = new StageScheduler({
   },
   log: (message) => process.stderr.write(`factory runtime: ${message}\n`),
 });
+// The token reference is resolved for each request, never held (ADR-0033).
+const githubPort = new GitHubPort({
+  apiBaseUrl: github.apiBaseUrl,
+  token: () => githubToken.resolve(),
+});
 const tasks = new TaskScheduler({
   db: database.db,
   harness,
@@ -268,11 +274,7 @@ const tasks = new TaskScheduler({
   spoolRoot: home.spoolDir,
   recovered,
   ...(crashAt === undefined ? {} : { crashAt }),
-  // The token reference is resolved for each request, never held (ADR-0033).
-  github: new GitHubPort({
-    apiBaseUrl: github.apiBaseUrl,
-    token: () => githubToken.resolve(),
-  }),
+  github: githubPort,
   redact,
   onCommit: () => {
     notify();
@@ -280,6 +282,19 @@ const tasks = new TaskScheduler({
   log,
 });
 if (tasks.leaseHolder !== holder) throw new Error('lease holders disagree');
+// Polls each open PR whose Job waits in merge_approval (ADR-0037).
+const poller = new GitHubPoller({
+  db: database.db,
+  github: githubPort,
+  artifacts,
+  redact,
+  pollIntervalMs: github.pollIntervalMs,
+  checksGraceMs: github.checksGraceMs,
+  onCommit: () => {
+    notify();
+  },
+  log,
+});
 const notify = () => {
   outbox.notify();
   scheduler.wake();
@@ -363,6 +378,7 @@ const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requested
   scheduler.start();
   tasks.start();
   cleanup.start();
+  poller.start();
   writeRuntimeRecord(home, {
     pid: process.pid,
     host: RUNTIME_HOST,
@@ -392,7 +408,7 @@ function shutdown(reason: string): void {
   outbox.close();
   // A Harness Run in flight is cancelled; its Stage Run is resumed at the next start.
   // So is a developer Harness Run or verification command; its Attempt is recovered at the next start.
-  const stopped = Promise.all([scheduler.close(), tasks.close(), cleanup.close()]);
+  const stopped = Promise.all([scheduler.close(), tasks.close(), cleanup.close(), poller.close()]);
   server.close(() => {
     void stopped.then(() => {
       finish(reason);

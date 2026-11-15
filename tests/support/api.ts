@@ -48,6 +48,8 @@ export const FEATURE_STAGES = [
   'integration',
   'integration_review',
   'pull_request',
+  'merge_approval',
+  'merge',
   'closure',
 ];
 

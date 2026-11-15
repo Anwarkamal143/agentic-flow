@@ -6,6 +6,12 @@
  */
 import { z } from 'zod';
 import type { EvidenceVerdict } from './execution.js';
+import {
+  MergeGateSchema,
+  PrCheckSchema,
+  type CheckOutcome,
+  type GateStatus,
+} from './merge-gate.js';
 import type { Risk } from './proposals.js';
 import type { Redactor } from './redaction.js';
 
@@ -62,6 +68,21 @@ export interface PullRequestBodyInput {
   questions: readonly { task: string; text: string }[];
   /** The Plan's rollback notes, or `null` when it states none. */
   rollback: string | null;
+  /**
+   * The Merge Gate's checks condition on the PR head, as the poller last
+   * recorded it (#58), with each check; `null` before the first poll.
+   */
+  ci: {
+    status: GateStatus;
+    reason: string;
+    checks: readonly { name: string; outcome: CheckOutcome; url: string | null }[];
+  } | null;
+}
+
+/** A link GitHub reported, shown only when it is an http(s) URL. */
+function link(url: string | null): string {
+  if (url === null || !/^https?:\/\/[^\s()<>]+$/.test(url)) return '';
+  return ` ([details](${url}))`;
 }
 
 /** One line of a list item: newlines folded, so untrusted text can't open a new section. */
@@ -116,6 +137,13 @@ export function renderPullRequestBody(input: PullRequestBodyInput, redact: Redac
         (q) => `Task ${code(q.task)} (agent-proposed, unanswered): ${line(q.text)}`,
       ),
     )}`,
+    `## CI checks\n\n${
+      input.ci === null
+        ? 'Not read from GitHub yet: the factory polls the checks on the head and updates this section.'
+        : `On ${code(input.headSha)}: **${input.ci.status}**: ${line(input.ci.reason)}\n\n${list(
+            input.ci.checks.map((c) => `${code(c.name)}: ${c.outcome}${link(c.url)}`),
+          )}`
+    }`,
     `## Rollback\n\n${input.rollback === null ? 'None supported.' : line(input.rollback)}`,
     `## Branches\n\n${code(input.branch)} merges, \`--no-ff\`, in this order:\n\n${list(
       input.merged.map((m) => `${code(m.key)}: ${code(m.branch)}`),
@@ -169,6 +197,19 @@ export const PullRequestRecordSchema = z.object({
   createdAt: z.string(),
   /** When GitHub was last read for it; `null` until the poller (#58) reads it. */
   lastPolledAt: z.string().nullable(),
+  /** The merge commit, once the poller saw the PR merged on GitHub. */
+  mergeSha: z.string().nullable(),
+  /** GitHub's `mergeable_state` as last read. */
+  mergeableState: z.string().nullable(),
+  /** When the factory first saw the current head: the checks grace window starts here. */
+  headSeenAt: z.string().nullable(),
+  /** GitHub users whose latest review requests changes. */
+  changesRequestedBy: z.array(z.string()),
+  /** The Merge Gate the poller last evaluated, and when; `null` before the first poll. */
+  gate: MergeGateSchema.nullable(),
+  gateEvaluatedAt: z.string().nullable(),
+  /** The checks recorded on the current head. */
+  checks: z.array(PrCheckSchema),
   version: z.number().int(),
 });
 export type PullRequestRecord = z.infer<typeof PullRequestRecordSchema>;

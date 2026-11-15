@@ -106,6 +106,9 @@ export class RepositoryService {
         version: 1,
         packageManager: inspection.packageManager,
         commands: input.commands,
+        ...(input.requiredChecks === undefined || input.requiredChecks.length === 0
+          ? {}
+          : { requiredChecks: input.requiredChecks }),
         confirmedBy: ACTOR,
         confirmedAt: now,
       });

@@ -5,7 +5,15 @@
 import { z } from 'zod';
 import { InboxQuestionSchema, QuestionAnswerSchema, type InboxQuestion } from './questions.js';
 
-export const ApprovalKindSchema = z.enum(['question', 'plan', 'spec_change', 'blocker', 'cleanup']);
+export const ApprovalKindSchema = z.enum([
+  'question',
+  'plan',
+  'spec_change',
+  'blocker',
+  'cleanup',
+  /** One per PR `(head_sha, base_sha)`, held by `merge_approval` (#58, ADR-0037). */
+  'merge',
+]);
 export type ApprovalKind = z.infer<typeof ApprovalKindSchema>;
 
 export const ApprovalStateSchema = z.enum(['open', 'decided', 'cancelled', 'superseded']);

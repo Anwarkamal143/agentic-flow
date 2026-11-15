@@ -71,6 +71,7 @@ function input(overrides: Partial<PullRequestBodyInput> = {}): PullRequestBodyIn
     ],
     questions: [{ task: 'add-sum', text: 'Should sum accept bigint?' }],
     rollback: null,
+    ci: null,
     ...overrides,
   };
 }
@@ -109,6 +110,45 @@ describe('renderPullRequestBody', () => {
 
     expect(body).toContain('## Rollback');
     expect(body).toContain('factory/job_01/tsk_1-add-sum');
+  });
+
+  it('says the CI checks were not read yet before the first poll', () => {
+    const body = renderPullRequestBody(input(), identity);
+    expect(body).toContain('## CI checks');
+    expect(body).toContain('Not read from GitHub yet');
+  });
+
+  it('shows the Merge Gate checks condition and each check with its link once polled', () => {
+    const body = renderPullRequestBody(
+      input({
+        ci: {
+          status: 'fail',
+          reason: 'failed: test',
+          checks: [
+            { name: 'build', outcome: 'success', url: 'https://ci.example/1' },
+            { name: 'test', outcome: 'failure', url: null },
+          ],
+        },
+      }),
+      identity,
+    );
+    expect(body).toContain('**fail**: failed: test');
+    expect(body).toContain('`build`: success ([details](https://ci.example/1))');
+    expect(body).toContain('`test`: failure');
+  });
+
+  it('says "no checks reported" when the grace window passed with none', () => {
+    const body = renderPullRequestBody(
+      input({
+        ci: {
+          status: 'pass',
+          reason: 'no checks reported on 111111111111 within 120 s of the push',
+          checks: [],
+        },
+      }),
+      identity,
+    );
+    expect(body).toMatch(/## CI checks\n\nOn `1{40}`: \*\*pass\*\*: no checks reported/);
   });
 
   it('says "none supported" for the rollback when the Plan states none', () => {

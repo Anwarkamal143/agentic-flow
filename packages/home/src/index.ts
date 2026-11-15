@@ -16,6 +16,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
   BillingSchema,
+  DEFAULT_CHECKS_GRACE_MS,
   DEFAULT_GITHUB_API_BASE_URL,
   DEFAULT_GLOBAL_CONCURRENCY,
   GitHubApiBaseUrlSchema,
@@ -125,11 +126,16 @@ export const FactoryConfigSchema = z.object({
    * How the factory reaches GitHub (ADR-0033). `token`: a token reference,
    * `gh` (the `gh` login, the default) or `env:NAME`, never a token value.
    * `apiBaseUrl`: GitHub's REST API (tests point it at the fake GitHub).
+   * `pollIntervalMs`: how often each open PR is polled (default 30 s, Q23).
+   * `checksGraceMs`: how long after a push no check reported still means
+   * "wait" (default 2 min, Q13; ADR-0037).
    */
   github: z
     .object({
       token: TokenReferenceTextSchema.optional(),
       apiBaseUrl: GitHubApiBaseUrlSchema.optional(),
+      pollIntervalMs: z.number().int().min(100).max(3_600_000).optional(),
+      checksGraceMs: z.number().int().min(0).max(86_400_000).optional(),
     })
     .strict()
     .optional(),
@@ -139,13 +145,20 @@ export type FactoryConfig = z.infer<typeof FactoryConfigSchema>;
 export interface GitHubSettings {
   tokenReference: TokenReference;
   apiBaseUrl: string;
+  pollIntervalMs: number;
+  checksGraceMs: number;
 }
+
+/** Each open PR is polled every 30 s unless `github.pollIntervalMs` says otherwise (Q23). */
+export const DEFAULT_GITHUB_POLL_INTERVAL_MS = 30_000;
 
 /** The GitHub settings `config` sets, or the defaults (`gh`, github.com). */
 export function githubSettings(config: FactoryConfig): GitHubSettings {
   return {
     tokenReference: tokenReferenceOf(config.github?.token ?? 'gh'),
     apiBaseUrl: (config.github?.apiBaseUrl ?? DEFAULT_GITHUB_API_BASE_URL).replace(/\/+$/, ''),
+    pollIntervalMs: config.github?.pollIntervalMs ?? DEFAULT_GITHUB_POLL_INTERVAL_MS,
+    checksGraceMs: config.github?.checksGraceMs ?? DEFAULT_CHECKS_GRACE_MS,
   };
 }
 
