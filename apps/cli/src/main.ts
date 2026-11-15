@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { MergePolicySchema } from '@factory/domain';
 import { activity, DEFAULT_TAIL_LINES } from './commands/activity.js';
 import { doctor } from './commands/doctor.js';
 import {
@@ -27,13 +28,15 @@ Commands:
   doctor [--json]                 Check tools and credential presence (via the runtime)
   repo add <path> [--project <name>] [--test-command <cmd>]
            [--typecheck-command <cmd>] [--github <owner/name>]
-           [--required-check <name>]... [--yes]
+           [--required-check <name>]... [--merge-policy never_auto|human_approval]
+           [--merge-method merge|squash|rebase] [--yes]
                                   Register a Repository: make its Factory Clone and save
                                   its confirmed commands (your checkout is never modified)
   job create --repo <id|name> --title <text> [--description <text>]
-             [--per-repository <n>] [--per-job <n>]
+             [--per-repository <n>] [--per-job <n>] [--merge-policy <policy>]
                                   Create a Job for a registered Repository; the
-                                  concurrency flags override its Task limits
+                                  concurrency flags override its Task limits, and
+                                  --merge-policy may only make the Repository's stricter
   job list [--json]               List Jobs, newest first
   job show <id> [--json]          Show a Job: status, Stages, Workflow Snapshot, config
   job cancel <id> [--reason <text>]
@@ -109,6 +112,8 @@ async function main(argv: string[]): Promise<number> {
           'typecheck-command': { type: 'string' },
           github: { type: 'string' },
           'required-check': { type: 'string', multiple: true },
+          'merge-policy': { type: 'string' },
+          'merge-method': { type: 'string' },
           yes: { type: 'boolean', short: 'y' },
         },
       });
@@ -124,6 +129,8 @@ async function main(argv: string[]): Promise<number> {
         typecheckCommand: values['typecheck-command'],
         github: values.github,
         requiredChecks: values['required-check'] ?? [],
+        mergePolicy: values['merge-policy'],
+        mergeMethod: values['merge-method'],
         yes: values.yes === true,
       });
     }
@@ -182,6 +189,7 @@ function job(argv: string[]): Promise<number> | number {
           description: { type: 'string' },
           'per-repository': { type: 'string' },
           'per-job': { type: 'string' },
+          'merge-policy': { type: 'string' },
         },
       });
       if (values.repo === undefined || values.title === undefined) {
@@ -191,7 +199,18 @@ function job(argv: string[]): Promise<number> | number {
       const perRepository = limitFlag('--per-repository', values['per-repository']);
       const perJob = limitFlag('--per-job', values['per-job']);
       if (perRepository === null || perJob === null) return 2;
+      const mergePolicy =
+        values['merge-policy'] === undefined
+          ? undefined
+          : MergePolicySchema.safeParse(values['merge-policy']);
+      if (mergePolicy?.success === false) {
+        process.stderr.write(
+          `factory: --merge-policy takes ${MergePolicySchema.options.join(' or ')} (auto_if_low_risk_and_green is not available until Phase E)\n\n${USAGE}`,
+        );
+        return 2;
+      }
       return jobCreate({
+        ...(mergePolicy === undefined ? {} : { mergePolicy: mergePolicy.data }),
         repo: values.repo,
         title: values.title,
         description: values.description,

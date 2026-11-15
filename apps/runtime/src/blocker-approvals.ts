@@ -33,11 +33,16 @@ export function openBlockerItem(
   op: { jobId: string; actor: string },
   task: { id: string; key: string; kind?: string },
   blocker: Blocker,
+  /** The Stage Run it holds when that is not the Task's own Stage (the `merge` Stage, ADR-0038). */
+  opts: { stageRunId?: string } = {},
 ): string | undefined {
   const options = blockerOptions(blocker.reason);
   if (options === undefined) return undefined;
   // The Stage the Task runs in: `execution`, or `integration` for the Integration Task.
-  const execution = latestStageRunOfTask(tx, op.jobId, task.id);
+  const execution =
+    opts.stageRunId === undefined
+      ? latestStageRunOfTask(tx, op.jobId, task.id)
+      : { id: opts.stageRunId };
   const id = newId('apr');
   const kind: ApprovalKind = 'blocker';
   const expiresPolicy: ExpiresPolicy = 'remain_pending';

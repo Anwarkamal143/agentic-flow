@@ -11,6 +11,8 @@ import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   coordinatesFromRemoteUrl,
   formatCoordinates,
+  MergeMethodSchema,
+  MergePolicySchema,
   parseCoordinates,
   ProjectConfigSchema,
   RepositoryProfileSchema,
@@ -102,6 +104,8 @@ export class RepositoryService {
         );
       });
       const now = new Date().toISOString();
+      const mergePolicy = input.mergePolicy ?? 'never_auto';
+      const mergeMethod = input.mergeMethod ?? 'merge';
       const profile = RepositoryProfileSchema.parse({
         version: 1,
         packageManager: inspection.packageManager,
@@ -143,6 +147,8 @@ export class RepositoryService {
             profileJson: JSON.stringify(profile),
             githubOwner: github?.owner ?? null,
             githubName: github?.name ?? null,
+            mergePolicy,
+            mergeMethod,
             createdAt: now,
           })
           .run();
@@ -157,6 +163,8 @@ export class RepositoryService {
             cloneMethod,
             defaultBranch,
             github: github === null ? null : formatCoordinates(github),
+            mergePolicy,
+            mergeMethod,
           },
         });
         return proj;
@@ -171,6 +179,8 @@ export class RepositoryService {
         defaultBranch,
         profile,
         github,
+        mergePolicy,
+        mergeMethod,
         createdAt: now,
       };
       return { project, repository, cloneMethod };
@@ -266,6 +276,8 @@ function toRepository(row: typeof schema.repositories.$inferSelect): Repository 
       row.githubOwner === null || row.githubName === null
         ? null
         : { owner: row.githubOwner, name: row.githubName },
+    mergePolicy: MergePolicySchema.parse(row.mergePolicy),
+    mergeMethod: MergeMethodSchema.parse(row.mergeMethod),
     createdAt: row.createdAt,
   };
 }

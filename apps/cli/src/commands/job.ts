@@ -36,6 +36,8 @@ export interface JobCreateOptions {
   description: string | undefined;
   /** Overrides of the Job's concurrency limits (the runtime checks the range). */
   concurrency?: CreateJobInput['concurrency'];
+  /** A Merge Policy override; the runtime refuses one looser than the Repository's. */
+  mergePolicy?: CreateJobInput['mergePolicy'];
 }
 
 /** `factory job create`: records a Job for a registered Repository. */
@@ -60,6 +62,7 @@ export async function jobCreate(opts: JobCreateOptions): Promise<number> {
     ...(opts.concurrency === undefined || Object.keys(opts.concurrency).length === 0
       ? {}
       : { concurrency: opts.concurrency }),
+    ...(opts.mergePolicy === undefined ? {} : { mergePolicy: opts.mergePolicy }),
   };
   const job = await api.json<Job>('POST', '/v1/jobs', { body: input });
   process.stdout.write(`Created Job ${job.id} for ${repo.name}\n`);

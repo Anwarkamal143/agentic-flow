@@ -116,6 +116,7 @@ describe('factory job create / job show', () => {
         perRepository: { value: 2, source: 'recipe' },
         perJob: { value: 2, source: 'recipe' },
       },
+      mergePolicy: { value: 'never_auto', source: 'repository' },
     });
 
     const edit = await post(rt, `/v1/projects/${repo.projectId}/config`, { maxAttempts: 5 });
@@ -133,6 +134,7 @@ describe('factory job create / job show', () => {
         perRepository: { value: 2, source: 'recipe' },
         perJob: { value: 2, source: 'recipe' },
       },
+      mergePolicy: { value: 'never_auto', source: 'repository' },
     });
 
     expect(
@@ -165,6 +167,7 @@ describe('factory job create / job show', () => {
         perRepository: { value: 2, source: 'recipe' },
         perJob: { value: 1, source: 'project' },
       },
+      mergePolicy: { value: 'never_auto', source: 'repository' },
     });
   });
 

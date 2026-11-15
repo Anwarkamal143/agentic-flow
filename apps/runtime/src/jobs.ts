@@ -22,6 +22,8 @@ import {
   JobTypeSchema,
   ProjectConfigSchema,
   resolveEffectiveConfig,
+  resolveMergePolicy,
+  MergePolicySchema,
   StageFailureSchema,
   StageIdSchema,
   StageRunStateSchema,
@@ -135,9 +137,15 @@ export class JobService {
         const snapshot: WorkflowSnapshot = WorkflowSnapshotSchema.parse(
           structuredClone(featureRecipe(this.recipeVersion)),
         );
+        const mergePolicy = resolveMergePolicy(
+          MergePolicySchema.parse(repo.mergePolicy),
+          input.mergePolicy,
+        );
+        if (!mergePolicy.ok) throw new ApiFailure(409, mergePolicy.code, mergePolicy.message);
         const effectiveConfig = resolveEffectiveConfig({
           project: ProjectConfigSchema.parse(JSON.parse(project.configJson)),
           job: { concurrency: input.concurrency },
+          mergePolicy: mergePolicy.policy,
         });
         const jobId = newId('job');
         const now = new Date().toISOString();

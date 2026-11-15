@@ -8,6 +8,7 @@ export interface StageRunBody {
   state: string;
   version: number;
   failure: { reason: string; message: string; issues: { rule: string; message: string }[] } | null;
+  blocker?: { kind: string; reason: string } | null;
 }
 
 export interface JobBody {

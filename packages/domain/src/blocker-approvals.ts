@@ -66,6 +66,14 @@ const KILL_AND_RETRY: ApprovalOption = {
   agentProposed: false,
 };
 
+const RETRY_MERGE: ApprovalOption = {
+  id: 'retry_merge',
+  label: 'Retry the merge',
+  description:
+    "Once the repository's settings on GitHub allow the Repository's merge method, try the merge again: the factory re-reads the PR first and never merges it twice.",
+  agentProposed: false,
+};
+
 /** The Blocker reasons that open a Blocker Approval, with their options (§8.1). */
 const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   rework_cap_reached: [GRANT, REPLAN, CANCEL_JOB],
@@ -75,6 +83,7 @@ const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   retry_cap_reached: [RETRY_NOW, CANCEL_JOB],
   base_merge_conflict: [REPLAN, CANCEL_JOB],
   spec_finding_unresolved: [REWORK, REPLAN_UNDER_SPEC, CANCEL_JOB],
+  merge_method_refused: [RETRY_MERGE, CANCEL_JOB],
 };
 
 /**
@@ -105,6 +114,7 @@ export const REPLAN_OPTION: ApprovalOption = REPLAN;
 /** What the Integration Task's Blockers say instead (ADR-0034). */
 const INTEGRATION_TITLES: Partial<Record<BlockerReason, string>> = {
   base_merge_conflict: "can't build the Integration Branch: a Task Branch conflicts",
+  merge_method_refused: "can't be merged: GitHub refused the Repository's merge method",
 };
 
 /** The line a Blocker Approval shows in a list. */

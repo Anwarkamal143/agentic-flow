@@ -12,6 +12,7 @@ import {
   integrationBranch,
   combineVerdicts,
   DeliveryReportSchema,
+  EffectiveConfigSchema,
   deliveryBranches,
   evidenceSource,
   isCurrent,
@@ -61,14 +62,25 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   if (job === undefined || repo === undefined) throw new Error(`Job ${jobId} has no Repository`);
 
   const pullRequests = pullRequestsOf(db, jobId);
+  const mergePolicy = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson)).mergePolicy
+    .value;
+  const mergeFailed =
+    db
+      .select({ state: schema.stageRuns.state })
+      .from(schema.stageRuns)
+      .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'merge')))
+      .orderBy(desc(schema.stageRuns.attempt))
+      .get()?.state === 'failed';
   const limitations = [
     'The Harness ran under the Tier 0 local guardrail (environment allowlist, closed stdin, the Worktree as working directory). It ran as your user; this is not a sandbox. It was denied `gh` and the GitHub tokens, but the `gh` login on disk stayed readable to it.',
     'Harness and verification output is not redacted yet.',
     pullRequests.length === 0
       ? 'Delivery is a local branch in the Factory Clone; nothing was pushed.'
-      : pullRequests.every((pr) => pr.state === 'merged')
-        ? 'The factory pushed only the Integration Branch and opened its pull request. Under the never_auto Merge Policy it never merges: it polled the pull request, its checks and its reviews, and saw the merge a human made on GitHub. Polling is not real time: what is shown is what the last poll read.'
-        : 'The factory pushed only the Integration Branch and opened its pull request, and never merged it (never_auto). The pull request was not merged when this report was written: what is shown is what the last poll read, and the pull request stays on GitHub as it is.',
+      : mergePolicy === 'human_approval'
+        ? 'The factory pushed only the Integration Branch and opened its pull request. Under the human_approval Merge Policy it merges only after a human approved the merge item in the Inbox (audited), re-reading the pull request right before merging. Polling is not real time: what is shown is what the last poll or the merge read.'
+        : pullRequests.every((pr) => pr.state === 'merged')
+          ? 'The factory pushed only the Integration Branch and opened its pull request. Under the never_auto Merge Policy it never merges: it polled the pull request, its checks and its reviews, and saw the merge a human made on GitHub. Polling is not real time: what is shown is what the last poll read.'
+          : 'The factory pushed only the Integration Branch and opened its pull request, and never merged it (never_auto). The pull request was not merged when this report was written: what is shown is what the last poll read, and the pull request stays on GitHub as it is.',
   ];
 
   // Every Task of the newest Plan, and any earlier Task that got a Task Branch.
@@ -143,7 +155,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   const integrationFailed = latestState('integration') === 'failed';
   const pullRequestFailed = latestState('pull_request') === 'failed';
   const outcome =
-    latestState('execution') === 'failed' || integrationFailed || pullRequestFailed
+    latestState('execution') === 'failed' || integrationFailed || pullRequestFailed || mergeFailed
       ? 'failed'
       : 'completed';
   const failedTasks = tasks
@@ -153,23 +165,25 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   const opened = pullRequests
     .map((pr) => `#${String(pr.number)} (${pr.url}) on ${pr.owner}/${pr.name}`)
     .join(', ');
-  const statement = pullRequestFailed
-    ? `The Job failed: the Integration Branch was approved, but the factory could not push it or open its pull request (${pullRequestFailureOf(db, jobId)}). It is delivered locally instead: fetch the Integration Branch below.`
-    : pullRequests.length > 0 && integration?.state === 'approved'
-      ? pullRequests.every((pr) => pr.state === 'merged')
-        ? `The Job completed: every Task was approved, merged into ${integration.branch}, verified and reviewed again on its head, pushed, opened as pull request ${opened}, and merged on GitHub as ${pullRequests.map((pr) => pr.mergeSha ?? 'unknown').join(', ')}.`
-        : `The Job completed: every Task was approved, merged into ${integration.branch}, verified and reviewed again on its head, pushed, and opened as pull request ${opened}. It awaits your merge on GitHub.`
-      : integrationFailed
-        ? `The Job failed: every Task was approved, but the Integration Task failed (${integration?.problem ?? 'no detail'}). The approved Task Branches are partial results: fetch the ${fetchCount} below.`
-        : integration?.state === 'approved'
-          ? `The Job completed: every Task was approved, merged into ${integration.branch} and verified again on its head. Fetch the Integration Branch below.`
-          : outcome === 'failed'
-            ? `The Job failed: Task${failedTasks.length === 1 ? '' : 's'} ${failedTasks.join(', ')} failed with no Rework route, and nothing else could make progress. ${
-                offered.length === 0
-                  ? 'No Task was approved, so there is nothing to fetch.'
-                  : `The approved Task Branches are partial results: fetch the ${fetchCount} below.`
-              } Failed and cancelled Tasks are listed, never offered.`
-            : `The Job completed: every Task was approved. Fetch the ${fetchCount} below.`;
+  const statement = mergeFailed
+    ? `The Job failed: the merge was approved, but the factory did not merge pull request ${opened} (${stageFailureOf(db, jobId, 'merge')}). The pull request stays open on GitHub as it is.`
+    : pullRequestFailed
+      ? `The Job failed: the Integration Branch was approved, but the factory could not push it or open its pull request (${stageFailureOf(db, jobId, 'pull_request')}). It is delivered locally instead: fetch the Integration Branch below.`
+      : pullRequests.length > 0 && integration?.state === 'approved'
+        ? pullRequests.every((pr) => pr.state === 'merged')
+          ? `The Job completed: every Task was approved, merged into ${integration.branch}, verified and reviewed again on its head, pushed, opened as pull request ${opened}, and merged on GitHub as ${pullRequests.map((pr) => pr.mergeSha ?? 'unknown').join(', ')}${mergePolicy === 'human_approval' ? ' after your approval' : ''}.`
+          : `The Job completed: every Task was approved, merged into ${integration.branch}, verified and reviewed again on its head, pushed, and opened as pull request ${opened}. It awaits your merge ${mergePolicy === 'human_approval' ? 'approval in the Inbox' : 'on GitHub'}.`
+        : integrationFailed
+          ? `The Job failed: every Task was approved, but the Integration Task failed (${integration?.problem ?? 'no detail'}). The approved Task Branches are partial results: fetch the ${fetchCount} below.`
+          : integration?.state === 'approved'
+            ? `The Job completed: every Task was approved, merged into ${integration.branch} and verified again on its head. Fetch the Integration Branch below.`
+            : outcome === 'failed'
+              ? `The Job failed: Task${failedTasks.length === 1 ? '' : 's'} ${failedTasks.join(', ')} failed with no Rework route, and nothing else could make progress. ${
+                  offered.length === 0
+                    ? 'No Task was approved, so there is nothing to fetch.'
+                    : `The approved Task Branches are partial results: fetch the ${fetchCount} below.`
+                } Failed and cancelled Tasks are listed, never offered.`
+              : `The Job completed: every Task was approved. Fetch the ${fetchCount} below.`;
   const notes =
     integration === null
       ? [
@@ -418,11 +432,11 @@ function skippedReason(db: FactoryDb, jobId: string, stageId: string): string | 
 }
 
 /** Why the Job's newest `pull_request` failed. */
-function pullRequestFailureOf(db: FactoryDb, jobId: string): string {
+function stageFailureOf(db: FactoryDb, jobId: string, stageId: string): string {
   const run = db
     .select({ failureJson: schema.stageRuns.failureJson })
     .from(schema.stageRuns)
-    .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'pull_request')))
+    .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, stageId)))
     .orderBy(desc(schema.stageRuns.attempt))
     .get();
   if (run?.failureJson == null) return 'no detail';

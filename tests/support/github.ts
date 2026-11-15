@@ -182,6 +182,8 @@ export interface FakeGitHub {
   mergePullRequest(fullName: string, number: number, method?: MergeMethod): string;
   setMergeableState(fullName: string, number: number, state: string): void;
   refuseMergeMethod(fullName: string, method: MergeMethod): void;
+  /** The repository's settings allow `method` again. */
+  allowMergeMethod(fullName: string, method: MergeMethod): void;
   refuseReopen(fullName: string, number: number): void;
   /** Queues a one-shot fault for the next API request (matching `path`, when given). */
   simulate(fault: Fault, opts?: { path?: RegExp }): void;
@@ -777,6 +779,9 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
     },
     refuseMergeMethod(fullName, method) {
       repoOf(fullName).refusedMethods.add(method);
+    },
+    allowMergeMethod(fullName, method) {
+      repoOf(fullName).refusedMethods.delete(method);
     },
     refuseReopen(fullName, number) {
       prOf(fullName, number).refuseReopen = true;

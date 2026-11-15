@@ -43,6 +43,7 @@ function input(overrides: Partial<MergeGateInput> = {}): MergeGateInput {
     blockingFindings: 0,
     changesRequestedBy: [],
     policy: 'never_auto',
+    approval: null,
     ...overrides,
   };
 }

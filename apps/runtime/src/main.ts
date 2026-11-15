@@ -53,6 +53,7 @@ import { StageScheduler } from './scheduler.js';
 import { CRASH_POINTS, TaskScheduler } from './execution.js';
 import { recoverTasks } from './recovery.js';
 import { CleanupWorker, openMissingCleanupItems } from './cleanup.js';
+import { Merger } from './merger.js';
 import { GitHubPoller } from './poller.js';
 import { applyLeaseKnobs, parseLeaseKnobs } from './sweeper.js';
 
@@ -295,11 +296,22 @@ const poller = new GitHubPoller({
   },
   log,
 });
+// Merges an approved PR under human_approval (ADR-0038); a transient failure retries at the poll interval.
+const merger = new Merger({
+  db: database.db,
+  github: githubPort,
+  retryMs: github.pollIntervalMs,
+  onCommit: () => {
+    notify();
+  },
+  log,
+});
 const notify = () => {
   outbox.notify();
   scheduler.wake();
   tasks.wake();
   cleanup.wake();
+  merger.wake();
 };
 
 const jobs = new JobService(
@@ -379,6 +391,7 @@ const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requested
   tasks.start();
   cleanup.start();
   poller.start();
+  merger.start();
   writeRuntimeRecord(home, {
     pid: process.pid,
     host: RUNTIME_HOST,
@@ -408,7 +421,13 @@ function shutdown(reason: string): void {
   outbox.close();
   // A Harness Run in flight is cancelled; its Stage Run is resumed at the next start.
   // So is a developer Harness Run or verification command; its Attempt is recovered at the next start.
-  const stopped = Promise.all([scheduler.close(), tasks.close(), cleanup.close(), poller.close()]);
+  const stopped = Promise.all([
+    scheduler.close(),
+    tasks.close(),
+    cleanup.close(),
+    poller.close(),
+    merger.close(),
+  ]);
   server.close(() => {
     void stopped.then(() => {
       finish(reason);
