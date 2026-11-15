@@ -441,8 +441,13 @@ export const ForeignCommitSchema = z.object({
   author: z.string(),
 });
 export type ForeignCommit = z.infer<typeof ForeignCommitSchema>;
-/** A `foreign_push` Attempt's `foreign_commits_json`, newest first. */
+/** A `foreign_push` Attempt's `foreign_commits_json` (or `dropped_commits_json`), newest first. */
 export const ForeignCommitsSchema = z.array(ForeignCommitSchema);
+/** A foreign or dropped commit, with the `foreign_push` Attempt that recorded it and how it ended. */
+const AdoptedCommitSchema = ForeignCommitSchema.extend({
+  attemptId: z.string(),
+  attemptState: z.string(),
+});
 
 export const AttemptSchema = z.object({
   id: z.string(),
@@ -476,6 +481,11 @@ export const AttemptSchema = z.object({
    * (ADR-0042); empty for every other Attempt. Subject and author are untrusted.
    */
   foreignCommits: ForeignCommitsSchema.default([]),
+  /**
+   * The approved commits a foreign rewrite this Attempt adopted dropped
+   * (`adopt_rewrite`, ADR-0042), newest first; empty otherwise.
+   */
+  droppedCommits: ForeignCommitsSchema.default([]),
   /**
    * The questions its Task Result asked (agent-proposed, redacted): the
    * batched Inbox Question for `needs_decision`, or the non-blocking ones left
@@ -613,9 +623,12 @@ export const DeliveryReportSchema = z.object({
        * Branch, each with the `foreign_push` Attempt that fetched and verified
        * it and how that Attempt ended (ADR-0042). Subject and author are untrusted.
        */
-      foreignCommits: z
-        .array(ForeignCommitSchema.extend({ attemptId: z.string(), attemptState: z.string() }))
-        .default([]),
+      foreignCommits: z.array(AdoptedCommitSchema).default([]),
+      /**
+       * The approved commits a foreign rewrite a human adopted dropped from the
+       * branch, each with the `foreign_push` Attempt that adopted it (ADR-0042).
+       */
+      droppedCommits: z.array(AdoptedCommitSchema).default([]),
     })
     .nullable(),
   /**

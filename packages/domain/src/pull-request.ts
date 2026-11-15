@@ -84,6 +84,11 @@ export interface PullRequestBodyInput {
    * subject and author are untrusted.
    */
   foreignCommits: readonly ForeignCommit[];
+  /**
+   * The factory's approved commits a foreign rewrite a human adopted dropped
+   * from the branch (`adopt_rewrite`, ADR-0042), newest first.
+   */
+  droppedCommits: readonly ForeignCommit[];
 }
 
 /** A link GitHub reported, shown only when it is an http(s) URL. */
@@ -158,7 +163,15 @@ export function renderPullRequestBody(input: PullRequestBodyInput, redact: Redac
             input.foreignCommits.map(
               (c) => `${code(c.sha)} by ${code(c.author)}: ${code(c.subject)}`,
             ),
-          )}`
+          )}${
+            input.droppedCommits.length === 0
+              ? ''
+              : `\n\nDropped by a rewrite a human approved: these approved commits are no longer on ${code(input.branch)}.\n\n${list(
+                  input.droppedCommits.map(
+                    (c) => `${code(c.sha)} by ${code(c.author)}: ${code(c.subject)}`,
+                  ),
+                )}`
+          }`
     }`,
     `## Rollback\n\n${input.rollback === null ? 'None supported.' : line(input.rollback)}`,
     `## Branches\n\n${code(input.branch)} merges, \`--no-ff\`, in this order:\n\n${list(

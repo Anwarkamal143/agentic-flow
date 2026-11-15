@@ -73,6 +73,7 @@ function input(overrides: Partial<PullRequestBodyInput> = {}): PullRequestBodyIn
     rollback: null,
     ci: null,
     foreignCommits: [],
+    droppedCommits: [],
     ...overrides,
   };
 }
@@ -192,6 +193,19 @@ describe('renderPullRequestBody', () => {
       '- `3333333333333333333333333333333333333333` by `Bob`: `Fix it @alice ## Merge now`',
     );
     expect(body).not.toMatch(/^## Merge now/m);
+  });
+
+  it('lists the approved commits an adopted rewrite dropped, apart from the foreign ones (ADR-0042)', () => {
+    const body = renderPullRequestBody(
+      input({
+        foreignCommits: [{ sha: '4'.repeat(40), subject: 'Rewrite', author: 'Eve' }],
+        droppedCommits: [{ sha: HEAD, subject: 'Write src/math.ts', author: 'Software Factory' }],
+      }),
+      identity,
+    );
+    expect(body).toMatch(
+      /Dropped by a rewrite a human approved: these approved commits are no longer on `factory\/job_01\/integration`\.\n\n- `1{40}` by `Software Factory`: `Write src\/math\.ts`/,
+    );
   });
 
   it("says there are no foreign commits when every commit is the factory's own", () => {

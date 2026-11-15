@@ -20,9 +20,12 @@
  * later factory push fast-forwards from that head.
  */
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
-import { ForeignCommitsSchema, type ForeignCommit } from '@factory/domain';
+import { ForeignCommitsSchema, type Blocker, type ForeignCommit } from '@factory/domain';
 import { and, asc, eq, lte } from 'drizzle-orm';
-import { stepTask, type JobState, type StageRunStepper } from './engine.js';
+import { changeJob, stepTask, type JobState, type StageRunStepper } from './engine.js';
+import { settleIntegration } from './integration.js';
+import { releaseAttemptTokens } from './worktree.js';
+import { newId } from './ids.js';
 import { passedAttemptOf, rerunDeliveryStages, staleGateResults } from './base-change.js';
 import { latestStageRun } from './replan.js';
 
@@ -108,6 +111,8 @@ export function foreignCommitsOf(
   db: FactoryDb | Tx,
   taskId: string,
   uptoN?: number,
+  /** `dropped`: the approved commits an adopted rewrite dropped instead (ADR-0042). */
+  which: 'foreign' | 'dropped' = 'foreign',
 ): (ForeignCommit & { attemptId: string; attemptState: string })[] {
   const rows = db
     .select()
@@ -124,8 +129,9 @@ export function foreignCommitsOf(
   const seen = new Set<string>();
   const out: (ForeignCommit & { attemptId: string; attemptState: string })[] = [];
   for (const a of rows.reverse()) {
-    if (a.foreignCommitsJson === null) continue;
-    for (const c of ForeignCommitsSchema.parse(JSON.parse(a.foreignCommitsJson))) {
+    const json = which === 'foreign' ? a.foreignCommitsJson : a.droppedCommitsJson;
+    if (json === null) continue;
+    for (const c of ForeignCommitsSchema.parse(JSON.parse(json))) {
       if (seen.has(c.sha)) continue;
       seen.add(c.sha);
       out.push({ ...c, attemptId: a.id, attemptState: a.state });
@@ -142,4 +148,116 @@ export function foreignHeadsOf(db: FactoryDb | Tx, taskId: string): string[] {
     .where(and(eq(schema.attempts.taskId, taskId), eq(schema.attempts.cause, 'foreign_push')))
     .all()
     .flatMap((a) => (a.headSha === null ? [] : [a.headSha]));
+}
+
+/**
+ * Blocks the `claimed` Integration Task whose fetched foreign head rewrote the
+ * Integration Branch (it no longer holds the approved head), in one
+ * transaction: the human Blocker `foreign_push_rewrite` (its Blocker
+ * Approval, adopt the rewrite or cancel the Job, opened by `stepTask`), the
+ * rewrite recorded as the head to adopt, the lease and tokens released, and
+ * `integration_review` settled. No Attempt is made and nothing is checked out
+ * or pushed: the Blocker names the Task itself as its subject (ADR-0034).
+ */
+export function blockOnForeignRewrite(
+  db: FactoryDb,
+  op: { jobId: string; actor: string },
+  taskId: string,
+  rewrite: { approvedHeadSha: string; rewriteSha: string; dropped: number; branch: string },
+): void {
+  changeJob(
+    db,
+    { jobId: op.jobId, expectedVersion: 'current', actor: op.actor },
+    (tx, state, step) => {
+      const task = tx.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).get();
+      if (task?.state !== 'claimed') {
+        throw new Error(`Task ${taskId} is ${String(task?.state)}, not claimed`);
+      }
+      const blocker: Blocker = {
+        kind: 'human',
+        reason: 'foreign_push_rewrite',
+        detail: `someone else rewrote ${rewrite.branch} to ${rewrite.rewriteSha}, which no longer holds the approved head ${rewrite.approvedHeadSha}: adopting it drops ${String(rewrite.dropped)} approved commit(s)`,
+        requiredAction:
+          'decide the Blocker Approval in the Inbox: adopt the rewrite (it is verified and reviewed, and the dropped commits are listed) or cancel the Job',
+        taskId,
+        attemptId: taskId,
+        createdAt: new Date().toISOString(),
+      };
+      stepTask(tx, op, task, 'blocked', {
+        reason: blocker.reason,
+        payload: {
+          foreignPush: true,
+          approvedHeadSha: rewrite.approvedHeadSha,
+          rewriteSha: rewrite.rewriteSha,
+          dropped: rewrite.dropped,
+        },
+        blocker,
+      });
+      // The head a human's adopt_rewrite approves: the one this Blocker names.
+      tx.update(schema.tasks)
+        .set({ foreignHeadSha: rewrite.rewriteSha })
+        .where(eq(schema.tasks.id, taskId))
+        .run();
+      releaseAttemptTokens(tx, taskId, undefined);
+      settleIntegration(tx, state, step);
+    },
+  );
+}
+
+/**
+ * `adopt_rewrite` on a `foreign_push_rewrite` Blocker (ADR-0042), in the
+ * deciding transaction: the human approves the rewrite the Blocker names, and
+ * the Task goes `ready` for the `foreign_push` Attempt that adopts it.
+ */
+export function approveForeignRewrite(
+  tx: Tx,
+  input: {
+    task: typeof schema.tasks.$inferSelect;
+    blocker: Blocker;
+    approvalId: string;
+    actor: string;
+  },
+): void {
+  const { task, blocker, approvalId, actor } = input;
+  if (blocker.reason !== 'foreign_push_rewrite' || task.foreignHeadSha === null) {
+    throw new Error(`a ${blocker.reason} Blocker offers no adopt_rewrite`);
+  }
+  tx.update(schema.tasks)
+    .set({ foreignRewriteApprovedSha: task.foreignHeadSha })
+    .where(eq(schema.tasks.id, task.id))
+    .run();
+  // Approving a rewrite of a published Integration Branch is audited, as a cap raise is.
+  const auditId = newId('aud');
+  const policyRef = `inbox:${approvalId}/adopt_rewrite`;
+  tx.insert(schema.auditLog)
+    .values({
+      id: auditId,
+      ts: new Date().toISOString(),
+      actor,
+      action: 'integration_rewrite.adopted',
+      target: `task:${task.id}`,
+      jobId: task.jobId,
+      beforeJson: JSON.stringify({ foreignRewriteApprovedSha: null }),
+      afterJson: JSON.stringify({ foreignRewriteApprovedSha: task.foreignHeadSha }),
+      policyRef,
+      correlationId: approvalId,
+    })
+    .run();
+  appendEvent(tx, {
+    entityKind: 'task',
+    entityId: task.id,
+    jobId: task.jobId,
+    type: 'audit.recorded',
+    actor,
+    payload: {
+      auditId,
+      action: 'integration_rewrite.adopted',
+      rewriteSha: task.foreignHeadSha,
+      policyRef,
+    },
+  });
+  stepTask(tx, { jobId: task.jobId, actor }, task, 'ready', {
+    reason: 'rewrite_adopted',
+    payload: { approvalId, rewriteSha: task.foreignHeadSha },
+  });
 }

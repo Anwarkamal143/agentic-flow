@@ -169,6 +169,13 @@
       "when": 1794752935287,
       "tag": "0023_clean_psylocke",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1794755749169,
+      "tag": "0024_soft_shard",
+      "breakpoints": true
     }
   ]
 }

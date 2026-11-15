@@ -360,6 +360,11 @@ function writeAttempts(
         `    foreign:   ${c.sha.slice(0, 12)} by ${oneLine(c.author)}: ${oneLine(c.subject)}`,
       );
     }
+    for (const c of a.droppedCommits) {
+      lines.push(
+        `    dropped:   ${c.sha.slice(0, 12)} by ${oneLine(c.author)}: ${oneLine(c.subject)} (an adopted rewrite dropped it)`,
+      );
+    }
     for (const v of a.protocolViolations) lines.push(`    violation: [${v.rule}] ${v.message}`);
     for (const f of a.findings.filter((x) => x.source === 'gate')) {
       lines.push(
@@ -472,6 +477,11 @@ function writeDelivery(report: DeliveryReport): void {
     for (const c of integration.foreignCommits) {
       lines.push(
         `    foreign commit ${c.sha.slice(0, 12)} by ${oneLine(c.author)}: ${oneLine(c.subject)} (verified by attempt ${c.attemptId}: ${c.attemptState})`,
+      );
+    }
+    for (const c of integration.droppedCommits) {
+      lines.push(
+        `    dropped approved commit ${c.sha.slice(0, 12)} by ${oneLine(c.author)}: ${oneLine(c.subject)} (a rewrite adopted by attempt ${c.attemptId})`,
       );
     }
     if (integration.problem !== null) lines.push(`    problem: ${integration.problem}`);

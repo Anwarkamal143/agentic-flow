@@ -247,6 +247,13 @@ export const tasks = sqliteTable(
      * it. Set when the poller sees it, cleared once that Attempt is recorded.
      */
     foreignHeadSha: text('foreign_head_sha'),
+    /**
+     * The foreign rewrite of the Integration Branch a human approved
+     * (`adopt_rewrite` on the `foreign_push_rewrite` Blocker, ADR-0042): a
+     * fetched head that holds it is adopted though it drops approved commits.
+     * Cleared once the `foreign_push` Attempt that adopts it is recorded.
+     */
+    foreignRewriteApprovedSha: text('foreign_rewrite_approved_sha'),
     version: integer('version').notNull(),
   },
   // A key is unique within its Plan: a replaced Plan's Task may share a key with the new one (ADR-0019).
@@ -315,6 +322,11 @@ export const attempts = sqliteTable(
      * subject, author }[]`, newest first; ADR-0042); null for every other Attempt.
      */
     foreignCommitsJson: text('foreign_commits_json'),
+    /**
+     * The approved commits a foreign rewrite this `foreign_push` Attempt adopted
+     * dropped (`{ sha, subject, author }[]`, newest first; ADR-0042); null otherwise.
+     */
+    droppedCommitsJson: text('dropped_commits_json'),
     /** JSON array of `AttemptFinding`: what the factory's Gates found (the review's are in `review_findings`). */
     gateFindingsJson: text('gate_findings_json').notNull().default('[]'),
     /**

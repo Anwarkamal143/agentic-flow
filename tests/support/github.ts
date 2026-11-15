@@ -179,6 +179,11 @@ export interface FakeGitHub {
   moveBase(fullName: string, files: Record<string, string>): string;
   /** Commits `files` on `branch` (created from the default branch if missing), as someone else. */
   pushForeignCommit(fullName: string, branch: string, files: Record<string, string>): string;
+  /**
+   * Force-pushes to `branch` one commit made on the default branch's tip, so
+   * every commit the branch held is dropped (a rewrite); returns its SHA.
+   */
+  forcePushForeignCommit(fullName: string, branch: string, files: Record<string, string>): string;
   closePullRequest(fullName: string, number: number): void;
   reopenPullRequest(fullName: string, number: number): void;
   /** A human merges the PR on GitHub. Returns the merge commit. */
@@ -233,10 +238,18 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
     git(repo.remote.bareDir, ['symbolic-ref', '--short', 'HEAD']).trim();
 
   /** Commits `files` on `branch` of the bare remote through a scratch clone, as `author`. */
-  const commitOn = (repo: Repo, branch: string, files: Record<string, string>, message: string) => {
+  const commitOn = (
+    repo: Repo,
+    branch: string,
+    files: Record<string, string>,
+    message: string,
+    opts: { from?: string; force?: boolean } = {},
+  ) => {
     const work = join(tempDir('fake-gh-work-'), 'w');
     git(dirname(work), ['clone', '--quiet', repo.remote.bareDir, work]);
-    if (head(repo, branch) === undefined) git(work, ['checkout', '--quiet', '-b', branch]);
+    if (opts.from !== undefined)
+      git(work, ['checkout', '--quiet', '-B', branch, `origin/${opts.from}`]);
+    else if (head(repo, branch) === undefined) git(work, ['checkout', '--quiet', '-b', branch]);
     else git(work, ['checkout', '--quiet', branch]);
     for (const [path, content] of Object.entries(files)) {
       mkdirSync(dirname(join(work, path)), { recursive: true });
@@ -244,7 +257,13 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
     }
     git(work, ['add', '--all']);
     git(work, ['commit', '--quiet', '--no-gpg-sign', '-m', message]);
-    git(work, ['push', '--quiet', 'origin', `HEAD:refs/heads/${branch}`]);
+    git(work, [
+      'push',
+      '--quiet',
+      ...(opts.force === true ? ['--force'] : []),
+      'origin',
+      `HEAD:refs/heads/${branch}`,
+    ]);
     return git(work, ['rev-parse', 'HEAD']).trim();
   };
 
@@ -761,6 +780,13 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
     },
     pushForeignCommit(fullName, branch, files) {
       return commitOn(repoOf(fullName), branch, files, 'A commit the factory did not write');
+    },
+    forcePushForeignCommit(fullName, branch, files) {
+      const repo = repoOf(fullName);
+      return commitOn(repo, branch, files, 'A rewrite the factory did not write', {
+        from: defaultBranch(repo),
+        force: true,
+      });
     },
     closePullRequest(fullName, number) {
       prOf(fullName, number).state = 'closed';

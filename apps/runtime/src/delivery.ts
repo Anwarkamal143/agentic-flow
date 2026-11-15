@@ -516,5 +516,6 @@ function integrationOf(
         ? null
         : (blocker?.detail ?? attempt?.exitDetail ?? `the Integration Task is ${state}`),
     foreignCommits: foreignCommitsOf(db, task.id),
+    droppedCommits: foreignCommitsOf(db, task.id, undefined, 'dropped'),
   };
 }

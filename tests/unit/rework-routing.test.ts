@@ -5,7 +5,12 @@
  * Specification Finding re-runs specification (#47) and a Plan Finding goes
  * back to planning (B4). Pure; tested through `@factory/domain`.
  */
-import { attemptsCountedForRework, routeFailedAttempt, type FaultOrigin } from '@factory/domain';
+import {
+  attemptsCountedForRework,
+  foreignPushAdoption,
+  routeFailedAttempt,
+  type FaultOrigin,
+} from '@factory/domain';
 import { describe, expect, it } from 'vitest';
 
 const finding = (faultOrigin: FaultOrigin, blocking = true) => ({ faultOrigin, blocking });
@@ -123,6 +128,15 @@ describe('Rework routing', () => {
         cause: 'foreign_push',
       }),
     ).toEqual({ kind: 'rework' });
+  });
+
+  it('adopts a foreign fast-forward, but waits for a human before adopting a rewrite (ADR-0042)', () => {
+    expect(foreignPushAdoption({ fastForward: true, holdsApprovedRewrite: false })).toBe('adopt');
+    expect(foreignPushAdoption({ fastForward: false, holdsApprovedRewrite: false })).toBe(
+      'needs_approval',
+    );
+    // A rewrite a human approved, or a push on top of it, is adopted.
+    expect(foreignPushAdoption({ fastForward: false, holdsApprovedRewrite: true })).toBe('adopt');
   });
 
   it('does not count a foreign push toward the Rework cap (#63)', () => {

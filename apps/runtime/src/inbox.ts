@@ -5,6 +5,7 @@
  * approval view. Every decision names the item's version and subject, and only
  * a human actor decides.
  */
+import { approveForeignRewrite } from './foreign-push.js';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import { rmSync } from 'node:fs';
 import {
@@ -392,6 +393,22 @@ export class InboxService {
     }
 
     if (input.option === 'rerun_checks') return this.rerunChecksFromItem(item, input, actor);
+
+    if (input.option === 'adopt_rewrite') {
+      // A human approves the foreign rewrite of the Integration Branch (ADR-0042).
+      this.decideOnly(item, input, actor, null, (tx, state, step) => {
+        const { task, blocker } = blockedTaskOf(tx, item);
+        approveForeignRewrite(tx, { task, blocker, approvalId: item.id, actor });
+        requeueExecution(
+          tx,
+          state,
+          step,
+          `Blocker Approval ${item.id}: ${actor} adopted the foreign rewrite`,
+          task,
+        );
+      });
+      return this.get(item.id);
+    }
 
     if (input.option === 'grant') {
       const grant = check.grant ?? 1;

@@ -98,6 +98,14 @@ const REWORK_OVER_FOREIGN: ApprovalOption = {
   agentProposed: false,
 };
 
+const ADOPT_REWRITE: ApprovalOption = {
+  id: 'adopt_rewrite',
+  label: 'Adopt the rewrite',
+  description:
+    'Approve the foreign rewrite of the Integration Branch: the factory fetches it and verifies and reviews it like any foreign push (the path-scope Gate, every command, the Integration Review), and the PR body and the Delivery Report list the approved commits it dropped next to the foreign ones. Nothing is force-pushed back. Written to the audit log.',
+  agentProposed: false,
+};
+
 /** The Blocker reasons that open a Blocker Approval, with their options (§8.1). */
 const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   rework_cap_reached: [GRANT, REPLAN, CANCEL_JOB],
@@ -110,6 +118,8 @@ const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   merge_method_refused: [RETRY_MERGE, CANCEL_JOB],
   ci_failed: [REWORK_FAILED_CHECKS, RERUN_CHECKS, CANCEL_JOB],
   foreign_push_out_of_scope: [REWORK_OVER_FOREIGN, CANCEL_JOB],
+  // No "restore our head": that would overwrite the foreign push.
+  foreign_push_rewrite: [ADOPT_REWRITE, CANCEL_JOB],
 };
 
 /**
@@ -143,6 +153,7 @@ const INTEGRATION_TITLES: Partial<Record<BlockerReason, string>> = {
   merge_method_refused: "can't be merged: GitHub refused the Repository's merge method",
   ci_failed: "can't be merged: a required check failed",
   foreign_push_out_of_scope: 'has a foreign push outside the writable scope',
+  foreign_push_rewrite: 'was rewritten by a foreign push that drops approved commits',
 };
 
 /** The line a Blocker Approval shows in a list. */

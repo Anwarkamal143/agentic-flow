@@ -915,6 +915,12 @@ export function pullRequestBodyInput(
       subject: c.subject,
       author: c.author,
     })),
+    // Approved commits a rewrite a human adopted dropped (ADR-0042).
+    droppedCommits: foreignCommitsOf(db, task.id, attempt.n, 'dropped').map((c) => ({
+      sha: c.sha,
+      subject: c.subject,
+      author: c.author,
+    })),
   };
 }
 

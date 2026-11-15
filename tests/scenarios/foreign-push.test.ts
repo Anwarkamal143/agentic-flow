@@ -66,6 +66,7 @@ interface AttemptBody {
   baseSha: string;
   headSha: string | null;
   foreignCommits: { sha: string; subject: string; author: string }[];
+  droppedCommits: { sha: string; subject: string; author: string }[];
   findings: { rule: string | null; problem: string }[];
   verificationRuns: { key: string; exitCode: number | null; headSha: string; baseSha: string }[];
 }
@@ -87,6 +88,7 @@ interface ReportBody {
   outcome: string;
   integration: {
     foreignCommits: { sha: string; subject: string; attemptId: string; attemptState: string }[];
+    droppedCommits: { sha: string; subject: string; attemptId: string; attemptState: string }[];
   } | null;
 }
 
@@ -134,9 +136,10 @@ function script(integration: Record<string, unknown>[], reviews: Record<string, 
           result: done('Wrote src/a.ts.'),
         },
       ],
-      integration,
+      // The script takes no empty list: a key with none is left out.
+      ...(integration.length === 0 ? {} : { integration }),
     },
-    { a: [APPROVE], integration: reviews },
+    { a: [APPROVE], ...(reviews.length === 0 ? {} : { integration: reviews }) },
   );
 }
 
@@ -403,5 +406,101 @@ describe('foreign pushes to the Integration Branch (#63)', { timeout: 240_000 },
     expect(gh.branchHead(FULL_NAME, branch)).toBe(reworkHead);
     expect(descends(repo.clonePath, foreign, reworkHead)).toBe(true);
     expect(bodyOf(gh)).toContain(`\`${foreign}\``);
+  });
+
+  it('blocks a foreign rewrite of the Integration Branch on a human, and on adopt_rewrite verifies and reviews it and lists the dropped approved commits', async () => {
+    const { gh, rt, repo, jobId, pr, branch } = await start([], [APPROVE]);
+    const approvedHead = pr.headSha;
+    // Someone force-pushes a rewrite: one commit on the default branch, inside the scope.
+    const rewrite = gh.forcePushForeignCommit(FULL_NAME, branch, {
+      'src/a.ts': 'export const a = 5;\n',
+    });
+    expect(descends(repo.clonePath, approvedHead, rewrite)).toBe(false);
+    await until(
+      () => readJob(rt, jobId),
+      (j) => stagesOf(j, 'integration_review').at(-1) === 'waiting_human',
+      'the rewrite Blocker',
+    );
+    const blocked = await integration(rt, jobId);
+    expect(blocked.task.state).toBe('blocked');
+    expect(blocked.task.blocker?.reason).toBe('foreign_push_rewrite');
+    expect(blocked.task.blocker?.detail).toContain(rewrite);
+    expect(blocked.task.blocker?.detail).toContain(approvedHead);
+    // Not adopted before a human approves, and never force-pushed back.
+    expect(blocked.attempts.map((a) => a.cause)).toEqual(['merge']);
+    expect(gh.branchHead(FULL_NAME, branch)).toBe(rewrite);
+
+    const [item] = (await itemsOf(rt, jobId, 'blocker')).filter((i) => i.state === 'open');
+    if (item === undefined) throw new Error('no Blocker Approval');
+    expect(item.options.map((o) => o.id)).toEqual(['adopt_rewrite', 'cancel_job']);
+    const decided = await post(rt, `/v1/inbox/${item.id}/decide`, {
+      expectedVersion: item.version,
+      subjectRef: item.subjectRef,
+      option: 'adopt_rewrite',
+    });
+    expect(decided.status, await decided.clone().text()).toBe(200);
+
+    // Adopted: verified and reviewed like any foreign push.
+    await settled(rt, jobId, 'superseded,waiting_human');
+    const { task, attempts, reviews } = await integration(rt, jobId);
+    expect(task.state).toBe('approved');
+    expect(attempts.map((a) => [a.cause, a.state])).toEqual([
+      ['merge', 'passed'],
+      ['foreign_push', 'passed'],
+    ]);
+    const adoption = attempts[1] as AttemptBody;
+    expect(adoption.headSha).toBe(rewrite);
+    expect(adoption.verificationRuns.map((r) => [r.key, r.exitCode, r.headSha])).toEqual([
+      ['test', 0, rewrite],
+    ]);
+    expect(reviews.find((r) => r.attemptId === adoption.id)).toMatchObject({
+      headSha: rewrite,
+      outcome: 'approved',
+    });
+    expect(adoption.foreignCommits.map((c) => c.sha)).toEqual([rewrite]);
+    // The approved commits the rewrite dropped are listed, the approved head among them.
+    const dropped = adoption.droppedCommits.map((c) => c.sha);
+    expect(dropped).toContain(approvedHead);
+    expect(gh.branchHead(FULL_NAME, branch)).toBe(rewrite);
+    expect(await pullRequest(rt, jobId)).toMatchObject({ headSha: rewrite, pushedSha: rewrite });
+    expect(bodyOf(gh)).toContain('Dropped by a rewrite');
+    expect(bodyOf(gh)).toContain(`\`${approvedHead}\``);
+    const approvals = (await itemsOf(rt, jobId, 'blocker')).filter((i) => i.id === item.id);
+    expect(approvals.map((i) => i.state)).toEqual(['decided']);
+    const audited = (await eventsOf(rt, jobId)).filter((e) => e.type === 'audit.recorded');
+    expect(audited.map((e) => [e.payload['action'], e.payload['rewriteSha']])).toEqual([
+      ['integration_rewrite.adopted', rewrite],
+    ]);
+
+    gh.mergePullRequest(FULL_NAME, pr.number);
+    const closed = await waitForJob(rt, jobId, (j) => j.status === 'completed', 60_000);
+    expect(closed.status, rt.output()).toBe('completed');
+    const report = await reportOf(rt, jobId);
+    expect(report.integration?.foreignCommits.map((c) => c.sha)).toEqual([rewrite]);
+    expect(report.integration?.droppedCommits.map((c) => c.sha)).toEqual(dropped);
+    expect(report.integration?.droppedCommits[0]?.attemptId).toBe(adoption.id);
+  });
+
+  it('cancels the Job from the rewrite Blocker without touching the foreign rewrite', async () => {
+    const { gh, rt, jobId, branch } = await start([], []);
+    const rewrite = gh.forcePushForeignCommit(FULL_NAME, branch, {
+      'src/a.ts': 'export const a = 5;\n',
+    });
+    const item = await until(
+      async () => (await itemsOf(rt, jobId, 'blocker')).find((i) => i.state === 'open'),
+      (i) => i !== undefined,
+      'the rewrite Blocker Approval',
+    );
+    if (item === undefined) throw new Error('no Blocker Approval');
+    const decided = await post(rt, `/v1/inbox/${item.id}/decide`, {
+      expectedVersion: item.version,
+      subjectRef: item.subjectRef,
+      option: 'cancel_job',
+    });
+    expect(decided.status, await decided.clone().text()).toBe(200);
+    const cancelled = await waitForJob(rt, jobId, (j) => j.status === 'cancelled', 30_000);
+    expect(cancelled.status).toBe('cancelled');
+    expect((await integration(rt, jobId)).attempts.map((a) => a.cause)).toEqual(['merge']);
+    expect(gh.branchHead(FULL_NAME, branch)).toBe(rewrite);
   });
 });

@@ -119,7 +119,28 @@ export const BlockerReasonSchema = z.enum([
    * overwrites someone else's commits, so a human decides.
    */
   'foreign_push_out_of_scope',
+  /**
+   * A foreign push rewrote the Integration Branch: its head no longer holds
+   * the approved head, so adopting it drops approved commits (ADR-0042). A
+   * rewrite of a published Integration Branch needs a human's Approval.
+   */
+  'foreign_push_rewrite',
 ]);
+
+/**
+ * Whether the factory adopts a foreign head on the Integration Branch now, or
+ * waits for a human's Approval (`foreign_push_rewrite`, ADR-0042): a head that
+ * holds the approved head (a fast-forward), or one that holds a rewrite a human
+ * already approved, is adopted; any other rewrite is not. Pure.
+ */
+export function foreignPushAdoption(input: {
+  /** The fetched head holds the approved head. */
+  fastForward: boolean;
+  /** The fetched head holds the rewrite a human approved (`adopt_rewrite`); `false` when none was. */
+  holdsApprovedRewrite: boolean;
+}): 'adopt' | 'needs_approval' {
+  return input.fastForward || input.holdsApprovedRewrite ? 'adopt' : 'needs_approval';
+}
 export type BlockerReason = z.infer<typeof BlockerReasonSchema>;
 
 /** Why work cannot proceed, and what would clear it. Stored on the Task and on its Stage Run. */

@@ -30,6 +30,7 @@ import {
   UsageSchema,
   type HarnessExit,
   routeFailedAttempt,
+  foreignPushAdoption,
   type AttemptCause,
   type ForeignCommit,
   type AnsweredQuestion,
@@ -148,6 +149,7 @@ import {
   mergeBaseIn,
   passedAttemptOf,
 } from './base-change.js';
+import { blockOnForeignRewrite } from './foreign-push.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
   allocatePortBlock,
@@ -862,6 +864,7 @@ export class TaskScheduler {
             protocolViolationsJson: '[]',
             // A foreign push verified again in place keeps the foreign commits it fetched (ADR-0042).
             foreignCommitsJson: remerge ? previous.foreignCommitsJson : null,
+            droppedCommitsJson: remerge ? previous.droppedCommitsJson : null,
             startedAt: now,
             version: 0,
           })
@@ -1219,6 +1222,7 @@ export class TaskScheduler {
         mergedIn: built.merged,
       },
       foreignCommits: null,
+      droppedCommits: null,
     });
   }
 
@@ -1271,10 +1275,33 @@ export class TaskScheduler {
           `the Integration Branch Worktree has uncommitted changes (${dirty.join(', ')}): the foreign push is not checked out over them`,
         );
       }
+      const fastForward = await isAncestor(clone, approved.headSha, headSha);
+      const approvedRewrite = task.foreignRewriteApprovedSha;
+      // The approved commits a rewrite drops from the branch (none for a fast-forward).
+      const dropped = fastForward
+        ? []
+        : await authoredCommitsBetween(clone, headSha, approved.headSha);
+      const decision = foreignPushAdoption({
+        fastForward,
+        holdsApprovedRewrite:
+          approvedRewrite !== null && (await isAncestor(clone, approvedRewrite, headSha)),
+      });
+      // A rewrite waits for a human's Approval: nothing is checked out, nothing pushed back.
+      if (decision === 'needs_approval') return { kind: 'rewrite' as const, headSha, dropped };
       const commits = await authoredCommitsBetween(clone, approved.headSha, headSha);
       await resetWorktreeTo(worktree.path, headSha);
-      return { headSha, commits, fastForward: await isAncestor(clone, approved.headSha, headSha) };
+      return { kind: 'adopt' as const, headSha, commits, dropped, fastForward };
     });
+    if (fetched.kind === 'rewrite') {
+      blockOnForeignRewrite(db, { jobId: input.job.id, actor: ACTOR }, task.id, {
+        approvedHeadSha: approved.headSha,
+        rewriteSha: fetched.headSha,
+        dropped: fetched.dropped.length,
+        branch: worktree.branch,
+      });
+      this.opts.onCommit();
+      return;
+    }
     await this.verifyFactoryHead(harness, input, slot, {
       cause: 'foreign_push',
       worktree,
@@ -1286,8 +1313,12 @@ export class TaskScheduler {
         // False when the foreign push rewrote the branch rather than adding to it.
         fastForward: fetched.fastForward,
         foreignCommits: fetched.commits.map((c) => c.sha),
+        droppedCommits: fetched.dropped.map((c) => c.sha),
+        // The rewrite a human approved through adopt_rewrite, when it was one.
+        approvedRewriteSha: fetched.fastForward ? null : task.foreignRewriteApprovedSha,
       },
       foreignCommits: fetched.commits,
+      droppedCommits: fetched.dropped,
     });
   }
 
@@ -1314,6 +1345,7 @@ export class TaskScheduler {
       headSha: string;
       started: Record<string, unknown>;
       foreignCommits: ForeignCommit[] | null;
+      droppedCommits: ForeignCommit[] | null;
     },
   ): Promise<void> {
     const { db } = this.opts;
@@ -1374,6 +1406,10 @@ export class TaskScheduler {
             protocolViolationsJson: '[]',
             foreignCommitsJson:
               made.foreignCommits === null ? null : JSON.stringify(made.foreignCommits),
+            droppedCommitsJson:
+              made.droppedCommits === null || made.droppedCommits.length === 0
+                ? null
+                : JSON.stringify(made.droppedCommits),
             startedAt: now,
             version: 0,
           })
@@ -1398,7 +1434,11 @@ export class TaskScheduler {
         });
         // The request is answered by this Attempt: a crash before here redoes it from the approved head.
         tx.update(schema.tasks)
-          .set(cause === 'base_merge' ? { baseMergeRequested: false } : { foreignHeadSha: null })
+          .set(
+            cause === 'base_merge'
+              ? { baseMergeRequested: false }
+              : { foreignHeadSha: null, foreignRewriteApprovedSha: null },
+          )
           .where(eq(schema.tasks.id, task.id))
           .run();
         const claimed = requireTask(tx, task.id, 'claimed');
