@@ -223,7 +223,7 @@ describe('the poller and the Merge Gate under never_auto', { timeout: 150_000 },
     const head = gh.branchHead(FULL_NAME, branch);
     if (head === undefined) throw new Error('the Integration Branch was not pushed');
 
-    // One merge item for the PR (head, base): "merge on GitHub", request_changes is #60's.
+    // One merge item for the PR (head, base): "merge on GitHub", or request changes.
     const items = (await json<ItemBody[]>(rt.request('/v1/inbox'))).filter(
       (i) => i.kind === 'merge',
     );
@@ -231,7 +231,7 @@ describe('the poller and the Merge Gate under never_auto', { timeout: 150_000 },
     const [item] = items as [ItemBody];
     expect(item).toMatchObject({ stageId: 'merge_approval', state: 'open' });
     expect(item.subjectRef).toContain(head);
-    expect(item.options.map((o) => o.id)).toEqual(['cancel_job']);
+    expect(item.options.map((o) => o.id)).toEqual(['request_changes', 'cancel_job']);
     expect(`${item.question} ${item.why}`).toMatch(/merge .*on GitHub/i);
 
     // A green check on the head: every condition passes but the policy (never_auto).

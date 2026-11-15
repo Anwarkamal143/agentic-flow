@@ -25,7 +25,7 @@ import {
 import type { GitHubPort, GitHubRead } from '@factory/github';
 import { and, desc, eq } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
-import { changeJob } from './engine.js';
+import { changeJob, readJobState } from './engine.js';
 import {
   assessPoll,
   POLLER,
@@ -34,6 +34,13 @@ import {
   type Observation,
 } from './merge-approval.js';
 import { PassLoop } from './pass-loop.js';
+import {
+  describeTriggers,
+  feedbackItems,
+  recordFeedback,
+  startFeedbackRework,
+  unseenFeedback,
+} from './pr-feedback.js';
 import { latestStageRun } from './replan.js';
 import { bodyHash, pullRequestBodyInput } from './pull-request.js';
 
@@ -118,6 +125,13 @@ export class GitHubPoller {
     const reviews = await this.read(`reviews:${row.id}`, (etag) =>
       github.listReviews(repo, row.number, etag === undefined ? {} : { etag }),
     );
+    const comments = await this.read(`comments:${row.id}`, (etag) =>
+      github.listIssueComments(repo, row.number, etag === undefined ? {} : { etag }),
+    );
+    const reviewComments = await this.read(`review-comments:${row.id}`, (etag) =>
+      github.listReviewComments(repo, row.number, etag === undefined ? {} : { etag }),
+    );
+    const feedback = feedbackItems(reviews, comments, reviewComments);
     const seen: Observation = {
       state: pr.merged ? 'merged' : pr.state,
       headSha: head,
@@ -138,7 +152,12 @@ export class GitHubPoller {
     if (before === undefined) return;
     const assessed = assessPoll(db, before, seen, opts);
     let gate: MergeGate = assessed.gate;
-    if (assessed.changes.length === 0 && !assessed.gateChanged) {
+    const quiet =
+      assessed.changes.length === 0 &&
+      !assessed.gateChanged &&
+      !assessed.itemsStale &&
+      unseenFeedback(db, row.id, feedback).length === 0;
+    if (quiet) {
       // A quiet poll: nothing new, so no event and no Job change; only when it was read.
       db.update(schema.pullRequests)
         .set({ lastPolledAt: opts.now })
@@ -152,12 +171,34 @@ export class GitHubPoller {
           // The Job may have been cancelled since the PR was picked: then nothing is recorded.
           const holder = latestStageRun(state, 'merge_approval');
           if (holder?.state !== 'waiting_human') return undefined;
-          return recordPoll(tx, row.id, seen, opts, step, state);
+          // New feedback first: a trigger supersedes merge_approval before the poll is recorded.
+          const pr = tx
+            .select()
+            .from(schema.pullRequests)
+            .where(eq(schema.pullRequests.id, row.id))
+            .get();
+          if (pr === undefined) return undefined;
+          const triggers = recordFeedback(tx, pr, unseenFeedback(tx, row.id, feedback), {
+            redact: this.deps.redact,
+            now: opts.now,
+            actor: POLLER,
+          });
+          const reworked =
+            triggers.length > 0 &&
+            seen.state === 'open' &&
+            startFeedbackRework(tx, state, step, {
+              pr,
+              actor: POLLER,
+              why: describeTriggers(triggers),
+            });
+          const polled = recordPoll(tx, row.id, seen, opts, step, readJobState(tx, row.jobId));
+          return { gate: polled, reworked };
         },
       );
       this.deps.onCommit();
-      if (recorded === undefined) return;
-      gate = recorded;
+      // A Rework re-renders the body when it updates the PR (the next pull_request).
+      if (recorded === undefined || recorded.reworked) return;
+      gate = recorded.gate;
     }
     if (seen.state === 'open') await this.updateBody(row.id, gate, seen.checks);
   }

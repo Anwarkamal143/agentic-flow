@@ -14,13 +14,14 @@ import {
 } from './merge-gate.js';
 import type { Risk } from './proposals.js';
 import type { Redactor } from './redaction.js';
+import { factoryMarker } from './pr-feedback.js';
 
 /**
  * The hidden marker in the body of each PR the factory opens for a Job. Recovery
  * adopts a PR only if it carries it, and the poller ignores text with it.
  */
 export function pullRequestMarker(jobId: string): string {
-  return `<!-- factory:${jobId}:pull_request -->`;
+  return factoryMarker(jobId, 'pull_request');
 }
 
 /** `true` when `body` carries the PR marker of `jobId`. */

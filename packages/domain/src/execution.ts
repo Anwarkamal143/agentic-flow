@@ -10,6 +10,7 @@ import { RiskSchema, RuleIssueSchema, TaskRoleSchema } from './proposals.js';
 import { AnsweredQuestionSchema, InboxQuestionSchema } from './questions.js';
 import { GrantGuidanceSchema } from './blocker-approvals.js';
 import { PullRequestStateSchema } from './pull-request.js';
+import { PrFeedbackEntrySchema } from './pr-feedback.js';
 
 // ---- Task states (ARCHITECTURE §4.4) ---------------------------------------
 
@@ -57,7 +58,9 @@ export const TASK_TRANSITIONS: Readonly<Record<TaskState, readonly TaskState[]>>
   changes_requested: ['ready', 'blocked', 'failed', 'cancelled'],
   // `→ cancelled`: a Replan didn't carry it over (its definition changed, or its approval no
   // longer holds); its approved head stays on record (ADR-0029).
-  approved: ['integrated', 'cancelled'],
+  // `→ changes_requested`: feedback on the open PR sends the approved Integration Task back
+  // for Rework on the Integration Branch (#60, ADR-0039); the runtime allows it for that Task only.
+  approved: ['integrated', 'changes_requested', 'cancelled'],
   blocked: ['ready', 'cancelled'],
   integrated: [],
   failed: [],
@@ -245,6 +248,12 @@ export const TaskPacketSchema = z.object({
      * grant so far on the Task. Guidance only: it never changes the scope.
      */
     guidance: z.array(GrantGuidanceSchema).default([]),
+    /**
+     * Feedback on the open PR that this Rework of the Integration Task answers
+     * (#60, ADR-0039): GitHub text labelled untrusted, and the operator's Inbox
+     * request. Context only: it never changes the scope or a policy.
+     */
+    prFeedback: z.array(PrFeedbackEntrySchema).default([]),
   }),
   limits: z.object({ maxTurns: z.number().int().positive(), wallClockS: z.number().positive() }),
   protocol: z.object({ resultFile: z.literal(RESULT_FILE), mayAskQuestions: z.boolean() }),

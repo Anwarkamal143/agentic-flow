@@ -464,23 +464,37 @@ export const MERGE_OPTION: ApprovalOption = {
 };
 
 /**
+ * `request_changes` (#60, ADR-0039): the comment (required) is the change
+ * request; a Rework on the Integration Branch follows and the PR is updated in place.
+ */
+export const REQUEST_CHANGES_OPTION: ApprovalOption = {
+  id: 'request_changes',
+  label: 'Request changes',
+  description:
+    "Send the pull request back for Rework with your comment as the change request: a developer Attempt on the Integration Branch (counts against the Integration Task's maxAttempts), then the Integration Review again, and the same PR updated in place.",
+  agentProposed: false,
+};
+
+/**
  * The options of a `merge` item under `never_auto` (Q15): the merge is the
  * human's, on GitHub, and the poller closes the item when it sees it.
- * `request_changes` comes with the PR feedback loop (#60).
  */
-export const NEVER_AUTO_MERGE_OPTIONS: readonly ApprovalOption[] = [CANCEL_JOB_OPTION];
+export const NEVER_AUTO_MERGE_OPTIONS: readonly ApprovalOption[] = [
+  REQUEST_CHANGES_OPTION,
+  CANCEL_JOB_OPTION,
+];
 
 /**
  * A `merge` item's options for `gate` (Q15): under `human_approval`, `merge`
- * only while every other condition passes; `cancel_job` always. `null` is a
- * gate not evaluated yet. `request_changes` is #60's. Pure.
+ * only while every other condition passes; `request_changes` and
+ * `cancel_job` always. `null` is a gate not evaluated yet. Pure.
  */
 export function mergeItemOptions(
   policy: MergePolicy,
   gate: MergeGate | null,
 ): readonly ApprovalOption[] {
   if (policy === 'human_approval' && gate !== null && readyButForPolicy(gate)) {
-    return [MERGE_OPTION, CANCEL_JOB_OPTION];
+    return [MERGE_OPTION, REQUEST_CHANGES_OPTION, CANCEL_JOB_OPTION];
   }
   return NEVER_AUTO_MERGE_OPTIONS;
 }

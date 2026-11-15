@@ -211,7 +211,7 @@ function openMergeItem(
   });
 }
 
-function openMergeItemsOf(tx: Tx, pr: PullRequestRow) {
+function openMergeItemsOf(tx: Tx | FactoryDb, pr: PullRequestRow) {
   return tx
     .select()
     .from(schema.approvals)
@@ -231,6 +231,7 @@ function closeItem(
   row: typeof schema.approvals.$inferSelect,
   values: Partial<typeof schema.approvals.$inferInsert>,
   event: { type: string; payload: Record<string, unknown> },
+  actor: string = POLLER,
 ): void {
   const updated = tx
     .update(schema.approvals)
@@ -243,9 +244,50 @@ function closeItem(
     entityId: row.id,
     jobId: row.jobId,
     type: event.type,
-    actor: POLLER,
+    actor,
     payload: { kind: row.kind, subjectRef: row.subjectRef, ...event.payload },
   });
+}
+
+/**
+ * Supersedes every open `merge` item of the Job (#60, ADR-0039): feedback
+ * sends the PR back for Rework, and a new item is opened on the new head.
+ */
+export function supersedeMergeItems(tx: Tx, jobId: string, actor: string, reason: string): void {
+  const open = tx
+    .select()
+    .from(schema.approvals)
+    .where(
+      and(
+        eq(schema.approvals.jobId, jobId),
+        eq(schema.approvals.kind, 'merge'),
+        eq(schema.approvals.state, 'open'),
+      ),
+    )
+    .all();
+  for (const item of open) {
+    closeItem(
+      tx,
+      item,
+      { state: 'superseded' },
+      { type: 'approval.superseded', payload: { reason } },
+      actor,
+    );
+  }
+}
+
+/**
+ * `true` when an open `merge` item of the PR holds other options than the
+ * gate stored for it gives: an item opened before `request_changes` existed
+ * (#60), so the next poll brings it in step.
+ */
+function mergeItemOptionsStale(tx: Tx | FactoryDb, pr: PullRequestRow): boolean {
+  const job = tx.select().from(schema.jobs).where(eq(schema.jobs.id, pr.jobId)).get();
+  if (job === undefined) return false;
+  const options = JSON.stringify(
+    mergeItemOptions(policyOfConfig(job.configSnapshotJson), storedGate(pr)),
+  );
+  return openMergeItemsOf(tx, pr).some((item) => item.optionsJson !== options);
 }
 
 /**
@@ -430,6 +472,8 @@ export interface PollAssessment {
   gate: MergeGate;
   stored: MergeGate | null;
   gateChanged: boolean;
+  /** An open `merge` item holds options the stored gate no longer gives (opened before #60). */
+  itemsStale: boolean;
 }
 
 /** Compares a poll with the rows (read-only): nothing to write when `changes` is empty and the gate is unchanged. */
@@ -470,7 +514,8 @@ export function assessPoll(
   const stored =
     before.gateJson === null ? null : MergeGateSchema.parse(JSON.parse(before.gateJson));
   const gateChanged = headMoved || baseMoved || JSON.stringify(stored) !== JSON.stringify(gate);
-  return { changes, headMoved, baseMoved, checksChanged, gate, stored, gateChanged };
+  const itemsStale = mergeItemOptionsStale(tx, before);
+  return { changes, headMoved, baseMoved, checksChanged, gate, stored, gateChanged, itemsStale };
 }
 
 /**
@@ -493,12 +538,8 @@ export function recordPoll(
     .where(eq(schema.pullRequests.id, prId))
     .get();
   if (before === undefined) throw new Error(`no pull request ${prId}`);
-  const { changes, headMoved, baseMoved, checksChanged, gate, stored, gateChanged } = assessPoll(
-    tx,
-    before,
-    seen,
-    opts,
-  );
+  const { changes, headMoved, baseMoved, checksChanged, gate, stored, gateChanged, itemsStale } =
+    assessPoll(tx, before, seen, opts);
   if (changes.length > 0) {
     const updated = tx
       .update(schema.pullRequests)
@@ -584,7 +625,7 @@ export function recordPoll(
     if (holder?.state === 'waiting_human') {
       openMergeItem(tx, pr.jobId, holder.id, current, policy, POLLER);
     }
-  } else if (gateChanged && seen.state === 'open') {
+  } else if ((gateChanged || itemsStale) && seen.state === 'open') {
     syncMergeItemOptions(tx, current, policy, gate);
   }
   if (seen.state === 'merged' && before.state !== 'merged')
@@ -758,7 +799,10 @@ function approvedShas(item: ApprovalRow | undefined): { headSha: string; baseSha
 }
 
 /** The PR a `merge` item decides on: its subject is `<pr id>@<head>..<base>`. */
-function pullRequestOfItem(tx: Tx, item: ApprovalRow): PullRequestRow {
+export function pullRequestOfItem(
+  tx: Tx,
+  item: Pick<ApprovalRow, 'id' | 'subjectRef'>,
+): PullRequestRow {
   const prId = item.subjectRef.slice(0, item.subjectRef.indexOf('@'));
   const pr = tx.select().from(schema.pullRequests).where(eq(schema.pullRequests.id, prId)).get();
   if (pr === undefined) throw new Error(`merge item ${item.id} names no pull request`);

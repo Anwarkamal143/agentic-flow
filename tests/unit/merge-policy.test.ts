@@ -93,21 +93,34 @@ describe('the merge item under human_approval', () => {
     expect(approved.conditions.find((c) => c.id === 'policy')?.reason).toContain('user:local');
   });
 
-  it('offers merge only while every other gate condition passes, beside cancel_job', () => {
+  it('offers merge only while every other gate condition passes, beside request_changes and cancel_job', () => {
     const green = evaluateMergeGate(input());
     expect(mergeItemOptions('human_approval', green).map((o) => o.id)).toEqual([
       'merge',
+      'request_changes',
       'cancel_job',
     ]);
     const red = evaluateMergeGate(input({ checks: [{ name: 'build', outcome: 'failure' }] }));
-    expect(mergeItemOptions('human_approval', red).map((o) => o.id)).toEqual(['cancel_job']);
+    expect(mergeItemOptions('human_approval', red).map((o) => o.id)).toEqual([
+      'request_changes',
+      'cancel_job',
+    ]);
     const pending = evaluateMergeGate(input({ pr: { ...input().pr, mergeableState: 'blocked' } }));
-    expect(mergeItemOptions('human_approval', pending).map((o) => o.id)).toEqual(['cancel_job']);
-    expect(mergeItemOptions('human_approval', null).map((o) => o.id)).toEqual(['cancel_job']);
+    expect(mergeItemOptions('human_approval', pending).map((o) => o.id)).toEqual([
+      'request_changes',
+      'cancel_job',
+    ]);
+    expect(mergeItemOptions('human_approval', null).map((o) => o.id)).toEqual([
+      'request_changes',
+      'cancel_job',
+    ]);
   });
 
   it('never offers merge under never_auto, even with every other condition passing', () => {
     const green = evaluateMergeGate(input({ policy: 'never_auto' }));
-    expect(mergeItemOptions('never_auto', green).map((o) => o.id)).toEqual(['cancel_job']);
+    expect(mergeItemOptions('never_auto', green).map((o) => o.id)).toEqual([
+      'request_changes',
+      'cancel_job',
+    ]);
   });
 });

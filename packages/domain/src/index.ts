@@ -56,6 +56,7 @@ export * from './github.js';
 export * from './integration.js';
 export * from './pull-request.js';
 export * from './merge-gate.js';
+export * from './pr-feedback.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 

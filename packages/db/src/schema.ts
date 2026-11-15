@@ -625,3 +625,39 @@ export const prChecks = sqliteTable(
   },
   (t) => [uniqueIndex('pr_checks_identity').on(t.pullRequestId, t.headSha, t.source, t.name)],
 );
+
+/**
+ * Feedback on a factory PR (#60, ADR-0039): each review or comment the poller
+ * classified (`trigger` or `context`; ignored text is not kept), and the
+ * operator's `request_changes` on a `merge` item (`source: inbox`). The body
+ * is redacted and stays untrusted GitHub text. `attempt_id` is the Rework
+ * Attempt that carried it in its packet; `null` until one does.
+ */
+export const prFeedback = sqliteTable(
+  'pr_feedback',
+  {
+    id: text('id').primaryKey(),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    pullRequestId: text('pull_request_id')
+      .notNull()
+      .references(() => pullRequests.id),
+    /** `review | issue_comment | review_comment | inbox`. */
+    source: text('source').notNull(),
+    /** GitHub's id of the review or comment; the Inbox Item's id for `inbox`. */
+    externalId: text('external_id').notNull(),
+    author: text('author'),
+    reviewState: text('review_state'),
+    path: text('path'),
+    url: text('url'),
+    /** `trigger | context`. */
+    kind: text('kind').notNull(),
+    body: text('body').notNull(),
+    /** When GitHub says it was written (or the Inbox decision's time). */
+    createdAt: text('created_at').notNull(),
+    observedAt: text('observed_at').notNull(),
+    attemptId: text('attempt_id').references(() => attempts.id),
+  },
+  (t) => [uniqueIndex('pr_feedback_identity').on(t.pullRequestId, t.source, t.externalId)],
+);

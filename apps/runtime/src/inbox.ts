@@ -24,6 +24,7 @@ import {
   checkInboxChange,
   InboxQuestionSchema,
   checkPlanChangeRequest,
+  checkMergeChangeRequest,
   EffectiveConfigSchema,
   humanDecisionPoints,
   InboxDecisionSchema,
@@ -65,6 +66,7 @@ import { inspectSpool } from '@factory/harness';
 import { openBlockerItem, raiseCap, replaceBlocker } from './blocker-approvals.js';
 import { applyCleanupDecision } from './cleanup.js';
 import { approveMerge, retryMerge } from './merge-approval.js';
+import { requestPullRequestChanges } from './pr-feedback.js';
 import { currentSpec } from './criteria.js';
 import {
   changeJob,
@@ -216,6 +218,17 @@ export class InboxService {
     // the merger merges (ADR-0038). Otherwise the only decision is to cancel the Job; under
     // never_auto the merge is the human's, on GitHub, and the poller closes the item (ADR-0037).
     merge: async (item, input, actor) => {
+      // `request_changes` (comment required): Rework on the Integration Branch, the PR
+      // updated in place (ADR-0039).
+      if (input.option === 'request_changes') {
+        const refusal = checkMergeChangeRequest(input.comment);
+        if (refusal !== undefined) throw new ApiFailure(400, refusal.code, refusal.message);
+        const comment = input.comment ?? '';
+        this.decideOnly(item, input, actor, null, (tx, state, step, row) => {
+          requestPullRequestChanges(tx, row, comment, actor, state, step);
+        });
+        return this.get(item.id);
+      }
       if (input.option === 'merge') {
         this.decideOnly(item, input, actor, null, (tx, state, step, row) => {
           approveMerge(tx, row, actor, state, step);
