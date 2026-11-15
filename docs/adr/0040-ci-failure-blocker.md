@@ -34,6 +34,6 @@ A feedback Rework started by GitHub (a review, a `/factory` comment) while a `ci
 ## Consequences
 
 - After `rerun_checks`, a poll that lands before GitHub has queued the re-run opens a new item for the same failure. That is noise, but it is never a Blocker left with nothing to decide.
-- **Unproven on the real GitHub:** `POST /check-runs/:id/rerequest` is accepted only for check runs made by the GitHub App that asks. A personal token re-running a run made by GitHub Actions may be refused, which surfaces as 502 `github_failed` with the item still open. Re-running through Actions (`POST /actions/jobs/:id/rerun`) is not built. C7 `[real]` is where this gets settled.
+- **Unproven on the real GitHub:** `POST /check-runs/:id/rerequest` is accepted only for check runs made by the GitHub App that asks. A personal token re-running a run made by GitHub Actions may be refused, which surfaces as 502 `github_failed` with the item still open. Re-running through Actions (`POST /actions/jobs/:id/rerun`) is not built. C7 `[real]` runs the happy path with no CI failure, so it does not settle this; a `[real]` test of a re-run would have to be added on purpose.
 - The task packet stays `task-packet@6`: `source: ci` widens an enum, and older packets still parse.
 - Tested against the fake GitHub only. The fake re-runs a check run in place (same id, `queued`); real GitHub may create a new run, which `observedChecks` already treats as the newest of its name.
