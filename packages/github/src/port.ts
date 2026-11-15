@@ -59,6 +59,8 @@ export interface CheckRun {
   status: string;
   conclusion: string | null;
   detailsUrl: string | null;
+  /** `output.summary`, or `output.title` when it has none: CI text, untrusted. */
+  summary: string | null;
 }
 
 export interface CommitStatus {
@@ -130,6 +132,13 @@ const checkRunsWire = z.object({
       status: z.string(),
       conclusion: z.string().nullable().optional(),
       details_url: z.string().nullable().optional(),
+      output: z
+        .object({
+          title: z.string().nullable().optional(),
+          summary: z.string().nullable().optional(),
+        })
+        .nullable()
+        .optional(),
     }),
   ),
 });
@@ -287,6 +296,7 @@ export class GitHubPort {
         status: c.status,
         conclusion: c.conclusion ?? null,
         detailsUrl: c.details_url ?? null,
+        summary: c.output?.summary ?? c.output?.title ?? null,
       })),
     );
   }

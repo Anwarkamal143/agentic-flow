@@ -5,6 +5,7 @@
  * Pure; tested through `@factory/domain`.
  */
 import {
+  blockerItemTitle,
   blockerOptions,
   checkBlockerDecision,
   grantedCap,
@@ -48,6 +49,18 @@ describe('the option sets of a Blocker Approval', () => {
 
   it('a merge method GitHub refused offers retrying the merge and cancelling the Job (#59)', () => {
     expect(ids('merge_method_refused')).toEqual(['retry_merge', 'cancel_job']);
+  });
+
+  it('a failed required check offers Rework with the check as untrusted context, re-running the checks, and cancelling the Job; no option reworks on its own (#61)', () => {
+    const options = blockerOptions('ci_failed');
+    expect(options?.map((o) => o.id)).toEqual(['rework', 'rerun_checks', 'cancel_job']);
+    const rework = options?.find((o) => o.id === 'rework');
+    expect(rework?.description).toMatch(/untrusted/i);
+    expect(rework?.description).not.toMatch(/maxAttempts: with none left, the Task waits/);
+    expect(checkBlockerDecision({ option: 'rerun_checks' })).toEqual({ ok: true, grant: null });
+    expect(blockerItemTitle('integration', 'ci_failed', 'integration')).toBe(
+      "Integration Task can't be merged: a required check failed",
+    );
   });
 
   it('a live process turns "retry now" into "kill and retry"', () => {

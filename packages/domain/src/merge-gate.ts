@@ -212,12 +212,32 @@ function reviewedHead({ pr, reviewedHeadSha }: MergeGateInput): MergeGateConditi
   };
 }
 
+/** The checks the gate counts: every check, or only the Repository's `requiredChecks` when it names some. */
+function countedChecks<T extends { name: string }>(
+  checks: readonly T[],
+  requiredChecks: readonly string[],
+): T[] {
+  const required = new Set(requiredChecks);
+  return required.size === 0 ? [...checks] : checks.filter((c) => required.has(c.name));
+}
+
+/**
+ * The checks that fail the gate's checks condition (#61): the counted checks
+ * whose outcome is `failure`, in the order given. Non-empty exactly when the
+ * condition fails, so `ci_failed` is raised from the same rule. Pure.
+ */
+export function failingChecks<T extends { name: string; outcome: CheckOutcome }>(
+  checks: readonly T[],
+  requiredChecks: readonly string[],
+): T[] {
+  return countedChecks(checks, requiredChecks).filter((c) => c.outcome === 'failure');
+}
+
 function checks(input: MergeGateInput): MergeGateCondition {
   const label = 'Checks on the head are green';
   const required = new Set(input.requiredChecks);
-  const counted =
-    required.size === 0 ? input.checks : input.checks.filter((c) => required.has(c.name));
-  const failed = counted.filter((c) => c.outcome === 'failure').map((c) => c.name);
+  const counted = countedChecks(input.checks, input.requiredChecks);
+  const failed = failingChecks(input.checks, input.requiredChecks).map((c) => c.name);
   if (failed.length > 0) {
     return { id: 'checks', label, status: 'fail', reason: `failed: ${failed.join(', ')}` };
   }
@@ -360,6 +380,8 @@ export const PrCheckSchema = z.object({
   conclusion: z.string().nullable(),
   outcome: CheckOutcomeSchema,
   url: z.string().nullable(),
+  /** A check run's output summary (or title), a status's description: CI text, untrusted. */
+  summary: z.string().nullable(),
   observedAt: z.string(),
 });
 export type PrCheck = z.infer<typeof PrCheckSchema>;
@@ -381,6 +403,44 @@ function statusOutcome(state: string): CheckOutcome {
   return 'failure';
 }
 
+/** A check run as GitHub lists it on a head. */
+export interface ObservedCheckRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  detailsUrl: string | null;
+  /** Its output summary, or title when it has no summary. */
+  summary?: string | null;
+}
+
+/** The newest run of each check name (highest id: a re-run replaces the earlier run). */
+function newestRuns<T extends { id: number; name: string }>(runs: readonly T[]): T[] {
+  const newest = new Map<string, T>();
+  for (const run of runs) {
+    const seen = newest.get(run.name);
+    if (seen === undefined || run.id > seen.id) newest.set(run.name, run);
+  }
+  return [...newest.values()];
+}
+
+/**
+ * The check runs `rerun_checks` asks GitHub to re-run (#61): the newest run of
+ * each counted check name whose outcome is a failure. Commit statuses are
+ * not among them: GitHub cannot re-run a status. Pure.
+ */
+export function checkRunsToRerun(
+  runs: readonly ObservedCheckRun[],
+  requiredChecks: readonly string[],
+): { id: number; name: string }[] {
+  const failed = newestRuns(runs).map((r) => ({
+    id: r.id,
+    name: r.name,
+    outcome: runOutcome(r.status, r.conclusion),
+  }));
+  return failingChecks(failed, requiredChecks).map(({ id, name }) => ({ id, name }));
+}
+
 /**
  * The checks GitHub reports on a head, as the gate counts them: the newest
  * check run of each name (highest id: a re-run replaces the earlier run) and
@@ -388,30 +448,25 @@ function statusOutcome(state: string): CheckOutcome {
  * Sorted by source, then name, so equal observations compare equal.
  */
 export function observedChecks(
-  runs: readonly {
-    id: number;
-    name: string;
-    status: string;
-    conclusion: string | null;
-    detailsUrl: string | null;
+  runs: readonly ObservedCheckRun[],
+  statuses: readonly {
+    context: string;
+    state: string;
+    targetUrl: string | null;
+    description?: string | null;
   }[],
-  statuses: readonly { context: string; state: string; targetUrl: string | null }[],
 ): ObservedCheck[] {
-  const newestRun = new Map<string, (typeof runs)[number]>();
-  for (const run of runs) {
-    const seen = newestRun.get(run.name);
-    if (seen === undefined || run.id > seen.id) newestRun.set(run.name, run);
-  }
   const newestStatus = new Map<string, (typeof statuses)[number]>();
   for (const st of statuses) if (!newestStatus.has(st.context)) newestStatus.set(st.context, st);
   const out: ObservedCheck[] = [
-    ...[...newestRun.values()].map((r) => ({
+    ...newestRuns(runs).map((r) => ({
       source: 'check_run' as const,
       name: r.name,
       status: r.status,
       conclusion: r.conclusion,
       outcome: runOutcome(r.status, r.conclusion),
       url: r.detailsUrl,
+      summary: r.summary ?? null,
     })),
     ...[...newestStatus.values()].map((st) => ({
       source: 'status' as const,
@@ -420,6 +475,7 @@ export function observedChecks(
       conclusion: null,
       outcome: statusOutcome(st.state),
       url: st.targetUrl,
+      summary: st.description ?? null,
     })),
   ];
   return out.sort((a, b) =>

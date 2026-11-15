@@ -111,6 +111,8 @@ export const BlockerReasonSchema = z.enum([
   'awaiting_merge',
   /** GitHub refused the Repository's merge method (`human_approval`, #59); held by the `merge` Stage. */
   'merge_method_refused',
+  /** A required check failed on the PR head (#61); held by `merge_approval`, cleared when it no longer fails. */
+  'ci_failed',
 ]);
 export type BlockerReason = z.infer<typeof BlockerReasonSchema>;
 

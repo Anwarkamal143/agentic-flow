@@ -620,6 +620,8 @@ export const prChecks = sqliteTable(
     /** `pending | success | neutral | skipped | failure` (`CheckOutcome`). */
     outcome: text('outcome').notNull(),
     url: text('url'),
+    /** A check run's output summary (or title), a status's description: CI text, redacted (#61). */
+    summary: text('summary'),
     /** When the poller recorded this value. */
     observedAt: text('observed_at').notNull(),
   },

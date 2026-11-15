@@ -22,6 +22,7 @@ import {
   CheckSourceSchema,
   EffectiveConfigSchema,
   evaluateMergeGate,
+  failingChecks,
   mergeItemOptions,
   MergeMethodSchema,
   readyButForPolicy,
@@ -45,7 +46,7 @@ import {
 } from '@factory/domain';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import type { JobState, StageRunStepper } from './engine.js';
+import { readJobState, type JobState, type StageRunStepper } from './engine.js';
 import { openBlockerItem } from './blocker-approvals.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
@@ -112,8 +113,20 @@ export function openMergeApproval(tx: Tx, state: JobState, step: StageRunStepper
   const queued = stepAndReread(tx, step, run, 'queued', { reason: 'the pull request is open' });
   const running = stepAndReread(tx, step, queued, 'running');
   const policy = mergePolicyOf(state);
+  step(running, 'waiting_human', { blocker: awaitingMergeBlocker(tx, prs, first, policy) });
+  for (const pr of prs) openMergeItem(tx, state.job.id, running.id, pr, policy, ACTOR_OPENING);
+  return true;
+}
+
+/** What `merge_approval` waits on while nothing fails: the human merge (or its approval). */
+function awaitingMergeBlocker(
+  tx: Tx | FactoryDb,
+  prs: readonly PullRequestRow[],
+  first: PullRequestRow,
+  policy: MergePolicy,
+): Blocker {
   const named = prs.map((pr) => `${label(pr)} (${pr.url})`).join(', ');
-  const blocker: Blocker = {
+  return {
     kind: 'human',
     reason: 'awaiting_merge',
     ...(policy === 'never_auto'
@@ -131,9 +144,6 @@ export function openMergeApproval(tx: Tx, state: JobState, step: StageRunStepper
     attemptId: approvedAttemptOf(tx, first.taskId).id,
     createdAt: new Date().toISOString(),
   };
-  step(running, 'waiting_human', { blocker });
-  for (const pr of prs) openMergeItem(tx, state.job.id, running.id, pr, policy, ACTOR_OPENING);
-  return true;
 }
 
 /** The Job's Merge Policy, frozen into its Effective Configuration at creation (ADR-0038). */
@@ -373,6 +383,7 @@ function recordedChecks(tx: Tx | FactoryDb, pr: PullRequestRow): ObservedCheck[]
       conclusion: c.conclusion,
       outcome: CheckOutcomeSchema.parse(c.outcome),
       url: c.url,
+      summary: c.summary,
     }));
 }
 
@@ -630,7 +641,235 @@ export function recordPoll(
   }
   if (seen.state === 'merged' && before.state !== 'merged')
     completeMerge(tx, pr, state, step, opts.now);
+  syncCiBlocker(tx, pr.jobId, opts.now);
   return gate;
+}
+
+// ---- ci_failed (#61) -------------------------------------------------------------------------
+
+/** A check that fails the gate's checks condition, on the head of an open PR of the Job. */
+export interface FailedCheck {
+  pr: PullRequestRow;
+  check: ObservedCheck;
+}
+
+/**
+ * The checks failing the Merge Gate on the Job's open PRs, from the persisted
+ * rows: the checks on each PR's current head, narrowed by its Repository's
+ * `requiredChecks` (the gate's own rule, `failingChecks`).
+ */
+export function failedChecksOfJob(tx: Tx | FactoryDb, jobId: string): FailedCheck[] {
+  return pullRequestsOfJob(tx, jobId)
+    .filter((pr) => pr.state === 'open')
+    .flatMap((pr) =>
+      failingChecks(recordedChecks(tx, pr), requiredChecksOf(tx, pr)).map((check) => ({
+        pr,
+        check,
+      })),
+    );
+}
+
+/** How one failed check reads in the Blocker: its name, GitHub's conclusion and its link. */
+function describeFailedCheck(c: ObservedCheck): string {
+  return `${c.name} (${c.conclusion ?? c.status}, ${c.url ?? 'no link'})`;
+}
+
+/** What a `ci_failed` Blocker says: per PR and head, each failed check with its conclusion and link. */
+function ciFailedDetail(failed: readonly FailedCheck[]): string {
+  const byPr = new Map<string, { pr: PullRequestRow; checks: ObservedCheck[] }>();
+  for (const { pr, check } of failed) {
+    const entry = byPr.get(pr.id) ?? { pr, checks: [] };
+    entry.checks.push(check);
+    byPr.set(pr.id, entry);
+  }
+  return [...byPr.values()]
+    .map(
+      ({ pr, checks }) =>
+        `required checks failed on ${label(pr)} at head ${pr.headSha.slice(0, 12)}: ${checks.map(describeFailedCheck).join('; ')}`,
+    )
+    .join('. ');
+}
+
+/** The human Blocker `ci_failed` for `failed` (non-empty), on the Integration Task's approved Attempt. */
+function ciFailedBlocker(tx: Tx | FactoryDb, failed: readonly FailedCheck[], now: string): Blocker {
+  const [first] = failed;
+  if (first === undefined) throw new Error('a ci_failed Blocker names a failed check');
+  return {
+    kind: 'human',
+    reason: 'ci_failed',
+    detail: ciFailedDetail(failed),
+    requiredAction:
+      'decide the Blocker Approval in the Inbox: rework (the failed checks go to a Rework as untrusted context), re-run the checks, or cancel the Job. Nothing reworks on its own; the Blocker clears once the checks no longer fail',
+    taskId: first.pr.taskId,
+    attemptId: approvedAttemptOf(tx, first.pr.taskId).id,
+    createdAt: now,
+  };
+}
+
+/** The open Blocker Approvals a Stage Run holds. */
+function openBlockerItemsOf(tx: Tx | FactoryDb, stageRunId: string): ApprovalRow[] {
+  return tx
+    .select()
+    .from(schema.approvals)
+    .where(
+      and(
+        eq(schema.approvals.stageRunId, stageRunId),
+        eq(schema.approvals.kind, 'blocker'),
+        eq(schema.approvals.state, 'open'),
+      ),
+    )
+    .all();
+}
+
+/** Replaces the Blocker a waiting Stage Run shows, without moving it, with its event. */
+function replaceStageBlocker(tx: Tx, run: StageRunRow, blocker: Blocker, actor: string): void {
+  const updated = tx
+    .update(schema.stageRuns)
+    .set({ blockerJson: JSON.stringify(blocker), version: sql`${schema.stageRuns.version} + 1` })
+    .where(
+      and(
+        eq(schema.stageRuns.id, run.id),
+        eq(schema.stageRuns.state, 'waiting_human'),
+        eq(schema.stageRuns.version, run.version),
+      ),
+    )
+    .run();
+  if (updated.changes !== 1) throw new Error(`Stage Run ${run.id} changed under the poller`);
+  appendEvent(tx, {
+    entityKind: 'stage_run',
+    entityId: run.id,
+    jobId: run.jobId,
+    type: 'stage_run.blocker_changed',
+    actor,
+    payload: { stageId: run.stageId, state: run.state, blocker },
+  });
+}
+
+/** What {@link syncCiBlocker} would do for a Job, worked out from the rows without writing. */
+type CiBlockerStep =
+  | { kind: 'none' }
+  | { kind: 'clear'; holder: StageRunRow; state: JobState }
+  | { kind: 'raise'; holder: StageRunRow; failed: FailedCheck[] };
+
+/** The Blocker a waiting Stage Run shows, parsed; `null` when it has none. */
+function blockerOf(run: Pick<StageRunRow, 'blockerJson'>): Blocker | null {
+  return run.blockerJson === null ? null : BlockerSchema.parse(JSON.parse(run.blockerJson));
+}
+
+/**
+ * Read-only: whether `merge_approval`'s Blocker is out of step with the
+ * checks. `raise` when a check fails and the Blocker isn't `ci_failed` for
+ * exactly those failures, or is but no Blocker Approval is open for it (after
+ * `rerun_checks`, a failure still seen is raised again, so no Blocker is left
+ * with nothing to decide). `clear` when nothing fails but it is `ci_failed`.
+ */
+export function ciBlockerStep(tx: Tx | FactoryDb, jobId: string): CiBlockerStep {
+  const state = readJobState(tx, jobId);
+  const holder = latestStageRun(state, 'merge_approval');
+  if (holder?.state !== 'waiting_human') return { kind: 'none' };
+  const current = blockerOf(holder);
+  if (current?.reason !== 'ci_failed' && current?.reason !== 'awaiting_merge') {
+    return { kind: 'none' };
+  }
+  const failed = failedChecksOfJob(tx, jobId);
+  if (failed.length === 0) {
+    return current.reason === 'ci_failed' ? { kind: 'clear', holder, state } : { kind: 'none' };
+  }
+  const same =
+    current.reason === 'ci_failed' &&
+    current.detail === ciFailedDetail(failed) &&
+    openBlockerItemsOf(tx, holder.id).length > 0;
+  return same ? { kind: 'none' } : { kind: 'raise', holder, failed };
+}
+
+/**
+ * Keeps `merge_approval`'s Blocker in step with the checks (#61, Q14), from
+ * the persisted rows, in the poll's transaction ({@link ciBlockerStep}). A
+ * check failing the gate raises the human Blocker `ci_failed` and opens its
+ * Blocker Approval (rework, re-run the checks, cancel the Job); a different set
+ * of failures (another check, a new head) replaces it and its open item. Once
+ * no check fails, the open item is superseded and `merge_approval` waits on
+ * the merge again. Nothing here reworks or re-runs anything: a human decides.
+ */
+function syncCiBlocker(tx: Tx, jobId: string, now: string): void {
+  const next = ciBlockerStep(tx, jobId);
+  if (next.kind === 'none') return;
+  if (next.kind === 'clear') {
+    supersedeHeldBlockerItems(tx, next.holder, POLLER, 'the checks no longer fail');
+    const prs = pullRequestsOfJob(tx, jobId).filter((pr) => pr.state === 'open');
+    const [first] = prs;
+    if (first === undefined) return;
+    replaceStageBlocker(
+      tx,
+      next.holder,
+      awaitingMergeBlocker(tx, prs, first, mergePolicyOf(next.state)),
+      POLLER,
+    );
+    return;
+  }
+  supersedeHeldBlockerItems(tx, next.holder, POLLER, 'other checks fail now');
+  const blocker = ciFailedBlocker(tx, next.failed, now);
+  replaceStageBlocker(tx, next.holder, blocker, POLLER);
+  const task = tx.select().from(schema.tasks).where(eq(schema.tasks.id, blocker.taskId)).get();
+  if (task === undefined) throw new Error(`no Task ${blocker.taskId}`);
+  openBlockerItem(tx, { jobId, actor: POLLER }, task, blocker, { stageRunId: next.holder.id });
+}
+
+/**
+ * Supersedes the open Blocker Approvals `merge_approval` holds (a `ci_failed`
+ * one), when feedback sends the PR to Rework before anyone decided it.
+ */
+export function supersedeHeldBlockerItems(
+  tx: Tx,
+  holder: Pick<StageRunRow, 'id'>,
+  actor: string,
+  reason: string,
+): void {
+  for (const item of openBlockerItemsOf(tx, holder.id)) {
+    closeItem(
+      tx,
+      item,
+      { state: 'superseded' },
+      { type: 'approval.superseded', payload: { reason } },
+      actor,
+    );
+  }
+}
+
+/** The Repository's `requiredChecks` for a PR (empty: every check counts). */
+export function requiredChecksOf(tx: Tx | FactoryDb, pr: PullRequestRow): string[] {
+  return (
+    RepositoryProfileSchema.parse(JSON.parse(repositoryOf(tx, pr).profileJson)).requiredChecks ?? []
+  );
+}
+
+/** The `merge_approval` Stage Run a Blocker Approval holds, when it waits on `ci_failed` (#61). */
+export function ciFailedHolder(
+  state: JobState,
+  item: Pick<ApprovalRow, 'stageRunId'>,
+): StageRunRow | undefined {
+  const run = state.stageRuns.find((r) => r.id === item.stageRunId);
+  if (run?.stageId !== 'merge_approval' || run.state !== 'waiting_human') return undefined;
+  return blockerOf(run)?.reason === 'ci_failed' ? run : undefined;
+}
+
+/**
+ * The checks a `ci_failed` decision acts on, from the rows: refused (409) once
+ * `merge_approval` no longer waits on a failed check, or none fails any more.
+ */
+export function requireFailedChecks(
+  tx: Tx | FactoryDb,
+  state: JobState,
+  item: Pick<ApprovalRow, 'stageRunId'>,
+): [FailedCheck, ...FailedCheck[]] {
+  if (ciFailedHolder(state, item) === undefined) {
+    throw new ApiFailure(409, 'not_ci_failed', 'merge_approval no longer waits on a failed check');
+  }
+  const [first, ...rest] = failedChecksOfJob(tx, state.job.id);
+  if (first === undefined) {
+    throw new ApiFailure(409, 'checks_not_failing', 'no required check fails any more');
+  }
+  return [first, ...rest];
 }
 
 function writeChecks(tx: Tx, prId: string, seen: Observation, now: string): void {
@@ -646,6 +885,7 @@ function writeChecks(tx: Tx, prId: string, seen: Observation, now: string): void
         conclusion: c.conclusion,
         outcome: c.outcome,
         url: c.url,
+        summary: c.summary,
         observedAt: now,
       })
       .onConflictDoUpdate({
@@ -660,6 +900,7 @@ function writeChecks(tx: Tx, prId: string, seen: Observation, now: string): void
           conclusion: c.conclusion,
           outcome: c.outcome,
           url: c.url,
+          summary: c.summary,
           observedAt: now,
         },
       })

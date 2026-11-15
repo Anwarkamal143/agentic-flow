@@ -5,7 +5,9 @@
  * named in `requiredChecks`; a named one that never reports stays pending.
  */
 import {
+  checkRunsToRerun,
   evaluateMergeGate,
+  failingChecks,
   observedChecks,
   unresolvedChangeRequests,
   type MergeGateInput,
@@ -215,6 +217,81 @@ describe('observedChecks', () => {
       ['status', 'ci/docs', 'failure', null],
       ['status', 'ci/lint', 'success', 'l2'],
     ]);
+  });
+
+  it("keeps a check run's output summary (or title) and a status's description, for the CI failure's context", () => {
+    const checks = observedChecks(
+      [
+        {
+          id: 1,
+          name: 'test',
+          status: 'completed',
+          conclusion: 'failure',
+          detailsUrl: 'u1',
+          summary: '2 tests failed',
+        },
+        { id: 2, name: 'build', status: 'completed', conclusion: 'success', detailsUrl: null },
+      ],
+      [{ context: 'ci/lint', state: 'failure', targetUrl: null, description: 'lint errors' }],
+    );
+    expect(checks.map((c) => [c.name, c.summary])).toEqual([
+      ['build', null],
+      ['test', '2 tests failed'],
+      ['ci/lint', 'lint errors'],
+    ]);
+  });
+});
+
+describe('the checks that fail the gate (ci_failed, #61)', () => {
+  const check = (name: string, outcome: 'success' | 'failure' | 'pending', source = 'check_run') =>
+    ({ source, name, outcome, url: `https://ci.example/${name}`, summary: null }) as const;
+
+  it('are every failed check when no check is required, in the order given', () => {
+    const checks = [check('build', 'failure'), check('lint', 'success'), check('test', 'failure')];
+    expect(failingChecks(checks, []).map((c) => c.name)).toEqual(['build', 'test']);
+  });
+
+  it('are only the required ones when the Repository names required checks: a failed optional check fails nothing', () => {
+    const checks = [check('build', 'failure'), check('flaky', 'failure'), check('test', 'pending')];
+    expect(failingChecks(checks, ['build', 'test']).map((c) => c.name)).toEqual(['build']);
+    expect(failingChecks(checks, ['test'])).toEqual([]);
+  });
+
+  it('agree with the gate: the checks condition fails exactly when some check fails', () => {
+    const checks = [check('flaky', 'failure'), check('build', 'success')];
+    expect(condition(input({ checks, requiredChecks: ['build'] }), 'checks')?.status).toBe('pass');
+    expect(failingChecks(checks, ['build'])).toEqual([]);
+    expect(condition(input({ checks, requiredChecks: [] }), 'checks')?.status).toBe('fail');
+  });
+});
+
+describe('checkRunsToRerun', () => {
+  const run = (id: number, name: string, conclusion: string | null, status = 'completed') => ({
+    id,
+    name,
+    status,
+    conclusion,
+    detailsUrl: null,
+  });
+
+  it('re-requests the newest run of each failed check name, never an older or a passing one', () => {
+    const runs = [
+      run(1, 'build', 'failure'),
+      run(5, 'build', 'failure'),
+      run(2, 'test', 'failure'),
+      run(6, 'test', 'success'),
+      run(3, 'lint', 'timed_out'),
+      run(4, 'e2e', null, 'in_progress'),
+    ];
+    expect(checkRunsToRerun(runs, [])).toEqual([
+      { id: 5, name: 'build' },
+      { id: 3, name: 'lint' },
+    ]);
+  });
+
+  it('only re-requests required checks when the Repository names them', () => {
+    const runs = [run(1, 'build', 'failure'), run(2, 'flaky', 'failure')];
+    expect(checkRunsToRerun(runs, ['build'])).toEqual([{ id: 1, name: 'build' }]);
   });
 });
 

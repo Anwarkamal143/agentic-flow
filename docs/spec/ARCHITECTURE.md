@@ -219,14 +219,15 @@ pull_requests(id, job_id, repository_id, task_id, owner, name, number, url, stat
          -- adopted: recovery found it on the head branch carrying the Job's marker
          -- last_polled_at is the poller's only write without an event (ADR-0037)
 pr_checks(id, pull_request_id, head_sha, source, name, status, conclusion, outcome, url,
-          observed_at)                                                       -- [Phase C, #58]
+          summary?, observed_at)                                             -- [Phase C, #58]
          -- one per (pull request, head, source, name): the newest check run of a name or
          --   status of a context; source: check_run | status;
          --   outcome: pending | success | neutral | skipped | failure
+         --   summary: output.summary (or title) / a status's description; redacted (#61)
 pr_feedback(id, job_id, pull_request_id, source, external_id, author, review_state?, path?,
             url?, kind, body, created_at, observed_at, attempt_id?)          -- [Phase C, #60]
          -- one per (pull request, source, external id); source: review | issue_comment |
-         --   review_comment | inbox; kind: trigger | context; body redacted, untrusted
+         --   review_comment | inbox | ci (a failed check sent to Rework, ADR-0040); kind: trigger | context; body redacted, untrusted
          --   GitHub text; attempt_id: the Rework Attempt that carried it (ADR-0039)
 ```
 
@@ -318,7 +319,7 @@ Every human-kind Blocker opens an Inbox Approval (kind `blocker`) with fixed opt
 | `replan_cap_reached` | grant +1 replan, cancel the Job |
 | `recovery_uncertain`, `retry_cap_reached` | retry now, cancel the Job |
 | `base_merge_conflict` | replan, cancel the Job. [Phase C] also covers a Task Branch conflicting while merging into the Integration Branch, and a base merge-in conflict; the conflict details become the replan feedback |
-| `ci_failed` [Phase C] | rework (the check's name, summary and link as untrusted context), re-run the checks, cancel the Job |
+| `ci_failed` [Phase C] | rework (the check's name, summary and link as untrusted context), re-run the checks, cancel the Job. Held by `merge_approval`; raised and cleared by the poller from the `pr_checks` rows (ADR-0040) |
 | `merge_method_refused` [Phase C] | retry the merge (after the repository's settings changed), cancel the Job |
 | `integration_rewrite` [Phase C] | force-push with lease (pinned to the last head the factory pushed; audited; the PR is updated in place), open a new PR on `factory/<job-id>/integration-2` (the old one closed with a marked comment), cancel the Job |
 

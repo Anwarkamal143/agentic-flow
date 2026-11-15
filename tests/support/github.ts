@@ -68,6 +68,8 @@ export interface CheckRunInput {
     | 'action_required'
     | null;
   detailsUrl?: string | null;
+  /** Served as `output.summary`. */
+  summary?: string | null;
 }
 
 export interface StatusInput {
@@ -121,6 +123,7 @@ interface CheckRun {
   status: string;
   conclusion: string | null;
   detailsUrl: string | null;
+  summary: string | null;
   sha: string;
 }
 
@@ -488,6 +491,7 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
               status: c.status,
               conclusion: c.conclusion,
               details_url: c.detailsUrl,
+              output: { title: null, summary: c.summary },
             })),
           },
         };
@@ -708,6 +712,7 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
         status: run.status,
         conclusion: run.conclusion ?? null,
         detailsUrl: run.detailsUrl ?? null,
+        summary: run.summary ?? null,
       };
       if (existing === undefined)
         repo.checkRuns.push({ id: nextId++, name: run.name, sha, ...values });
