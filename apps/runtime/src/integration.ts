@@ -37,6 +37,7 @@ import {
 import { newId } from './ids.js';
 import { latestArtifact } from './plan-approval.js';
 import { latestStageRun } from './replan.js';
+import { skipPullRequest, startPullRequest } from './pull-request.js';
 import { reviewStarted } from './task-stage.js';
 import { releaseAttemptTokens } from './worktree.js';
 
@@ -200,6 +201,11 @@ export function settleIntegration(tx: Tx, state: JobState, step: StageRunStepper
       if (stage.stageId === 'integration' && review?.state === 'pending') {
         step(review, 'skipped', { reason: 'integration failed: there is nothing to review' });
       }
+      skipPullRequest(
+        readJobState(tx, state.job.id),
+        step,
+        `${stage.stageId} failed: there is no approved Integration Branch to open a pull request from`,
+      );
       queueClosure();
       return;
     case 'succeeded':
@@ -209,7 +215,8 @@ export function settleIntegration(tx: Tx, state: JobState, step: StageRunStepper
           `Job ${state.job.id}: integration succeeded with its Integration Review neither run nor skipped`,
         );
       }
-      queueClosure();
+      // A Job created at `feature` v5 opens its PR first (ADR-0036); closure follows it.
+      if (!startPullRequest(tx, state.job.id, step)) queueClosure();
       return;
   }
 }

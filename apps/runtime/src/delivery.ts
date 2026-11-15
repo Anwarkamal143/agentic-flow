@@ -18,6 +18,7 @@ import {
   EvidenceVerdictSchema,
   InboxQuestionSchema,
   RuleIssueSchema,
+  StageFailureSchema,
   TaskCancelReasonSchema,
   TaskDefinitionSchema,
   TaskStateSchema,
@@ -29,6 +30,7 @@ import { z } from 'zod';
 import { criteriaCoveredBy, currentCriteria } from './criteria.js';
 import { latestArtifact } from './plan-approval.js';
 import { integrationSources } from './integration.js';
+import { pullRequestsOf } from './pull-request.js';
 
 /** A POSIX shell single-quoted word. */
 export function shellQuote(word: string): string {
@@ -57,10 +59,13 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
           .get();
   if (job === undefined || repo === undefined) throw new Error(`Job ${jobId} has no Repository`);
 
+  const pullRequests = pullRequestsOf(db, jobId);
   const limitations = [
     'The Harness ran under the Tier 0 local guardrail (environment allowlist, closed stdin, the Worktree as working directory). It ran as your user; this is not a sandbox. It was denied `gh` and the GitHub tokens, but the `gh` login on disk stayed readable to it.',
     'Harness and verification output is not redacted yet.',
-    'Delivery is a local branch in the Factory Clone; nothing was pushed.',
+    pullRequests.length === 0
+      ? 'Delivery is a local branch in the Factory Clone; nothing was pushed.'
+      : "The factory pushed only the Integration Branch and opened its pull request. It does not yet watch the pull request's checks, reviews or merge, and it never merges: merging is yours, on GitHub.",
   ];
 
   // Every Task of the newest Plan, and any earlier Task that got a Task Branch.
@@ -133,23 +138,33 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       .orderBy(desc(schema.stageRuns.attempt))
       .get()?.state;
   const integrationFailed = latestState('integration') === 'failed';
+  const pullRequestFailed = latestState('pull_request') === 'failed';
   const outcome =
-    latestState('execution') === 'failed' || integrationFailed ? 'failed' : 'completed';
+    latestState('execution') === 'failed' || integrationFailed || pullRequestFailed
+      ? 'failed'
+      : 'completed';
   const failedTasks = tasks
     .filter((t) => t.state === 'failed')
     .map((t) => `${t.key} (${latestAttempt(t.id)?.exitReason ?? 'factory_error'})`);
   const fetchCount = `${String(offered.length)} marked branch${offered.length === 1 ? '' : 'es'}`;
-  const statement = integrationFailed
-    ? `The Job failed: every Task was approved, but the Integration Task failed (${integration?.problem ?? 'no detail'}). The approved Task Branches are partial results: fetch the ${fetchCount} below.`
-    : integration?.state === 'approved'
-      ? `The Job completed: every Task was approved, merged into ${integration.branch} and verified again on its head. Fetch the Integration Branch below.`
-      : outcome === 'failed'
-        ? `The Job failed: Task${failedTasks.length === 1 ? '' : 's'} ${failedTasks.join(', ')} failed with no Rework route, and nothing else could make progress. ${
-            offered.length === 0
-              ? 'No Task was approved, so there is nothing to fetch.'
-              : `The approved Task Branches are partial results: fetch the ${fetchCount} below.`
-          } Failed and cancelled Tasks are listed, never offered.`
-        : `The Job completed: every Task was approved. Fetch the ${fetchCount} below.`;
+  const opened = pullRequests
+    .map((pr) => `#${String(pr.number)} (${pr.url}) on ${pr.owner}/${pr.name}`)
+    .join(', ');
+  const statement = pullRequestFailed
+    ? `The Job failed: the Integration Branch was approved, but the factory could not push it or open its pull request (${pullRequestFailureOf(db, jobId)}). It is delivered locally instead: fetch the Integration Branch below.`
+    : pullRequests.length > 0 && integration?.state === 'approved'
+      ? `The Job completed: every Task was approved, merged into ${integration.branch}, verified and reviewed again on its head, pushed, and opened as pull request ${opened}. It awaits your merge on GitHub.`
+      : integrationFailed
+        ? `The Job failed: every Task was approved, but the Integration Task failed (${integration?.problem ?? 'no detail'}). The approved Task Branches are partial results: fetch the ${fetchCount} below.`
+        : integration?.state === 'approved'
+          ? `The Job completed: every Task was approved, merged into ${integration.branch} and verified again on its head. Fetch the Integration Branch below.`
+          : outcome === 'failed'
+            ? `The Job failed: Task${failedTasks.length === 1 ? '' : 's'} ${failedTasks.join(', ')} failed with no Rework route, and nothing else could make progress. ${
+                offered.length === 0
+                  ? 'No Task was approved, so there is nothing to fetch.'
+                  : `The approved Task Branches are partial results: fetch the ${fetchCount} below.`
+              } Failed and cancelled Tasks are listed, never offered.`
+            : `The Job completed: every Task was approved. Fetch the ${fetchCount} below.`;
   const notes =
     integration === null
       ? [
@@ -160,6 +175,16 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
           `The Integration Branch and the Task Branches are local branches in the Factory Clone at ${repo.clonePath} (ADR-0001); nothing was pushed. Run the fetch command from your own checkout.`,
           `${integration.branch} starts from ${repo.defaultBranch} as fetched when integration began${integration.baseSha === null ? '' : ` (${integration.baseSha})`} and merges each approved Task Branch --no-ff in dependency order.`,
         ];
+  if (pullRequests.length > 0) {
+    notes[0] = `The Integration Branch was pushed to GitHub and opened as pull request ${opened}; it and the Task Branches are also local branches in the Factory Clone at ${repo.clonePath} (ADR-0001). Only the Integration Branch was pushed.`;
+  }
+  const skipped = skippedReason(db, jobId, 'pull_request');
+  if (skipped !== undefined) notes.push(`No pull request was opened: ${skipped}.`);
+  if (pullRequests.length > 1) {
+    notes.push(
+      `This Job has ${String(pullRequests.length)} pull requests, one per Repository. They are not atomic: each is merged on its own, in no order, and one can be merged while another is not.`,
+    );
+  }
 
   const delivered: DeliveryReport['tasks'] = [];
   for (const task of tasks) {
@@ -325,7 +350,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     }
   }
   return DeliveryReportSchema.parse({
-    reportVersion: 4,
+    reportVersion: 5,
     outcome,
     statement,
     job: { id: job.id, title: job.title },
@@ -340,8 +365,51 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
             ...integration,
             fetchCommand: integrated ? fetchCommand(repo.clonePath, integration.branch) : null,
           },
+    pullRequests: pullRequests.map((pr) => ({
+      repository: `${pr.owner}/${pr.name}`,
+      number: pr.number,
+      url: pr.url,
+      state: pr.state,
+      headBranch: pr.headBranch,
+      baseBranch: pr.baseBranch,
+      headSha: pr.pushedSha,
+      mergeSha: null,
+      adopted: pr.adopted,
+    })),
     knownLimitations: limitations,
   } satisfies DeliveryReport);
+}
+
+/** The reason the Job's newest Run of `stageId` was skipped with, if it was. */
+function skippedReason(db: FactoryDb, jobId: string, stageId: string): string | undefined {
+  const run = db
+    .select({ id: schema.stageRuns.id, state: schema.stageRuns.state })
+    .from(schema.stageRuns)
+    .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, stageId)))
+    .orderBy(desc(schema.stageRuns.attempt))
+    .get();
+  if (run?.state !== 'skipped') return undefined;
+  const event = db
+    .select({ payload: schema.events.payloadJson })
+    .from(schema.events)
+    .where(and(eq(schema.events.entityId, run.id), eq(schema.events.type, 'stage_run.skipped')))
+    .get();
+  const reason = z
+    .object({ reason: z.string().optional() })
+    .safeParse(event === undefined ? {} : JSON.parse(event.payload));
+  return reason.success ? (reason.data.reason ?? 'no reason recorded') : 'no reason recorded';
+}
+
+/** Why the Job's newest `pull_request` failed. */
+function pullRequestFailureOf(db: FactoryDb, jobId: string): string {
+  const run = db
+    .select({ failureJson: schema.stageRuns.failureJson })
+    .from(schema.stageRuns)
+    .where(and(eq(schema.stageRuns.jobId, jobId), eq(schema.stageRuns.stageId, 'pull_request')))
+    .orderBy(desc(schema.stageRuns.attempt))
+    .get();
+  if (run?.failureJson == null) return 'no detail';
+  return StageFailureSchema.parse(JSON.parse(run.failureJson)).message;
 }
 
 /**

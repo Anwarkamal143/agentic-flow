@@ -535,3 +535,47 @@ export const auditLog = sqliteTable(
   },
   (t) => [index('audit_log_job').on(t.jobId), index('audit_log_target').on(t.target)],
 );
+
+/**
+ * A pull request the factory opened (ARCHITECTURE §5, Phase C; ADR-0036): one
+ * per (Job, Repository), from the Integration Branch to the default branch.
+ * Written only by the runtime, in the transaction that records it with its
+ * event. `pushed_sha` is the last head the factory pushed; `adopted` marks a
+ * PR recovery found on the head branch carrying the Job's marker.
+ */
+export const pullRequests = sqliteTable(
+  'pull_requests',
+  {
+    id: text('id').primaryKey(),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    repositoryId: text('repository_id')
+      .notNull()
+      .references(() => repositories.id),
+    /** The Integration Task whose branch is the head. */
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    owner: text('owner').notNull(),
+    name: text('name').notNull(),
+    number: integer('number').notNull(),
+    url: text('url').notNull(),
+    /** `open | closed | merged`. */
+    state: text('state').notNull(),
+    headBranch: text('head_branch').notNull(),
+    baseBranch: text('base_branch').notNull(),
+    headSha: text('head_sha').notNull(),
+    baseSha: text('base_sha').notNull(),
+    pushedSha: text('pushed_sha').notNull(),
+    adopted: integer('adopted', { mode: 'boolean' }).notNull(),
+    createdAt: text('created_at').notNull(),
+    /** When the poller last read it from GitHub (#58); null until then. */
+    lastPolledAt: text('last_polled_at'),
+    version: integer('version').notNull(),
+  },
+  (t) => [
+    uniqueIndex('pull_requests_job_head').on(t.jobId, t.repositoryId, t.headBranch),
+    uniqueIndex('pull_requests_repo_number').on(t.owner, t.name, t.number),
+  ],
+);

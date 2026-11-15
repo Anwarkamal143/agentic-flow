@@ -39,7 +39,7 @@ import {
   FEATURE_RECIPE_VERSIONS,
   type Billing,
 } from '@factory/domain';
-import { TokenSource } from '@factory/github';
+import { GitHubPort, TokenSource } from '@factory/github';
 import { createApp, type RuntimeStatus } from './app.js';
 import { InboxService } from './inbox.js';
 import { ArtifactStore } from './artifacts.js';
@@ -268,6 +268,12 @@ const tasks = new TaskScheduler({
   spoolRoot: home.spoolDir,
   recovered,
   ...(crashAt === undefined ? {} : { crashAt }),
+  // The token reference is resolved for each request, never held (ADR-0033).
+  github: new GitHubPort({
+    apiBaseUrl: github.apiBaseUrl,
+    token: () => githubToken.resolve(),
+  }),
+  redact,
   onCommit: () => {
     notify();
   },

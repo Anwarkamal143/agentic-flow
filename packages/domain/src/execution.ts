@@ -9,6 +9,7 @@ import { AttemptFindingSchema } from './findings.js';
 import { RiskSchema, RuleIssueSchema, TaskRoleSchema } from './proposals.js';
 import { AnsweredQuestionSchema, InboxQuestionSchema } from './questions.js';
 import { GrantGuidanceSchema } from './blocker-approvals.js';
+import { PullRequestStateSchema } from './pull-request.js';
 
 // ---- Task states (ARCHITECTURE §4.4) ---------------------------------------
 
@@ -442,10 +443,10 @@ export const AttemptSchema = z.object({
 });
 export type Attempt = z.infer<typeof AttemptSchema>;
 
-// ---- Delivery Report (v4: v3 of ADR-0028 plus the Integration Branch, ADR-0034) ----
+// ---- Delivery Report (v5: v4 of ADR-0034 plus the pull requests, ADR-0036) ----
 
 export const DeliveryReportSchema = z.object({
-  reportVersion: z.literal(4),
+  reportVersion: z.literal(5),
   /** How the Job ended: a `failed` Job's approved branches are partial results. */
   outcome: z.enum(['completed', 'failed']),
   /** One plain sentence on the outcome, saying so when the Job failed. */
@@ -560,6 +561,26 @@ export const DeliveryReportSchema = z.object({
       problem: z.string().nullable(),
     })
     .nullable(),
+  /**
+   * The pull requests the factory opened, one per Repository with GitHub
+   * coordinates (ADR-0036), as recorded in `pull_requests`. Empty when the Job
+   * was delivered locally (no GitHub remote, or nothing approved to open).
+   */
+  pullRequests: z.array(
+    z.object({
+      repository: z.string(),
+      number: z.number().int(),
+      url: z.string(),
+      state: PullRequestStateSchema,
+      headBranch: z.string(),
+      baseBranch: z.string(),
+      /** The head the factory pushed: the one its Integration Review approved. */
+      headSha: z.string(),
+      /** The merge commit, once merged; `null` while it awaits a human's merge. */
+      mergeSha: z.string().nullable(),
+      adopted: z.boolean(),
+    }),
+  ),
   knownLimitations: z.array(z.string()),
 });
 export type DeliveryReport = z.infer<typeof DeliveryReportSchema>;

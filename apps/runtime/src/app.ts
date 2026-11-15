@@ -127,6 +127,7 @@ export function createApp(deps: AppDeps): Hono {
     deps.jobs.get(id); // 404 for an unknown Job
     return c.json(deps.logs(id));
   });
+  app.get('/v1/jobs/:id/pull-requests', (c) => c.json(deps.jobs.pullRequests(c.req.param('id'))));
   app.get('/v1/jobs/:id/worktrees', (c) => c.json(deps.jobs.worktrees(c.req.param('id'))));
   app.get('/v1/activity', (c) => c.json(deps.activity.list()));
   app.get('/v1/attempts/:id/tail', (c) => c.json(deps.activity.tail(c.req.param('id'))));

@@ -205,7 +205,17 @@ events(seq INTEGER PK AUTOINCREMENT, ts, entity_kind, entity_id, job_id?, type,
 audit_log(id, ts, actor, action, target, before_json, after_json, policy_ref, correlation_id)
 ```
 
-Added in Phase C: pull_requests, pr_checks (written by the GitHub poller; the views read only these rows).
+Added in Phase C: pull_requests, pr_checks (written only by the runtime: the `pull_request` Stage and the GitHub poller; the views read only these rows).
+
+```
+pull_requests(id, job_id, repository_id, task_id, owner, name, number, url, state,
+              head_branch, base_branch, head_sha, base_sha, pushed_sha, adopted,
+              created_at, last_polled_at?, version)                          -- [Phase C, #57]
+         -- one per (Job, Repository, head branch); task_id: the Integration Task
+         -- state: open | closed | merged;  pushed_sha: the last head the factory pushed
+         -- adopted: recovery found it on the head branch carrying the Job's marker
+pr_checks(...)                                                               -- [Phase C, #58]
+```
 
 Added in v1: organizations, users, memberships, budgets, usage_records, skills, recipes (as DB rows), notifications. Write a table's migration only in the phase that uses it.
 

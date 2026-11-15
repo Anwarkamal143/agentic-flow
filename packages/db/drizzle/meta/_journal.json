@@ -120,6 +120,13 @@
       "when": 1794680762851,
       "tag": "0016_flawless_cable",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1794719107887,
+      "tag": "0017_harsh_iron_patriot",
+      "breakpoints": true
     }
   ]
 }

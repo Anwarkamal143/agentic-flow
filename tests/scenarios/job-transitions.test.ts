@@ -74,6 +74,7 @@ describe('Job transitions', () => {
         'execution',
         'integration',
         'integration_review',
+        'pull_request',
         'closure',
       ].map((id) => [id, 'cancelled']),
     ]);
@@ -81,7 +82,7 @@ describe('Job transitions', () => {
     const events = await json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events`));
     const added = events.slice(eventsBefore.length);
     expect(added.map((e) => e.type)).toEqual([
-      ...Array<string>(9).fill('stage_run.cancelled'),
+      ...Array<string>(10).fill('stage_run.cancelled'),
       'job.cancelled',
       'job.status_changed',
     ]);

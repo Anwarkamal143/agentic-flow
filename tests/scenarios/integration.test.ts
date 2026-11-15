@@ -323,7 +323,7 @@ describe('the Integration Branch', { timeout: 90_000 }, () => {
 
     // The Delivery Report names the Integration Branch and offers it, not the Task Branches.
     const report = await reportOf(rt, job.id);
-    expect(report.reportVersion).toBe(4);
+    expect(report.reportVersion).toBe(5);
     expect(report.integration).toMatchObject({
       branch,
       state: 'approved',

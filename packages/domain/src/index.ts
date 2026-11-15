@@ -48,6 +48,7 @@ export * from './cleanup.js';
 export * from './respecification.js';
 export * from './github.js';
 export * from './integration.js';
+export * from './pull-request.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -201,6 +202,7 @@ export const StageIdSchema = z.enum([
   'execution',
   'integration',
   'integration_review',
+  'pull_request',
   'closure',
 ]);
 export type StageId = z.infer<typeof StageIdSchema>;
@@ -284,7 +286,7 @@ export const WorkflowSnapshotSchema = z.object({
 export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
 
 /** The Stage IDs of each version of the built-in `feature` Recipe. */
-const FEATURE_RECIPE_STAGES: Readonly<Record<2 | 3 | 4, readonly StageId[]>> = {
+const FEATURE_RECIPE_STAGES: Readonly<Record<2 | 3 | 4 | 5, readonly StageId[]>> = {
   // Version 2 added `plan_approval` (ADR-0016).
   2: [
     'intake',
@@ -321,10 +323,24 @@ const FEATURE_RECIPE_STAGES: Readonly<Record<2 | 3 | 4, readonly StageId[]>> = {
     'integration_review',
     'closure',
   ],
+  // Version 5 adds `pull_request`: the first push and the PR (ADR-0036).
+  5: [
+    'intake',
+    'triage',
+    'discovery',
+    'specification',
+    'planning',
+    'plan_approval',
+    'execution',
+    'integration',
+    'integration_review',
+    'pull_request',
+    'closure',
+  ],
 };
 
 /** The `feature` Recipe versions a Job can be created at. */
-export const FEATURE_RECIPE_VERSIONS = [2, 3, 4] as const;
+export const FEATURE_RECIPE_VERSIONS = [2, 3, 4, 5] as const;
 export type FeatureRecipeVersion = (typeof FEATURE_RECIPE_VERSIONS)[number];
 
 /**
@@ -340,11 +356,12 @@ export function featureRecipe(version: FeatureRecipeVersion): WorkflowSnapshot {
 }
 
 /**
- * The built-in `feature` Recipe, Phase C cut so far: version 4, with
- * `integration` (ADR-0034) and `integration_review` (ADR-0035); without the
- * delivery Stages yet (ROADMAP).
+ * The built-in `feature` Recipe, Phase C cut so far: version 5, with
+ * `integration` (ADR-0034), `integration_review` (ADR-0035) and
+ * `pull_request` (ADR-0036); `merge_approval` and `merge` come with the
+ * Merge Gate (#58).
  */
-export const FEATURE_RECIPE: WorkflowSnapshot = featureRecipe(4);
+export const FEATURE_RECIPE: WorkflowSnapshot = featureRecipe(5);
 
 /**
  * A Job's status, derived from its Stage Runs (ARCHITECTURE §4.2; precedence
@@ -503,8 +520,15 @@ export const StageFailureSchema = z.object({
    * `harness_failed`: the Harness Run did not end with exit code 0.
    * `factory_error`: the factory itself could not run the Stage (a bug or a broken setup).
    * `task_failed`: a Task of the Stage failed for a reason with no Rework route.
+   * `delivery_failed`: GitHub or git refused the push or the pull request (ADR-0036).
    */
-  reason: z.enum(['invalid_output', 'harness_failed', 'factory_error', 'task_failed']),
+  reason: z.enum([
+    'invalid_output',
+    'harness_failed',
+    'factory_error',
+    'task_failed',
+    'delivery_failed',
+  ]),
   message: z.string(),
   issues: z.array(RuleIssueSchema),
 });

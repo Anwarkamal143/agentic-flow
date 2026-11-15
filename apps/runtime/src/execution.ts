@@ -55,7 +55,9 @@ import {
   type SecurityTier,
   integrationReviewSkip,
   type IntegrationReviewSkip,
+  type Redactor,
 } from '@factory/domain';
+import type { GitHubPort } from '@factory/github';
 import {
   addWorktree,
   changedPathKinds,
@@ -115,6 +117,13 @@ import {
 import { newId } from './ids.js';
 import { latestStageRunOfTask, stageIdOfTask } from './task-stage.js';
 import { PassLoop } from './pass-loop.js';
+import {
+  failPullRequest,
+  nextPullRequest,
+  runningPullRequests,
+  runPullRequest,
+  type PullRequestDeps,
+} from './pull-request.js';
 import { routeByFaultOrigin, type FaultRouteInput } from './fault-route.js';
 import { answersAfter, openQuestionItem } from './questions.js';
 import { guidanceAfter } from './blocker-approvals.js';
@@ -180,6 +189,13 @@ export interface TaskSchedulerOptions {
    * Report is recorded.
    */
   crashAt?: CrashPoint;
+  /**
+   * The GitHub port, for the `pull_request` Stage (ADR-0036). `undefined`:
+   * queued `pull_request` Stage Runs wait (only tests leave it out).
+   */
+  github?: GitHubPort;
+  /** The runtime's redactor: what the factory sends GitHub is redacted first. Required with `github`. */
+  redact?: Redactor;
 }
 
 export { CRASH_POINTS, type CrashPoint } from './closure.js';
@@ -188,7 +204,8 @@ export { CRASH_POINTS, type CrashPoint } from './closure.js';
 export type Resumption =
   | { kind: 'reattach'; attemptId: string }
   | { kind: 'resume'; from: 'verification' | 'review'; attemptId: string }
-  | { kind: 'closure'; stageRunId: string; jobId: string };
+  | { kind: 'closure'; stageRunId: string; jobId: string }
+  | { kind: 'pull_request'; stageRunId: string; jobId: string };
 
 /** See {@link AttemptProcessSchema}. */
 export type AttemptProcess = z.infer<typeof AttemptProcessSchema>;
@@ -314,6 +331,10 @@ export class TaskScheduler {
     this.verifyTimeoutMs = opts.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS;
     this.reviewWallClockMs = opts.reviewWallClockMs ?? DEFAULT_REVIEW_WALL_CLOCK_MS;
     this.resumptions = [...(opts.recovered ?? [])];
+    // Never a pass-through: an unredacted PR body must not reach GitHub.
+    if (opts.github !== undefined && opts.redact === undefined) {
+      throw new Error('the GitHub port needs the runtime redactor');
+    }
   }
 
   /** The lease holder of this runtime: recovery hands the leases it takes over to it. */
@@ -326,6 +347,10 @@ export class TaskScheduler {
     // A closure left running resumes too (it never writes its report twice).
     for (const run of runningClosures(this.opts.db)) {
       this.resumptions.push({ kind: 'closure', stageRunId: run.id, jobId: run.jobId });
+    }
+    // So does a `pull_request` (it adopts the PR it opened, never opening a second one).
+    for (const run of runningPullRequests(this.opts.db)) {
+      this.resumptions.push({ kind: 'pull_request', stageRunId: run.id, jobId: run.jobId });
     }
     this.renewLeases();
     this.heartbeat = setInterval(() => {
@@ -365,8 +390,10 @@ export class TaskScheduler {
   async cancelJob(jobId: string): Promise<void> {
     for (const r of this.resumptions.filter((r) => this.jobOf(r) === jobId)) {
       this.resumptions.splice(this.resumptions.indexOf(r), 1);
-      // A closure the cancellation already ended has nothing left to stop.
-      if (r.kind !== 'closure') await this.cancelLeftAttempt(r.attemptId);
+      // A closure or a pull_request the cancellation already ended has nothing left to stop.
+      if (r.kind !== 'closure' && r.kind !== 'pull_request') {
+        await this.cancelLeftAttempt(r.attemptId);
+      }
     }
     const slots = [...this.slots.values()].filter((s) => s.jobId === jobId);
     await Promise.all(slots.map((s) => Promise.all([s.run?.cancel(), s.proc?.cancel()])));
@@ -388,7 +415,7 @@ export class TaskScheduler {
   }
 
   private jobOf(r: Resumption): string | undefined {
-    if (r.kind === 'closure') return r.jobId;
+    if (r.kind === 'closure' || r.kind === 'pull_request') return r.jobId;
     const attempt = this.opts.db
       .select({ jobId: schema.tasks.jobId })
       .from(schema.attempts)
@@ -428,6 +455,10 @@ export class TaskScheduler {
         );
         continue;
       }
+      if (resumption.kind === 'pull_request') {
+        this.launchPullRequest(resumption.stageRunId, jobId, 'running');
+        continue;
+      }
       const { taskId } = requireAttempt(this.opts.db, resumption.attemptId);
       this.launch(taskId, jobId, (slot) =>
         this.guard(jobId, () => this.resumeAttempt(harness, resumption, slot), { taskId }),
@@ -445,6 +476,18 @@ export class TaskScheduler {
         this.guard(jobId, () => runClosure(this.opts, id, jobId, 'queued'), { closureId: id }),
       );
     }
+    // A pull_request moves to `running` before its first await, like a closure.
+    for (
+      let pr =
+        this.opts.github === undefined || this.opts.redact === undefined
+          ? undefined
+          : nextPullRequest(this.opts.db);
+      pr !== undefined && !this.slots.has(`pull_request:${pr.id}`);
+      pr = nextPullRequest(this.opts.db)
+    ) {
+      started = true;
+      this.launchPullRequest(pr.id, pr.jobId, 'queued');
+    }
     for (;;) {
       const claimed = claimNextTask(this.opts.db, {
         holder: this.holder,
@@ -460,6 +503,27 @@ export class TaskScheduler {
       );
     }
     return started;
+  }
+
+  /** Runs a `pull_request` Stage Run in a new slot (ADR-0036). */
+  private launchPullRequest(stageRunId: string, jobId: string, from: 'queued' | 'running'): void {
+    const { github, redact } = this.opts;
+    if (github === undefined || redact === undefined) return;
+    const deps: PullRequestDeps = {
+      db: this.opts.db,
+      artifacts: this.opts.artifacts,
+      github,
+      redact,
+      onCommit: this.opts.onCommit,
+      log: this.opts.log,
+      closed: () => this.closed,
+      crashAt: this.opts.crashAt,
+    };
+    this.launch(`pull_request:${stageRunId}`, jobId, () =>
+      this.guard(jobId, () => runPullRequest(deps, stageRunId, jobId, from), {
+        pullRequestId: stageRunId,
+      }),
+    );
   }
 
   /** Runs `body` in a new slot, without waiting for it; the slot goes once it ends. */
@@ -493,7 +557,7 @@ export class TaskScheduler {
   private async guard(
     jobId: string,
     body: () => Promise<void>,
-    subject: { taskId?: string; closureId?: string },
+    subject: { taskId?: string; closureId?: string; pullRequestId?: string },
   ): Promise<void> {
     try {
       await body();
@@ -505,6 +569,15 @@ export class TaskScheduler {
         if (subject.taskId !== undefined) this.failTask(jobId, subject.taskId, message);
         if (subject.closureId !== undefined)
           failClosure(this.opts, jobId, subject.closureId, message);
+        if (subject.pullRequestId !== undefined) {
+          failPullRequest(
+            this.opts,
+            jobId,
+            subject.pullRequestId,
+            `pull_request failed: ${message}`,
+            'factory_error',
+          );
+        }
       } catch (failErr) {
         this.opts.log(`task scheduler: could not record the failure: ${String(failErr)}`);
       }

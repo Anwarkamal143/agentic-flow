@@ -11,6 +11,7 @@ import { and, asc, eq, sql } from 'drizzle-orm';
 import { readJobState, type JobState, type StageRunStepper } from './engine.js';
 import { settleIntegration, startIntegration } from './integration.js';
 import { latestArtifact } from './plan-approval.js';
+import { skipPullRequest } from './pull-request.js';
 import { latestStageRun, startRequestedReplan } from './replan.js';
 
 /**
@@ -72,6 +73,11 @@ function settlePlanTasks(tx: Tx, state: JobState, step: StageRunStepper): void {
     if (review?.state === 'pending') {
       step(review, 'skipped', { reason: 'execution failed: there is nothing to review' });
     }
+    skipPullRequest(
+      now,
+      step,
+      'execution failed: there is no Integration Branch to open a pull request from',
+    );
   };
   if (outcome.kind !== 'running') {
     // A Replan held at the cap decides what happens to the rest: wait for the human.

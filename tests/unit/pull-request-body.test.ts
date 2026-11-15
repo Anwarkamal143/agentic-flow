@@ -1,0 +1,160 @@
+/**
+ * The pull request body (#57, C1, ADR-0036): rendered by plain code from
+ * persisted state, never by an LLM. Every section is present, the rollback
+ * notes never invent a rollback, the text is redacted before it is sent, and
+ * the hidden factory marker is there for recovery and the poller.
+ */
+import {
+  createRedactor,
+  hasFactoryMarker,
+  pullRequestMarker,
+  renderPullRequestBody,
+  type PullRequestBodyInput,
+} from '@factory/domain';
+import { describe, expect, it } from 'vitest';
+
+const HEAD = '1111111111111111111111111111111111111111';
+const BASE = '2222222222222222222222222222222222222222';
+
+function input(overrides: Partial<PullRequestBodyInput> = {}): PullRequestBodyInput {
+  return {
+    jobId: 'job_01',
+    title: 'Add sum()',
+    spec: {
+      problem: 'There is no way to sum two numbers.',
+      objective: 'Export sum(a, b) from src/math.ts.',
+    },
+    branch: 'factory/job_01/integration',
+    headSha: HEAD,
+    baseSha: BASE,
+    merged: [{ key: 'add-sum', branch: 'factory/job_01/tsk_1-add-sum' }],
+    criteria: [
+      {
+        code: 'AC-01',
+        text: 'sum(2, 3) returns 5.',
+        mandatory: true,
+        verdict: 'pass',
+        detail: 'command test: pass (exit 0)',
+      },
+      {
+        code: 'AC-02',
+        text: 'sum is documented.',
+        mandatory: false,
+        verdict: 'not_tested',
+        detail: 'no Evidence',
+      },
+    ],
+    commands: [
+      {
+        key: 'test',
+        command: "grep -q 'export function sum' src/math.ts",
+        exitCode: 0,
+        verdict: 'pass',
+      },
+      { key: 'typecheck', command: 'tsc --noEmit', exitCode: 1, verdict: 'fail' },
+    ],
+    risks: {
+      overall: 'medium',
+      tasks: [
+        { key: 'add-sum', risk: 'low' },
+        { key: 'docs', risk: 'medium' },
+      ],
+      securityConsiderations: ['No user input reaches eval.'],
+    },
+    findings: [
+      {
+        task: 'add-sum',
+        severity: 'low',
+        location: 'src/math.ts:6',
+        problem: 'No test covers negative numbers.',
+      },
+    ],
+    questions: [{ task: 'add-sum', text: 'Should sum accept bigint?' }],
+    rollback: null,
+    ...overrides,
+  };
+}
+
+const identity = (text: string) => text;
+
+describe('renderPullRequestBody', () => {
+  it('has every section, from the persisted inputs', () => {
+    const body = renderPullRequestBody(input(), identity);
+
+    expect(body).toContain('## Summary');
+    expect(body).toContain('There is no way to sum two numbers.');
+    expect(body).toContain('Export sum(a, b) from src/math.ts.');
+
+    expect(body).toContain('## Acceptance Criteria');
+    expect(body).toMatch(/AC-01.*mandatory.*pass/);
+    expect(body).toContain('command test: pass (exit 0)');
+    expect(body).toMatch(/AC-02.*optional.*not_tested/);
+
+    expect(body).toContain('## Commands run on the integration head');
+    expect(body).toContain(HEAD);
+    expect(body).toContain("grep -q 'export function sum' src/math.ts");
+    expect(body).toMatch(/typecheck.*exit 1.*fail/);
+
+    expect(body).toContain('## Risks');
+    expect(body).toMatch(/Overall: medium/);
+    expect(body).toMatch(/docs.*medium/);
+    expect(body).toContain('No user input reaches eval.');
+
+    expect(body).toContain('## Open non-blocking Findings');
+    expect(body).toContain('src/math.ts:6');
+    expect(body).toContain('No test covers negative numbers.');
+
+    expect(body).toContain('## Open Questions');
+    expect(body).toContain('Should sum accept bigint?');
+
+    expect(body).toContain('## Rollback');
+    expect(body).toContain('factory/job_01/tsk_1-add-sum');
+  });
+
+  it('says "none supported" for the rollback when the Plan states none', () => {
+    const body = renderPullRequestBody(input({ rollback: null }), identity);
+    expect(body).toMatch(/## Rollback\n\nNone supported\./);
+  });
+
+  it("shows the Plan's rollback when it states one, and never invents another", () => {
+    const body = renderPullRequestBody(
+      input({ rollback: 'Revert the merge commit; no data migration.' }),
+      identity,
+    );
+    expect(body).toContain('Revert the merge commit; no data migration.');
+    expect(body).not.toMatch(/None supported/);
+  });
+
+  it('says so when there are no Findings or Questions, rather than leaving a section out', () => {
+    const body = renderPullRequestBody(input({ findings: [], questions: [] }), identity);
+    expect(body).toMatch(/## Open non-blocking Findings\n\nNone\./);
+    expect(body).toMatch(/## Open Questions\n\nNone\./);
+  });
+
+  it('redacts every section, the marker kept', () => {
+    const secret = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
+    const redact = createRedactor([{ name: 'GH_TOKEN', value: secret }]);
+    const body = renderPullRequestBody(
+      input({
+        spec: { problem: `token ${secret} leaked`, objective: 'x' },
+        findings: [{ task: 'a', severity: 'low', location: 'a.ts:1', problem: secret }],
+        questions: [{ task: 'a', text: secret }],
+        commands: [{ key: 'test', command: `echo ${secret}`, exitCode: 0, verdict: 'pass' }],
+      }),
+      redact,
+    );
+    expect(body).not.toContain(secret);
+    expect(body).toContain('[REDACTED');
+    expect(hasFactoryMarker(body, 'job_01')).toBe(true);
+  });
+
+  it('carries the hidden factory marker of its Job', () => {
+    const body = renderPullRequestBody(input(), identity);
+    expect(body).toContain(pullRequestMarker('job_01'));
+    expect(pullRequestMarker('job_01')).toBe('<!-- factory:job_01:pull_request -->');
+    expect(hasFactoryMarker(body, 'job_01')).toBe(true);
+    expect(hasFactoryMarker(body, 'job_02')).toBe(false);
+    expect(hasFactoryMarker('A PR someone else opened.', 'job_01')).toBe(false);
+    expect(hasFactoryMarker(null, 'job_01')).toBe(false);
+  });
+});

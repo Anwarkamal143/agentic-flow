@@ -14,7 +14,7 @@ import { requireWorktree } from './worktree.js';
 const ACTOR = 'system:scheduler';
 
 /** Where the test-only fault injection (`FACTORY_TEST_CRASH_AT`) can kill the runtime. */
-export const CRASH_POINTS = ['closure.after_report'] as const;
+export const CRASH_POINTS = ['closure.after_report', 'pull_request.after_create'] as const;
 export type CrashPoint = (typeof CRASH_POINTS)[number];
 
 export interface ClosureDeps {
