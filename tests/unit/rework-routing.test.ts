@@ -5,7 +5,7 @@
  * Specification Finding re-runs specification (#47) and a Plan Finding goes
  * back to planning (B4). Pure; tested through `@factory/domain`.
  */
-import { routeFailedAttempt, type FaultOrigin } from '@factory/domain';
+import { attemptsCountedForRework, routeFailedAttempt, type FaultOrigin } from '@factory/domain';
 import { describe, expect, it } from 'vitest';
 
 const finding = (faultOrigin: FaultOrigin, blocking = true) => ({ faultOrigin, blocking });
@@ -84,6 +84,55 @@ describe('Rework routing', () => {
         maxAttempts: 3,
       }),
     ).toEqual({ kind: 'rework' });
+  });
+
+  it('blocks a foreign push that fails the path-scope Gate on a human decision, never a Rework of its own accord (#63)', () => {
+    const scope = {
+      faultOrigin: 'implementation' as const,
+      blocking: true,
+      rule: 'scope.outside_writable',
+    };
+    expect(
+      routeFailedAttempt({
+        exitReason: 'gates_failed',
+        findings: [scope],
+        n: 1,
+        maxAttempts: 3,
+        cause: 'foreign_push',
+      }),
+    ).toMatchObject({
+      kind: 'blocked',
+      blocker: { kind: 'human', reason: 'foreign_push_out_of_scope' },
+    });
+    // A factory Attempt out of scope is reworked as before; a foreign push failing a command too.
+    expect(
+      routeFailedAttempt({
+        exitReason: 'gates_failed',
+        findings: [scope],
+        n: 1,
+        maxAttempts: 3,
+        cause: 'merge',
+      }),
+    ).toEqual({ kind: 'rework' });
+    expect(
+      routeFailedAttempt({
+        exitReason: 'gates_failed',
+        findings: [{ ...scope, rule: 'verification' }],
+        n: 1,
+        maxAttempts: 3,
+        cause: 'foreign_push',
+      }),
+    ).toEqual({ kind: 'rework' });
+  });
+
+  it('does not count a foreign push toward the Rework cap (#63)', () => {
+    expect(
+      attemptsCountedForRework([
+        { cause: 'merge' },
+        { cause: 'foreign_push' },
+        { cause: 'rework' },
+      ]),
+    ).toBe(2);
   });
 
   it('fails, without Rework, an Attempt that ended for any reason other than a verdict on the work', () => {

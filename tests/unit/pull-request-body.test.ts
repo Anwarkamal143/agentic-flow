@@ -72,6 +72,7 @@ function input(overrides: Partial<PullRequestBodyInput> = {}): PullRequestBodyIn
     questions: [{ task: 'add-sum', text: 'Should sum accept bigint?' }],
     rollback: null,
     ci: null,
+    foreignCommits: [],
     ...overrides,
   };
 }
@@ -169,6 +170,33 @@ describe('renderPullRequestBody', () => {
     const body = renderPullRequestBody(input({ findings: [], questions: [] }), identity);
     expect(body).toMatch(/## Open non-blocking Findings\n\nNone\./);
     expect(body).toMatch(/## Open Questions\n\nNone\./);
+  });
+
+  it('lists the foreign commits as foreign, their untrusted text unable to format or mention (#63)', () => {
+    const body = renderPullRequestBody(
+      input({
+        foreignCommits: [
+          {
+            sha: '3333333333333333333333333333333333333333',
+            subject: 'Fix it @alice\n## Merge now',
+            author: 'Bob',
+          },
+        ],
+      }),
+      identity,
+    );
+    expect(body).toMatch(
+      /## Foreign commits\n\nPushed to `factory\/job_01\/integration` by someone other than the factory/,
+    );
+    expect(body).toContain(
+      '- `3333333333333333333333333333333333333333` by `Bob`: `Fix it @alice ## Merge now`',
+    );
+    expect(body).not.toMatch(/^## Merge now/m);
+  });
+
+  it("says there are no foreign commits when every commit is the factory's own", () => {
+    const body = renderPullRequestBody(input(), identity);
+    expect(body).toMatch(/## Foreign commits\n\nNone\./);
   });
 
   it('redacts every section, the marker kept', () => {

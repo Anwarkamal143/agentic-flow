@@ -137,7 +137,9 @@ export type AttemptExitReason = z.infer<typeof AttemptExitReasonSchema>;
  * Branches and verifies the result; no Harness runs (ADR-0034). `base_merge`:
  * the factory merges a moved default branch into the approved Integration
  * Branch and verifies it again; no Harness runs, and its Review is re-anchored
- * or re-run (ADR-0041).
+ * or re-run (ADR-0041). `foreign_push`: someone else pushed to the Integration
+ * Branch on GitHub; the factory fetches that head, never overwrites it, and
+ * verifies and reviews it like its own; no Harness runs (ADR-0042).
  */
 export const AttemptCauseSchema = z.enum([
   'initial',
@@ -146,20 +148,22 @@ export const AttemptCauseSchema = z.enum([
   'answer',
   'merge',
   'base_merge',
+  'foreign_push',
 ]);
 export type AttemptCause = z.infer<typeof AttemptCauseSchema>;
 
 /**
  * How many of a Task's Attempts count toward its `max_attempts` (the Rework
  * cap): every Attempt but a Retry, which redoes an interrupted one, an
- * answer Attempt, which `max_questions` caps instead, and a base merge, which
- * the default branch moving caused, not a verdict on the work (ADR-0041). Pure.
+ * answer Attempt, which `max_questions` caps instead, a base merge, which
+ * the default branch moving caused, not a verdict on the work (ADR-0041), and
+ * a foreign push, which someone else's commits caused (ADR-0042). Pure.
  */
 export function attemptsCountedForRework(attempts: readonly { cause: AttemptCause }[]): number {
-  return attempts.filter(
-    (a) => a.cause !== 'retry' && a.cause !== 'answer' && a.cause !== 'base_merge',
-  ).length;
+  return attempts.filter((a) => !UNCOUNTED.has(a.cause)).length;
 }
+
+const UNCOUNTED = new Set<AttemptCause>(['retry', 'answer', 'base_merge', 'foreign_push']);
 
 /** How far a usage value can be trusted (ARCHITECTURE §13). */
 export const UsageTagSchema = z.enum(['actual', 'estimated', 'unknown']);
@@ -430,6 +434,16 @@ export const SECURITY_TIER_LABELS: Readonly<
   },
 };
 
+/** A commit someone else pushed to the Integration Branch (ADR-0042). Subject and author are untrusted. */
+export const ForeignCommitSchema = z.object({
+  sha: z.string(),
+  subject: z.string(),
+  author: z.string(),
+});
+export type ForeignCommit = z.infer<typeof ForeignCommitSchema>;
+/** A `foreign_push` Attempt's `foreign_commits_json`, newest first. */
+export const ForeignCommitsSchema = z.array(ForeignCommitSchema);
+
 export const AttemptSchema = z.object({
   id: z.string(),
   taskId: z.string(),
@@ -457,6 +471,11 @@ export const AttemptSchema = z.object({
   wipCommit: z.string().nullable(),
   /** Ways the Task Result disagreed with git. */
   protocolViolations: z.array(RuleIssueSchema),
+  /**
+   * A `foreign_push` Attempt's commits someone else pushed, newest first
+   * (ADR-0042); empty for every other Attempt. Subject and author are untrusted.
+   */
+  foreignCommits: ForeignCommitsSchema.default([]),
   /**
    * The questions its Task Result asked (agent-proposed, redacted): the
    * batched Inbox Question for `needs_decision`, or the non-blocking ones left
@@ -589,6 +608,14 @@ export const DeliveryReportSchema = z.object({
       ),
       /** Why the Integration Task did not finish, when it did not (its Blocker or last exit). */
       problem: z.string().nullable(),
+      /**
+       * Commits someone other than the factory pushed to the Integration
+       * Branch, each with the `foreign_push` Attempt that fetched and verified
+       * it and how that Attempt ended (ADR-0042). Subject and author are untrusted.
+       */
+      foreignCommits: z
+        .array(ForeignCommitSchema.extend({ attemptId: z.string(), attemptState: z.string() }))
+        .default([]),
     })
     .nullable(),
   /**

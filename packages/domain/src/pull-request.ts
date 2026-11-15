@@ -5,7 +5,7 @@
  * Pure.
  */
 import { z } from 'zod';
-import type { EvidenceVerdict } from './execution.js';
+import type { EvidenceVerdict, ForeignCommit } from './execution.js';
 import {
   MergeGateSchema,
   PrCheckSchema,
@@ -78,6 +78,12 @@ export interface PullRequestBodyInput {
     reason: string;
     checks: readonly { name: string; outcome: CheckOutcome; url: string | null }[];
   } | null;
+  /**
+   * Commits someone other than the factory pushed to the Integration Branch,
+   * which the factory fetched and verified (ADR-0042), newest first. Their
+   * subject and author are untrusted.
+   */
+  foreignCommits: readonly ForeignCommit[];
 }
 
 /** A link GitHub reported, shown only when it is an http(s) URL. */
@@ -143,6 +149,15 @@ export function renderPullRequestBody(input: PullRequestBodyInput, redact: Redac
         ? 'Not read from GitHub yet: the factory polls the checks on the head and updates this section.'
         : `On ${code(input.headSha)}: **${input.ci.status}**: ${line(input.ci.reason)}\n\n${list(
             input.ci.checks.map((c) => `${code(c.name)}: ${c.outcome}${link(c.url)}`),
+          )}`
+    }`,
+    `## Foreign commits\n\n${
+      input.foreignCommits.length === 0
+        ? 'None.'
+        : `Pushed to ${code(input.branch)} by someone other than the factory. The factory fetched them, never overwrote them, and held them to the same Gates as its own: the path-scope Gate, every command and the Integration Review above ran on the head that holds them.\n\n${list(
+            input.foreignCommits.map(
+              (c) => `${code(c.sha)} by ${code(c.author)}: ${code(c.subject)}`,
+            ),
           )}`
     }`,
     `## Rollback\n\n${input.rollback === null ? 'None supported.' : line(input.rollback)}`,

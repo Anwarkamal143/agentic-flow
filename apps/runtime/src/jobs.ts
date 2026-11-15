@@ -363,6 +363,7 @@ export class JobService {
         commits: JSON.parse(a.commitsJson) as unknown,
         wipCommit: a.wipCommit,
         protocolViolations: JSON.parse(a.protocolViolationsJson) as unknown,
+        foreignCommits: JSON.parse(a.foreignCommitsJson ?? '[]') as unknown,
         questions: JSON.parse(a.questionsJson) as unknown,
         findings: attemptFindings(this.db, a),
         usage: a.usageJson === null ? null : (JSON.parse(a.usageJson) as unknown),

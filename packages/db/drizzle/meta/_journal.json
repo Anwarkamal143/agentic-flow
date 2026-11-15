@@ -162,6 +162,13 @@
       "when": 1794744877373,
       "tag": "0022_true_blue_shield",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1794752935287,
+      "tag": "0023_clean_psylocke",
+      "breakpoints": true
     }
   ]
 }

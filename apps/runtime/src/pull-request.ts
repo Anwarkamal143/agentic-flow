@@ -50,6 +50,7 @@ import { openMergeApproval, skipMergeStages } from './merge-approval.js';
 import { latestStageRun } from './replan.js';
 import { describeTriggers, ensureComment, triggersAnswered } from './pr-feedback.js';
 import { defaultBranchTip, startBaseMergeIn } from './base-change.js';
+import { foreignCommitsOf, foreignHeadsOf } from './foreign-push.js';
 import { createHash } from 'node:crypto';
 
 /** The Task scheduler, which runs this Stage. */
@@ -511,7 +512,10 @@ async function updateInPlace(
       `${repoLabel(coordinates)}#${String(recorded.number)} was ${onGitHub.merged ? 'merged' : 'closed'} on GitHub while the feedback was reworked: the Rework's head ${attempt.headSha} was not pushed`,
     );
   }
-  if (onGitHub.head.sha !== recorded.pushedSha && onGitHub.head.sha !== attempt.headSha) {
+  // The head the factory last pushed, or a foreign head it fetched and verified since (ADR-0042):
+  // a push from either is a fast-forward over nobody's work.
+  const known = new Set([recorded.pushedSha, attempt.headSha, ...foreignHeadsOf(db, task.id)]);
+  if (!known.has(onGitHub.head.sha)) {
     throw new DeliveryFailed(
       `${repoLabel(coordinates)}#${String(recorded.number)} has head ${onGitHub.head.sha}, not the ${recorded.pushedSha} the factory pushed: someone else pushed to ${branch}, so the Rework was not pushed over it`,
     );
@@ -544,13 +548,19 @@ async function updateInPlace(
     currentReview(db, attempt)?.reanchoredFromReviewId != null
       ? 'the Integration Review was re-anchored to it (merging the base in left the reviewed diff unchanged, so no reviewer ran)'
       : 'the Integration Review passed on it';
+  const foreign = answered.length === 0 && attempt.cause === 'foreign_push';
   const why =
     answered.length === 0 && attempt.cause === 'base_merge'
       ? `the default branch moved: the factory merged ${repo.defaultBranch} (\`${attempt.baseSha}\`) into the Integration Branch with a merge commit (never a rebase)`
-      : describeTriggers(answered);
+      : foreign
+        ? 'someone else pushed to the Integration Branch: the factory fetched that head and never overwrote it'
+        : describeTriggers(answered);
+  const moved = foreign
+    ? `The Integration Branch is at \`${attempt.headSha}\`, the foreign head (listed under Foreign commits in the description); the factory's path-scope Gate and commands passed on it`
+    : `The Integration Branch moved from \`${recorded.pushedSha}\` to \`${attempt.headSha}\` (a fast-forward), the factory's commands passed on the new head`;
   const text = [
     `The Software Factory updated this pull request in place after ${why}.`,
-    `The Integration Branch moved from \`${recorded.pushedSha}\` to \`${attempt.headSha}\` (a fast-forward), the factory's commands passed on the new head, ${reanchored}, and the description was rendered again. The Merge Gate is evaluated again on it.`,
+    `${moved}, ${reanchored}, and the description was rendered again. The Merge Gate is evaluated again on it.`,
     '',
     marker,
     '',
@@ -899,6 +909,12 @@ export function pullRequestBodyInput(
     questions,
     rollback,
     ci,
+    // Foreign commits the approved head holds (ADR-0042), never the factory's own.
+    foreignCommits: foreignCommitsOf(db, task.id, attempt.n).map((c) => ({
+      sha: c.sha,
+      subject: c.subject,
+      author: c.author,
+    })),
   };
 }
 

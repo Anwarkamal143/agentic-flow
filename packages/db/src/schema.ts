@@ -241,6 +241,12 @@ export const tasks = sqliteTable(
     baseMergeRequested: integer('base_merge_requested', { mode: 'boolean' })
       .notNull()
       .default(false),
+    /**
+     * The PR head someone else pushed to the approved Integration Task's branch
+     * (ADR-0042): its next Attempt (cause `foreign_push`) fetches and verifies
+     * it. Set when the poller sees it, cleared once that Attempt is recorded.
+     */
+    foreignHeadSha: text('foreign_head_sha'),
     version: integer('version').notNull(),
   },
   // A key is unique within its Plan: a replaced Plan's Task may share a key with the new one (ADR-0019).
@@ -304,6 +310,11 @@ export const attempts = sqliteTable(
     wipCommit: text('wip_commit'),
     /** JSON array of `RuleIssue`: where the Task Result disagreed with git. */
     protocolViolationsJson: text('protocol_violations_json').notNull(),
+    /**
+     * A `foreign_push` Attempt's commits that someone else pushed (`{ sha,
+     * subject, author }[]`, newest first; ADR-0042); null for every other Attempt.
+     */
+    foreignCommitsJson: text('foreign_commits_json'),
     /** JSON array of `AttemptFinding`: what the factory's Gates found (the review's are in `review_findings`). */
     gateFindingsJson: text('gate_findings_json').notNull().default('[]'),
     /**

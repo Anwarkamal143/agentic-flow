@@ -4,7 +4,7 @@
  */
 import picomatch from 'picomatch';
 import { z } from 'zod';
-import type { AttemptExitReason } from './execution.js';
+import type { AttemptCause, AttemptExitReason } from './execution.js';
 import type { FaultOrigin } from './findings.js';
 
 // ---- The path-scope Gate (ARCHITECTURE §7 step 3) -------------------------------
@@ -113,6 +113,12 @@ export const BlockerReasonSchema = z.enum([
   'merge_method_refused',
   /** A required check failed on the PR head (#61); held by `merge_approval`, cleared when it no longer fails. */
   'ci_failed',
+  /**
+   * A foreign push to the Integration Branch touches paths outside the union
+   * of the Plan Tasks' writable globs (#63, ADR-0042): the factory never
+   * overwrites someone else's commits, so a human decides.
+   */
+  'foreign_push_out_of_scope',
 ]);
 export type BlockerReason = z.infer<typeof BlockerReasonSchema>;
 
@@ -153,16 +159,36 @@ const REWORKABLE: readonly AttemptExitReason[] = ['gates_failed', 'changes_reque
  * is re-specified (`respecify`, #47) and the Plan goes back to planning
  * (`replan`), both counted against `max_replans`, not `max_attempts`; the
  * infrastructure blocks; otherwise a new Attempt follows, unless this one was the last
- * allowed (`n >= maxAttempts`). Pure.
+ * allowed (`n >= maxAttempts`). A foreign push that fails the path-scope Gate
+ * blocks first (`foreign_push_out_of_scope`, ADR-0042). Pure.
  */
 export function routeFailedAttempt(input: {
   exitReason: AttemptExitReason;
-  findings: readonly { faultOrigin: FaultOrigin; blocking: boolean }[];
+  /** `rule`: the Gate rule a factory Finding names (`scope.*` for the path-scope Gate). */
+  findings: readonly { faultOrigin: FaultOrigin; blocking: boolean; rule?: string | null }[];
   /** The Attempts counted so far, this one included (`attemptsCountedForRework`: Retries don't count). */
   n: number;
   maxAttempts: number;
+  /** Why the failed Attempt exists; a `foreign_push` out of scope waits for a human (ADR-0042). */
+  cause?: AttemptCause;
 }): ReworkRoute {
   if (!REWORKABLE.includes(input.exitReason)) return { kind: 'fail' };
+  if (
+    input.cause === 'foreign_push' &&
+    input.findings.some((f) => f.rule?.startsWith('scope.') === true)
+  ) {
+    return {
+      kind: 'blocked',
+      blocker: {
+        kind: 'human',
+        reason: 'foreign_push_out_of_scope',
+        detail:
+          "commits someone else pushed to the Integration Branch touch paths outside the union of the Plan Tasks' writable globs; the factory never overwrites them",
+        requiredAction:
+          'decide the Blocker Approval in the Inbox: a Rework on top of the foreign commits (with your guidance) or cancel the Job',
+      },
+    };
+  }
   // Only blocking Findings route; a non-blocking one is advice (ARCHITECTURE §4.6).
   const origins = new Set(input.findings.filter((f) => f.blocking).map((f) => f.faultOrigin));
   if (origins.has('spec')) return { kind: 'respecify' };

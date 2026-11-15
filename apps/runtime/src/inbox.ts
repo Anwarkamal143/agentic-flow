@@ -1093,7 +1093,8 @@ function applyGrant(
 }
 
 /**
- * "Rework with guidance" on a `spec_finding_unresolved` Blocker (ADR-0031):
+ * "Rework with guidance" on a `spec_finding_unresolved` Blocker (ADR-0031),
+ * or on a `foreign_push_out_of_scope` one (ADR-0042, from the foreign head):
  * the current Specification stays and the Task goes `ready` for a Rework
  * Attempt carrying the comment as guidance (`guidanceAfter`). It counts
  * against `maxAttempts`: with no Attempt left, the Task waits on a
@@ -1108,7 +1109,11 @@ function applyRework(
 ): void {
   const { item, actor } = input;
   const { task, blocker } = blockedTaskOf(tx, item);
-  if (blocker.reason !== 'spec_finding_unresolved') {
+  // A foreign push out of scope is reworked on top of the foreign head, never over it (ADR-0042).
+  if (
+    blocker.reason !== 'spec_finding_unresolved' &&
+    blocker.reason !== 'foreign_push_out_of_scope'
+  ) {
     throw new Error(`a ${blocker.reason} Blocker offers no Rework`);
   }
   const op = { jobId: item.jobId, actor };
