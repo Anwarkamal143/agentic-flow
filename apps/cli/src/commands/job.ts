@@ -231,6 +231,15 @@ async function getJob(api: RuntimeClient, id: string): Promise<Job | undefined> 
   }
 }
 
+/**
+ * Untrusted text (a foreign commit's subject or author, ADR-0042) as one
+ * printable line: control characters, terminal escapes among them, become spaces.
+ */
+function oneLine(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
+}
+
 function writeJob(job: Job): void {
   type Config = Job['effectiveConfig'];
   type Setting = Config[Exclude<keyof Config, 'concurrency'>] | Config['concurrency']['perJob'];
@@ -333,6 +342,9 @@ function writeAttempts(
         (a.cause === 'base_merge'
           ? ' [base merge: the factory merged the moved default branch in, no Harness ran]'
           : '') +
+        (a.cause === 'foreign_push'
+          ? ' [foreign push: someone else pushed to the Integration Branch; the factory fetched and verified it, no Harness ran]'
+          : '') +
         (a.exitReason === null
           ? ''
           : ` (${a.exitReason}${a.exitDetail === null ? '' : `: ${a.exitDetail}`})`),
@@ -343,6 +355,16 @@ function writeAttempts(
       `    commits:   ${a.baseSha.slice(0, 12)}..${a.headSha?.slice(0, 12) ?? '?'} (${String(a.commits.length)})` +
         (a.wipCommit === null ? '' : `, WIP commit ${a.wipCommit.slice(0, 12)} by the factory`),
     );
+    for (const c of a.foreignCommits) {
+      lines.push(
+        `    foreign:   ${c.sha.slice(0, 12)} by ${oneLine(c.author)}: ${oneLine(c.subject)}`,
+      );
+    }
+    for (const c of a.droppedCommits) {
+      lines.push(
+        `    dropped:   ${c.sha.slice(0, 12)} by ${oneLine(c.author)}: ${oneLine(c.subject)} (an adopted rewrite dropped it)`,
+      );
+    }
     for (const v of a.protocolViolations) lines.push(`    violation: [${v.rule}] ${v.message}`);
     for (const f of a.findings.filter((x) => x.source === 'gate')) {
       lines.push(
@@ -450,6 +472,16 @@ function writeDelivery(report: DeliveryReport): void {
     for (const v of integration.verification) {
       lines.push(
         `    ${v.key.padEnd(12)} ${v.verdict.padEnd(10)} exit ${String(v.exitCode ?? 'none')}  ${v.command}`,
+      );
+    }
+    for (const c of integration.foreignCommits) {
+      lines.push(
+        `    foreign commit ${c.sha.slice(0, 12)} by ${oneLine(c.author)}: ${oneLine(c.subject)} (verified by attempt ${c.attemptId}: ${c.attemptState})`,
+      );
+    }
+    for (const c of integration.droppedCommits) {
+      lines.push(
+        `    dropped approved commit ${c.sha.slice(0, 12)} by ${oneLine(c.author)}: ${oneLine(c.subject)} (a rewrite adopted by attempt ${c.attemptId})`,
       );
     }
     if (integration.problem !== null) lines.push(`    problem: ${integration.problem}`);

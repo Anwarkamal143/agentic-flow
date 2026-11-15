@@ -129,27 +129,7 @@ export function startBaseMergeIn(
   const jobId = task.jobId;
   const reason = `the default branch moved from ${approved.baseSha} to ${observedBaseSha} (seen ${SEEN[input.seen]}): every Gate result for head ${approved.headSha} on base ${approved.baseSha} is stale, and the base is merged into the Integration Branch`;
 
-  supersedeMergeItems(tx, jobId, actor, reason);
-  const holder = latestStageRun(state, 'merge_approval');
-  if (holder !== undefined) supersedeHeldBlockerItems(tx, holder, actor, reason);
-  const added: { stageId: string; attempt: number }[] = [];
-  for (const stageId of RERUN_STAGES) {
-    const run = latestStageRun(state, stageId);
-    if (run === undefined || run.state === 'pending') continue;
-    if (SUPERSEDABLE.has(run.state)) step(run, 'superseded', { reason });
-    const next = addStageRun(tx, jobId, run, actor, 'base_moved');
-    added.push({ stageId, attempt: next.attempt });
-    if (stageId === 'integration_review') {
-      step(next, 'queued', { reason });
-      const queued = tx
-        .select()
-        .from(schema.stageRuns)
-        .where(eq(schema.stageRuns.id, next.id))
-        .get();
-      if (queued === undefined) throw new Error(`no Stage Run ${next.id}`);
-      step(queued, 'running');
-    }
-  }
+  const added = rerunDeliveryStages(tx, state, step, { jobId, actor, reason, cause: 'base_moved' });
 
   const op = { jobId, actor };
   const at = { headSha: approved.headSha, baseSha: approved.baseSha };
@@ -184,8 +164,48 @@ export function startBaseMergeIn(
   return true;
 }
 
+/**
+ * A new head on the Integration Branch makes every Gate result of the old one
+ * stale (a moved base, ADR-0041; a foreign push, ADR-0042). In the caller's
+ * Job transaction: the open `merge` items and the Blocker items
+ * `merge_approval` holds are superseded, and each of `integration_review`,
+ * `pull_request`, `merge_approval`, `merge` that had started is superseded if
+ * still in progress and gets an `attempt + 1` Stage Run (`cause` its reason);
+ * the new `integration_review` runs. Returns the Stage Runs added.
+ */
+export function rerunDeliveryStages(
+  tx: Tx,
+  state: JobState,
+  step: StageRunStepper,
+  input: { jobId: string; actor: string; reason: string; cause: 'base_moved' | 'foreign_push' },
+): { stageId: string; attempt: number }[] {
+  const { jobId, actor, reason } = input;
+  supersedeMergeItems(tx, jobId, actor, reason);
+  const holder = latestStageRun(state, 'merge_approval');
+  if (holder !== undefined) supersedeHeldBlockerItems(tx, holder, actor, reason);
+  const added: { stageId: string; attempt: number }[] = [];
+  for (const stageId of RERUN_STAGES) {
+    const run = latestStageRun(state, stageId);
+    if (run === undefined || run.state === 'pending') continue;
+    if (SUPERSEDABLE.has(run.state)) step(run, 'superseded', { reason });
+    const next = addStageRun(tx, jobId, run, actor, input.cause);
+    added.push({ stageId, attempt: next.attempt });
+    if (stageId === 'integration_review') {
+      step(next, 'queued', { reason });
+      const queued = tx
+        .select()
+        .from(schema.stageRuns)
+        .where(eq(schema.stageRuns.id, next.id))
+        .get();
+      if (queued === undefined) throw new Error(`no Stage Run ${next.id}`);
+      step(queued, 'running');
+    }
+  }
+  return added;
+}
+
 /** The Gate results recorded for the approved Attempt's `(head, base)`, counted: all stale now. */
-function staleGateResults(tx: Tx, approved: AttemptRow & { headSha: string }) {
+export function staleGateResults(tx: Tx, approved: AttemptRow & { headSha: string }) {
   const on = (table: typeof schema.evidence | typeof schema.verificationRuns) =>
     and(
       eq(table.attemptId, approved.id),

@@ -8,7 +8,9 @@
  * `last_polled_at`.
  *
  * A default branch that moved under the head the factory pushed is merged
- * into the Integration Branch (C2, ADR-0041; `startBaseMergeIn`).
+ * into the Integration Branch (C2, ADR-0041; `startBaseMergeIn`). A head the
+ * factory did not push is fetched, verified and reviewed again, never
+ * overwritten (#63, ADR-0042; `startForeignPushAdoption`).
  *
  * When the PR body's rendering differs from the one the factory last sent
  * (the CI section follows the checks), the body is PATCHed. A failed read
@@ -48,6 +50,7 @@ import {
 import { latestStageRun } from './replan.js';
 import { bodyHash, pullRequestBodyInput } from './pull-request.js';
 import { baseMoved, defaultBranchTip, startBaseMergeIn } from './base-change.js';
+import { foreignPushed, startForeignPushAdoption } from './foreign-push.js';
 
 type PullRequestRow = typeof schema.pullRequests.$inferSelect;
 
@@ -163,11 +166,16 @@ export class GitHubPoller {
     let gate: MergeGate = assessed.gate;
     // The default branch moved under the head the factory pushed (C2): merge it in (ADR-0041).
     // Either read may show the move first (the tip is read before the PR): either one counts.
+    // Someone else pushed to the Integration Branch (#63): fetch and verify it (ADR-0042).
+    const foreign =
+      seen.state === 'open' &&
+      foreignPushed(db, { taskId: before.taskId, pushedSha: before.pushedSha, headSha: head });
     const moved =
       seen.state === 'open' && seen.headSha === before.pushedSha
         ? [tip, seen.baseSha].find((b) => b !== undefined && baseMoved(db, before.taskId, b))
         : undefined;
     const quiet =
+      !foreign &&
       moved === undefined &&
       assessed.changes.length === 0 &&
       !assessed.gateChanged &&
@@ -196,6 +204,20 @@ export class GitHubPoller {
             .where(eq(schema.pullRequests.id, row.id))
             .get();
           if (pr === undefined) return undefined;
+          // A foreign push goes first: its head is verified and reviewed before anything else.
+          // Feedback is left unrecorded, so a poll once the PR is updated reads it as new.
+          if (
+            foreign &&
+            startForeignPushAdoption(tx, state, step, {
+              taskId: pr.taskId,
+              pushedSha: pr.pushedSha,
+              foreignHeadSha: head,
+              actor: POLLER,
+            })
+          ) {
+            const polled = recordPoll(tx, row.id, seen, opts, step, readJobState(tx, row.jobId));
+            return { gate: polled, reworked: true };
+          }
           const triggers = recordFeedback(tx, pr, unseenFeedback(tx, row.id, feedback), {
             redact: this.deps.redact,
             now: opts.now,

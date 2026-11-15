@@ -33,6 +33,7 @@ import { criteriaCoveredBy, currentCriteria } from './criteria.js';
 import { latestArtifact } from './plan-approval.js';
 import { integrationSources } from './integration.js';
 import { pullRequestsOf } from './pull-request.js';
+import { foreignCommitsOf } from './foreign-push.js';
 
 /** A POSIX shell single-quoted word. */
 export function shellQuote(word: string): string {
@@ -514,5 +515,7 @@ function integrationOf(
       state === 'approved'
         ? null
         : (blocker?.detail ?? attempt?.exitDetail ?? `the Integration Task is ${state}`),
+    foreignCommits: foreignCommitsOf(db, task.id),
+    droppedCommits: foreignCommitsOf(db, task.id, undefined, 'dropped'),
   };
 }

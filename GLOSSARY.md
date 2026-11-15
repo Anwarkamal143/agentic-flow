@@ -77,7 +77,7 @@ The commit a dependent Task's Worktree starts from: the approved results of the 
 _Avoid_: Integration base, merge base
 
 **Attempt**:
-One try at a Task: implementing it, the factory's own verification, and independent review. A Retry, a Rework, or resuming after a human answer always starts a new Attempt. The Integration Task's first Attempt is a merge Attempt: the factory merges the approved Task Branches and verifies the result, and no Harness runs. When the default branch moves under the approved Integration Branch, a base merge Attempt merges it in (a merge commit, never a rebase) and verifies the result again; no Harness runs there either.
+One try at a Task: implementing it, the factory's own verification, and independent review. A Retry, a Rework, or resuming after a human answer always starts a new Attempt. The Integration Task's first Attempt is a merge Attempt: the factory merges the approved Task Branches and verifies the result, and no Harness runs. When the default branch moves under the approved Integration Branch, a base merge Attempt merges it in (a merge commit, never a rebase) and verifies the result again; no Harness runs there either. When someone else pushes to the Integration Branch, a foreign push Attempt fetches that head, never overwrites it, and verifies it like the factory's own; no Harness runs, and the Integration Review runs again.
 _Avoid_: Execution, try, iteration
 
 **Retry**:

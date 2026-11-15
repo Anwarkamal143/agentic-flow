@@ -30,7 +30,9 @@ import {
   UsageSchema,
   type HarnessExit,
   routeFailedAttempt,
+  foreignPushAdoption,
   type AttemptCause,
+  type ForeignCommit,
   type AnsweredQuestion,
   type GrantGuidance,
   type PrFeedbackEntry,
@@ -61,10 +63,13 @@ import {
 import type { GitHubPort } from '@factory/github';
 import {
   addWorktree,
+  authoredCommitsBetween,
   changedPathKinds,
   changedPaths,
   commitsBetween,
+  fetchBranchHead,
   fetchRemote,
+  isAncestor,
   releaseBranch,
   resetWorktreeTo,
   resolveCommit,
@@ -121,6 +126,7 @@ import { latestStageRunOfTask, stageIdOfTask } from './task-stage.js';
 import { PassLoop } from './pass-loop.js';
 import {
   failPullRequest,
+  githubRemoteUrl,
   nextPullRequest,
   runningPullRequests,
   runPullRequest,
@@ -143,6 +149,7 @@ import {
   mergeBaseIn,
   passedAttemptOf,
 } from './base-change.js';
+import { blockOnForeignRewrite } from './foreign-push.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
   allocatePortBlock,
@@ -169,6 +176,8 @@ const DEVELOPER_RUNS = 2;
 const TIER: SecurityTier = 'local';
 /** A merge Attempt's `harness_id`: the factory merged, no Harness ran (ADR-0034). */
 const MERGE_HARNESS_ID = 'factory';
+/** The Attempts the factory makes itself, with no Harness: verified again in place when interrupted. */
+const FACTORY_MADE = new Set<AttemptCause>(['merge', 'base_merge', 'foreign_push']);
 /** A merge Attempt sends no prompt: its template is recorded as none. */
 const MERGE_TEMPLATE = { id: 'none', hash: 'none' };
 
@@ -654,6 +663,11 @@ export class TaskScheduler {
       await this.runBaseMerge(harness, { task, definition, job, repo, n: previous.n + 1 }, slot);
       return;
     }
+    // Someone else pushed to the Integration Branch: fetch and verify that head (ADR-0042).
+    if (task.kind === 'integration' && task.foreignHeadSha !== null && previous !== undefined) {
+      await this.runForeignPush(harness, { task, definition, job, repo, n: previous.n + 1 }, slot);
+      return;
+    }
     const clone = repo.clonePath;
     const attemptId = newId('att');
     const n = (previous?.n ?? 0) + 1;
@@ -662,8 +676,10 @@ export class TaskScheduler {
     // A merge Attempt interrupted before its Gates finished is verified again in its own
     // Worktree, as a new merge Attempt: it is never handed to a Harness (ADR-0034).
     // So is a base merge Attempt, in the Worktree its merge-in already moved (ADR-0041).
+    // So is a foreign push Attempt, in the Worktree already moved to the foreign head (ADR-0042).
     const remerge =
-      (previous?.cause === 'merge' || previous?.cause === 'base_merge') &&
+      previous !== undefined &&
+      FACTORY_MADE.has(AttemptCauseSchema.parse(previous.cause)) &&
       previous.state === 'interrupted';
     const cause: AttemptCause =
       previous === undefined
@@ -846,6 +862,9 @@ export class TaskScheduler {
             baseSha,
             commitsJson: '[]',
             protocolViolationsJson: '[]',
+            // A foreign push verified again in place keeps the foreign commits it fetched (ADR-0042).
+            foreignCommitsJson: remerge ? previous.foreignCommitsJson : null,
+            droppedCommitsJson: remerge ? previous.droppedCommitsJson : null,
             startedAt: now,
             version: 0,
           })
@@ -1191,6 +1210,147 @@ export class TaskScheduler {
       return;
     }
     const { baseSha, headSha } = built;
+    await this.verifyFactoryHead(harness, { task, definition, job, repo, n }, slot, {
+      cause: 'base_merge',
+      worktree,
+      baseSha,
+      headSha,
+      started: {
+        fromHeadSha: approved.headSha,
+        fromBaseSha: approved.baseSha,
+        // False when the base was already in the head: no merge commit was needed.
+        mergedIn: built.merged,
+      },
+      foreignCommits: null,
+      droppedCommits: null,
+    });
+  }
+
+  /**
+   * The approved Integration Task's `foreign_push` Attempt (ADR-0042; #63).
+   * Under the clone's setup lock: the Integration Branch is fetched from
+   * GitHub and the Worktree's branch moved to its head (`reset --keep`), so
+   * the foreign commits are never overwritten and every later factory push
+   * fast-forwards from them. The commits it holds that the approved head does
+   * not are recorded as foreign. Then the factory verifies that head like a
+   * merge Attempt, on the approved base: the path-scope Gate over the union of
+   * the Plan Tasks' writable globs, every command, and the Integration Review,
+   * which runs again (nothing is re-anchored).
+   */
+  private async runForeignPush(
+    harness: AgentHarness,
+    input: {
+      task: TaskRow;
+      definition: TaskDefinition;
+      job: typeof schema.jobs.$inferSelect;
+      repo: typeof schema.repositories.$inferSelect;
+      n: number;
+    },
+    slot: Slot,
+  ): Promise<void> {
+    const { db } = this.opts;
+    const { task, repo } = input;
+    const clone = repo.clonePath;
+    const approved = passedAttemptOf(db, task.id);
+    if (approved === undefined)
+      throw new Error(`Task ${task.key} has no approved head to adopt a foreign push over`);
+    if (repo.githubOwner === null || repo.githubName === null)
+      throw new Error(`Task ${task.key}'s Repository has no GitHub coordinates to fetch from`);
+    const coordinates = { owner: repo.githubOwner, name: repo.githubName };
+    const worktree = requireWorktree(db, approved.worktreeId);
+    if (worktree.state !== 'preserved') {
+      throw new Error(`the Worktree of Task ${task.key} is ${worktree.state}, not preserved`);
+    }
+    const fetched = await this.withClone(clone, async () => {
+      // Whatever the branch holds now: a later push than the one the poller saw is adopted too.
+      const headSha = await fetchBranchHead(clone, githubRemoteUrl(coordinates), worktree.branch);
+      if (headSha === undefined) {
+        throw new Error(
+          `${coordinates.owner}/${coordinates.name} has no ${worktree.branch} to fetch the foreign push from`,
+        );
+      }
+      const dirty = await uncommittedPaths(worktree.path);
+      if (dirty.length > 0) {
+        throw new Error(
+          `the Integration Branch Worktree has uncommitted changes (${dirty.join(', ')}): the foreign push is not checked out over them`,
+        );
+      }
+      const fastForward = await isAncestor(clone, approved.headSha, headSha);
+      const approvedRewrite = task.foreignRewriteApprovedSha;
+      // The approved commits a rewrite drops from the branch (none for a fast-forward).
+      const dropped = fastForward
+        ? []
+        : await authoredCommitsBetween(clone, headSha, approved.headSha);
+      const decision = foreignPushAdoption({
+        fastForward,
+        holdsApprovedRewrite:
+          approvedRewrite !== null && (await isAncestor(clone, approvedRewrite, headSha)),
+      });
+      // A rewrite waits for a human's Approval: nothing is checked out, nothing pushed back.
+      if (decision === 'needs_approval') return { kind: 'rewrite' as const, headSha, dropped };
+      const commits = await authoredCommitsBetween(clone, approved.headSha, headSha);
+      await resetWorktreeTo(worktree.path, headSha);
+      return { kind: 'adopt' as const, headSha, commits, dropped, fastForward };
+    });
+    if (fetched.kind === 'rewrite') {
+      blockOnForeignRewrite(db, { jobId: input.job.id, actor: ACTOR }, task.id, {
+        approvedHeadSha: approved.headSha,
+        rewriteSha: fetched.headSha,
+        dropped: fetched.dropped.length,
+        branch: worktree.branch,
+      });
+      this.opts.onCommit();
+      return;
+    }
+    await this.verifyFactoryHead(harness, input, slot, {
+      cause: 'foreign_push',
+      worktree,
+      baseSha: approved.baseSha,
+      headSha: fetched.headSha,
+      started: {
+        fromHeadSha: approved.headSha,
+        seenHeadSha: task.foreignHeadSha,
+        // False when the foreign push rewrote the branch rather than adding to it.
+        fastForward: fetched.fastForward,
+        foreignCommits: fetched.commits.map((c) => c.sha),
+        droppedCommits: fetched.dropped.map((c) => c.sha),
+        // The rewrite a human approved through adopt_rewrite, when it was one.
+        approvedRewriteSha: fetched.fastForward ? null : task.foreignRewriteApprovedSha,
+      },
+      foreignCommits: fetched.commits,
+      droppedCommits: fetched.dropped,
+    });
+  }
+
+  /**
+   * Records a factory-made Attempt (`base_merge`, `foreign_push`; no Harness)
+   * at `verifying` on `(headSha, baseSha)` in the preserved Worktree the
+   * caller already moved to `headSha`, clears the Task's request, and runs
+   * the factory's Gates on it ({@link verifyMerge}).
+   */
+  private async verifyFactoryHead(
+    harness: AgentHarness,
+    input: {
+      task: TaskRow;
+      definition: TaskDefinition;
+      job: typeof schema.jobs.$inferSelect;
+      repo: typeof schema.repositories.$inferSelect;
+      n: number;
+    },
+    slot: Slot,
+    made: {
+      cause: 'base_merge' | 'foreign_push';
+      worktree: { id: string; path: string; branch: string };
+      baseSha: string;
+      headSha: string;
+      started: Record<string, unknown>;
+      foreignCommits: ForeignCommit[] | null;
+      droppedCommits: ForeignCommit[] | null;
+    },
+  ): Promise<void> {
+    const { db } = this.opts;
+    const { task, definition, job, repo, n } = input;
+    const { worktree, baseSha, headSha, cause } = made;
     const attemptId = newId('att');
     const packet = this.packet({
       job,
@@ -1216,7 +1376,7 @@ export class TaskScheduler {
           expiresAt: leaseExpiry(),
         });
         const now = new Date().toISOString();
-        // Later Attempts (a Rework) diff against the merged-in base.
+        // Later Attempts (a Rework) diff against this base (a merged-in one, ADR-0041).
         tx.update(schema.worktrees)
           .set({ portBase: base, baseSha })
           .where(eq(schema.worktrees.id, worktree.id))
@@ -1232,7 +1392,7 @@ export class TaskScheduler {
             id: attemptId,
             taskId: task.id,
             n,
-            cause: 'base_merge',
+            cause,
             state: 'verifying',
             harnessId: MERGE_HARNESS_ID,
             harnessVersion: null,
@@ -1244,6 +1404,12 @@ export class TaskScheduler {
             baseSha,
             commitsJson: '[]',
             protocolViolationsJson: '[]',
+            foreignCommitsJson:
+              made.foreignCommits === null ? null : JSON.stringify(made.foreignCommits),
+            droppedCommitsJson:
+              made.droppedCommits === null || made.droppedCommits.length === 0
+                ? null
+                : JSON.stringify(made.droppedCommits),
             startedAt: now,
             version: 0,
           })
@@ -1257,20 +1423,22 @@ export class TaskScheduler {
           payload: {
             taskId: task.id,
             n,
-            cause: 'base_merge',
+            cause,
             harnessId: MERGE_HARNESS_ID,
             tier: TIER,
             worktreeId: worktree.id,
-            fromHeadSha: approved.headSha,
-            fromBaseSha: approved.baseSha,
             headSha,
             baseSha,
-            // False when the base was already in the head: no merge commit was needed.
-            mergedIn: built.merged,
+            ...made.started,
           },
         });
+        // The request is answered by this Attempt: a crash before here redoes it from the approved head.
         tx.update(schema.tasks)
-          .set({ baseMergeRequested: false })
+          .set(
+            cause === 'base_merge'
+              ? { baseMergeRequested: false }
+              : { foreignHeadSha: null, foreignRewriteApprovedSha: null },
+          )
           .where(eq(schema.tasks.id, task.id))
           .run();
         const claimed = requireTask(tx, task.id, 'claimed');
@@ -1587,7 +1755,7 @@ export class TaskScheduler {
   private async verifyStep(ctx: AttemptContext): Promise<void> {
     const { path, baseSha, attemptId, definition, harness } = ctx;
     const attempt = requireAttempt(this.opts.db, attemptId);
-    if (attempt.cause === 'merge' || attempt.cause === 'base_merge') {
+    if (FACTORY_MADE.has(AttemptCauseSchema.parse(attempt.cause))) {
       await this.verifyMerge(ctx);
       return;
     }
@@ -2880,6 +3048,7 @@ function endAttempt(
           .map((a) => ({ cause: AttemptCauseSchema.parse(a.cause) })),
       ),
       maxAttempts: task.maxAttempts,
+      cause: AttemptCauseSchema.parse(attempt.cause),
     });
     if (route.kind === 'fail') {
       stepTask(tx, op, task, 'failed', { reason, payload });

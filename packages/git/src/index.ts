@@ -289,6 +289,26 @@ export async function commitsBetween(
     });
 }
 
+/**
+ * The commits reachable from `head` but not from `base` (`base..head`, so
+ * `base` need not be an ancestor), newest first, with each one's author name.
+ * Used to list the commits someone else pushed (ADR-0042).
+ */
+export async function authoredCommitsBetween(
+  repo: string,
+  base: string,
+  head: string,
+): Promise<{ sha: string; subject: string; author: string }[]> {
+  const out = await worktreeGit(repo, ['log', '--format=%H%x00%s%x00%an', `${base}..${head}`]);
+  return out
+    .split('\n')
+    .filter((l) => l !== '')
+    .map((l) => {
+      const [sha = '', subject = '', author = ''] = l.split('\0');
+      return { sha, subject, author };
+    });
+}
+
 /** The tree SHA of the commit `sha`. */
 export async function treeOf(repo: string, sha: string): Promise<string> {
   return (await worktreeGit(repo, ['rev-parse', '--verify', `${sha}^{tree}`])).trim();
@@ -516,4 +536,20 @@ export async function remoteBranchHead(
   const out = await git(['-C', repo, ...NO_HOOKS, 'ls-remote', url, `refs/heads/${branch}`]);
   const [sha] = out.trim().split(/\s+/);
   return sha === undefined || sha === '' ? undefined : sha;
+}
+
+/**
+ * Fetches `branch` of the remote `url` into `repo`'s object store (no ref is
+ * written but `FETCH_HEAD`) and returns the commit it points at; `undefined`
+ * when the remote has no such branch. Runs with the runtime's environment, so
+ * git's own credentials work, and no hooks. Call under the clone's setup lock.
+ */
+export async function fetchBranchHead(
+  repo: string,
+  url: string,
+  branch: string,
+): Promise<string | undefined> {
+  if ((await remoteBranchHead(repo, url, branch)) === undefined) return undefined;
+  await fetchGit(repo, ['fetch', '--quiet', '--no-tags', url, `refs/heads/${branch}`]);
+  return (await worktreeGit(repo, ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'])).trim();
 }

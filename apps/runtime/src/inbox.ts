@@ -5,6 +5,7 @@
  * approval view. Every decision names the item's version and subject, and only
  * a human actor decides.
  */
+import { approveForeignRewrite } from './foreign-push.js';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import { rmSync } from 'node:fs';
 import {
@@ -392,6 +393,22 @@ export class InboxService {
     }
 
     if (input.option === 'rerun_checks') return this.rerunChecksFromItem(item, input, actor);
+
+    if (input.option === 'adopt_rewrite') {
+      // A human approves the foreign rewrite of the Integration Branch (ADR-0042).
+      this.decideOnly(item, input, actor, null, (tx, state, step) => {
+        const { task, blocker } = blockedTaskOf(tx, item);
+        approveForeignRewrite(tx, { task, blocker, approvalId: item.id, actor });
+        requeueExecution(
+          tx,
+          state,
+          step,
+          `Blocker Approval ${item.id}: ${actor} adopted the foreign rewrite`,
+          task,
+        );
+      });
+      return this.get(item.id);
+    }
 
     if (input.option === 'grant') {
       const grant = check.grant ?? 1;
@@ -1093,7 +1110,8 @@ function applyGrant(
 }
 
 /**
- * "Rework with guidance" on a `spec_finding_unresolved` Blocker (ADR-0031):
+ * "Rework with guidance" on a `spec_finding_unresolved` Blocker (ADR-0031),
+ * or on a `foreign_push_out_of_scope` one (ADR-0042, from the foreign head):
  * the current Specification stays and the Task goes `ready` for a Rework
  * Attempt carrying the comment as guidance (`guidanceAfter`). It counts
  * against `maxAttempts`: with no Attempt left, the Task waits on a
@@ -1108,7 +1126,11 @@ function applyRework(
 ): void {
   const { item, actor } = input;
   const { task, blocker } = blockedTaskOf(tx, item);
-  if (blocker.reason !== 'spec_finding_unresolved') {
+  // A foreign push out of scope is reworked on top of the foreign head, never over it (ADR-0042).
+  if (
+    blocker.reason !== 'spec_finding_unresolved' &&
+    blocker.reason !== 'foreign_push_out_of_scope'
+  ) {
     throw new Error(`a ${blocker.reason} Blocker offers no Rework`);
   }
   const op = { jobId: item.jobId, actor };
