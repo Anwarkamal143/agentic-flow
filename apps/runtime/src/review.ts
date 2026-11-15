@@ -42,7 +42,7 @@ import { describeHarnessExit, type HarnessRawResult } from '@factory/harness';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
-import { criteriaCoveredBy, currentSpec } from './criteria.js';
+import { criteriaCoveredBy, currentCriteria, currentSpec } from './criteria.js';
 import { changeJob, type JobState, type StageRunStepper } from './engine.js';
 import { gateFinding } from './findings.js';
 import { newId } from './ids.js';
@@ -73,6 +73,45 @@ Reply with exactly one JSON object and nothing else. It must match this JSON Sch
 /** Hash of the template text, recorded with each review. */
 export const REVIEW_TEMPLATE_HASH = `sha256:${createHash('sha256').update(TEMPLATE).digest('hex')}`;
 
+export const INTEGRATION_REVIEW_TEMPLATE_ID = 'integration-review-packet@1';
+
+/**
+ * The Integration Review (ARCHITECTURE §9, ADR-0035): the whole combined change
+ * of a Job, after its approved Task Branches were merged, against the whole
+ * Specification. Same output schema as a Task review.
+ */
+const INTEGRATION_TEMPLATE = `You are the independent Integration Reviewer of one Job in an automated software factory.
+Each Task of the Job was reviewed on its own and approved. Their Task Branches are now merged into one Integration Branch, and you review the combined change: the diff from the base to the integration head.
+You did not write any of it, and you have no access to how it was written.
+The current directory is the Integration Branch's git Worktree at the reviewed commit. Read it if you need to; change nothing (no edits, no commits). A change you make invalidates your review.
+
+Look for what no single Task's review could see: changes that are each correct but inconsistent together, duplicated helpers or behavior, conflicting conventions, and Acceptance Criteria that no single Task fully satisfies.
+Review the combined change on two axes: (A) engineering standards, and (B) compliance with the whole Specification and every Acceptance Criterion.
+Give every Acceptance Criterion in the packet a verdict: pass, fail, blocked or not_tested. Say not_tested when nothing in the diff or the Evidence shows it.
+Each finding has a severity (critical, high, medium, low, info), a fault origin (implementation, plan, spec, infrastructure), a location (path, path:line, or general), the problem, why it matters, a recommendation, and whether it blocks. Critical and high findings always block.
+Use fault origin implementation for what a fix on the Integration Branch can solve, plan when the Tasks themselves were split or defined wrongly, and spec when the Specification is wrong.
+The outcome is approved when no finding blocks, and changes_requested when one does.
+
+The Review Packet (JSON):
+{{packet}}
+{{rejected}}
+Reply with exactly one JSON object and nothing else. It must match this JSON Schema:
+{{schema}}
+`;
+
+export const INTEGRATION_REVIEW_TEMPLATE_HASH = `sha256:${createHash('sha256').update(INTEGRATION_TEMPLATE).digest('hex')}`;
+
+/** The template a packet is rendered with, by its scope. */
+function templateOf(scope: ReviewPacket['scope']): { id: string; hash: string; text: string } {
+  return scope === 'integration'
+    ? {
+        id: INTEGRATION_REVIEW_TEMPLATE_ID,
+        hash: INTEGRATION_REVIEW_TEMPLATE_HASH,
+        text: INTEGRATION_TEMPLATE,
+      }
+    : { id: REVIEW_TEMPLATE_ID, hash: REVIEW_TEMPLATE_HASH, text: TEMPLATE };
+}
+
 export function renderReviewPrompt(packet: ReviewPacket, rejected?: readonly RuleIssue[]): string {
   const values: Record<string, string> = {
     packet: JSON.stringify(packet, null, 2),
@@ -84,7 +123,10 @@ export function renderReviewPrompt(packet: ReviewPacket, rejected?: readonly Rul
             .join('\n')}\n`,
     schema: JSON.stringify(z.toJSONSchema(ReviewProposalSchema, { io: 'input' })),
   };
-  return TEMPLATE.replace(/\{\{(\w+)\}\}/g, (_, key: string) => values[key] ?? '');
+  return templateOf(packet.scope).text.replace(
+    /\{\{(\w+)\}\}/g,
+    (_, key: string) => values[key] ?? '',
+  );
 }
 
 /** A verification run as the factory recorded it, with its output. */
@@ -99,6 +141,7 @@ export interface ReviewedRun {
 
 /** Builds the Review Packet from the factory's own records and git. Nothing from the Harness. */
 export async function buildReviewPacket(input: {
+  scope: ReviewPacket['scope'];
   subject: ReviewPacket['subject'];
   /** The Factory Clone or the Worktree, to read the diff from. */
   repo: string;
@@ -112,6 +155,7 @@ export async function buildReviewPacket(input: {
   const diff = await diffBetween(input.repo, baseSha, headSha, MAX_DIFF_BYTES);
   return ReviewPacketSchema.parse({
     packetVersion: 1,
+    scope: input.scope,
     subject: input.subject,
     specification: input.specification,
     acceptanceCriteria: input.criteria.map((c) => ({
@@ -307,6 +351,8 @@ export async function runReview(
     harnessId: string;
     wallClockMs: number;
     firstRun: number;
+    /** `integration`: the Integration Review (ADR-0035). */
+    scope: ReviewPacket['scope'];
   },
   runner: ReviewRunner,
 ): Promise<Reviewed | undefined> {
@@ -315,8 +361,10 @@ export async function runReview(
   const { runs } = input;
   const spec = currentSpec(db, jobId);
   if (spec === undefined) throw new Error(`Job ${jobId} has no Specification to review against`);
-  const criteria = criteriaCoveredBy(db, jobId, input.definition.acceptance);
+  const criteria = reviewedCriteria(db, jobId, input.scope, input.definition);
+  const template = templateOf(input.scope);
   const packet = await buildReviewPacket({
+    scope: input.scope,
     subject: { ...input.subject, ...input.at },
     repo: input.worktree,
     specification: SpecificationProposalSchema.parse(artifacts.readJson(spec.id)),
@@ -339,7 +387,7 @@ export async function runReview(
     const { result, sessionRef } = await runner.run(
       {
         role: 'reviewer',
-        template: { id: REVIEW_TEMPLATE_ID, hash: REVIEW_TEMPLATE_HASH },
+        template: { id: template.id, hash: template.hash },
         run: n,
         prompt: renderReviewPrompt(packet, rejected),
         wallClockMs: input.wallClockMs,
@@ -388,6 +436,8 @@ export function finishReview(
     reviewed: Reviewed;
     current: GateRef;
     reviewerChanges: string[];
+    /** `integration`: the Integration Review (ADR-0035). */
+    scope: ReviewPacket['scope'];
   },
   end: (tx: Tx, state: JobState, step: StageRunStepper, outcome: AttemptOutcome) => void,
 ): void {
@@ -401,9 +451,11 @@ export function finishReview(
       throw new Error(`Task ${taskId} is ${String(task?.state)}, not in_review`);
     }
     const definition = TaskDefinitionSchema.parse(JSON.parse(task.definitionJson));
+    const criteria = reviewedCriteria(tx, jobId, input.scope, definition);
     let review: ApprovalInput['review'] = null;
     if (reviewed.kind === 'valid' && content !== undefined) {
       const { value } = reviewed;
+      const template = templateOf(reviewed.packet.scope);
       const artifact = deps.artifacts.record(
         tx,
         { jobId, taskId, attemptId, kind: 'review', content },
@@ -419,8 +471,8 @@ export function finishReview(
           reviewerHarnessId: reviewed.harnessId,
           reviewerHarnessVersion: deps.harnessVersion,
           sessionRef: reviewed.sessionRef,
-          promptTemplateId: REVIEW_TEMPLATE_ID,
-          promptTemplateHash: REVIEW_TEMPLATE_HASH,
+          promptTemplateId: template.id,
+          promptTemplateHash: template.hash,
           packetJson: JSON.stringify(reviewed.packet),
           headSha: reviewedHead,
           baseSha: base,
@@ -435,7 +487,7 @@ export function finishReview(
           .values({ id: newId('fnd'), reviewId, position, ...f, blocking: isBlocking(f) })
           .run();
       });
-      for (const criterion of criteriaCoveredBy(tx, jobId, definition.acceptance)) {
+      for (const criterion of criteria) {
         const verdict = value.criteria.find((c) => c.code === criterion.code);
         tx.insert(schema.evidence)
           .values({
@@ -480,7 +532,7 @@ export function finishReview(
       outcome = { state: 'failed', exitReason: reviewed.exitReason, detail: reviewed.detail };
     } else {
       const decision = decideApproval(
-        approvalInput(tx, { jobId, attemptId, definition, current: input.current, review }),
+        approvalInput(tx, { attemptId, criteria, current: input.current, review }),
       );
       const problems = [...decision.problems, ...input.reviewerChanges];
       const changesRequested =
@@ -521,14 +573,13 @@ export function finishReview(
 function approvalInput(
   tx: Tx,
   input: {
-    jobId: string;
     attemptId: string;
-    definition: TaskDefinition;
+    criteria: readonly CriterionRow[];
     current: GateRef;
     review: ApprovalInput['review'];
   },
 ): ApprovalInput {
-  const { jobId, attemptId, definition, current, review } = input;
+  const { attemptId, criteria, current, review } = input;
   const runs = tx
     .select()
     .from(schema.verificationRuns)
@@ -549,7 +600,7 @@ function approvalInput(
       headSha: r.headSha,
       baseSha: r.baseSha,
     })),
-    criteria: criteriaCoveredBy(tx, jobId, definition.acceptance).map((c) => ({
+    criteria: criteria.map((c) => ({
       code: c.code,
       mandatory: c.mandatory,
       evidence: evidence
@@ -563,4 +614,21 @@ function approvalInput(
     })),
     review,
   };
+}
+
+type CriterionRow = ReturnType<typeof currentCriteria>[number];
+
+/**
+ * The Acceptance Criteria a review judges: those the Task covers, or for the
+ * Integration Review every one of the current Specification (ADR-0035).
+ */
+function reviewedCriteria(
+  db: FactoryDb | Tx,
+  jobId: string,
+  scope: ReviewPacket['scope'],
+  definition: TaskDefinition,
+): CriterionRow[] {
+  return scope === 'integration'
+    ? currentCriteria(db, jobId)
+    : criteriaCoveredBy(db, jobId, definition.acceptance);
 }

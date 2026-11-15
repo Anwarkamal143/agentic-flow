@@ -289,6 +289,11 @@ export async function commitsBetween(
     });
 }
 
+/** The tree SHA of the commit `sha`. */
+export async function treeOf(repo: string, sha: string): Promise<string> {
+  return (await worktreeGit(repo, ['rev-parse', '--verify', `${sha}^{tree}`])).trim();
+}
+
 /** Paths changed between two commits. */
 export async function changedPaths(repo: string, base: string, head: string): Promise<string[]> {
   const out = await worktreeGit(repo, ['diff', '--name-only', '-z', `${base}..${head}`]);

@@ -200,6 +200,7 @@ export const StageIdSchema = z.enum([
   'plan_approval',
   'execution',
   'integration',
+  'integration_review',
   'closure',
 ]);
 export type StageId = z.infer<typeof StageIdSchema>;
@@ -283,7 +284,7 @@ export const WorkflowSnapshotSchema = z.object({
 export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
 
 /** The Stage IDs of each version of the built-in `feature` Recipe. */
-const FEATURE_RECIPE_STAGES: Readonly<Record<2 | 3, readonly StageId[]>> = {
+const FEATURE_RECIPE_STAGES: Readonly<Record<2 | 3 | 4, readonly StageId[]>> = {
   // Version 2 added `plan_approval` (ADR-0016).
   2: [
     'intake',
@@ -307,10 +308,23 @@ const FEATURE_RECIPE_STAGES: Readonly<Record<2 | 3, readonly StageId[]>> = {
     'integration',
     'closure',
   ],
+  // Version 4 adds `integration_review` (ADR-0035).
+  4: [
+    'intake',
+    'triage',
+    'discovery',
+    'specification',
+    'planning',
+    'plan_approval',
+    'execution',
+    'integration',
+    'integration_review',
+    'closure',
+  ],
 };
 
 /** The `feature` Recipe versions a Job can be created at. */
-export const FEATURE_RECIPE_VERSIONS = [2, 3] as const;
+export const FEATURE_RECIPE_VERSIONS = [2, 3, 4] as const;
 export type FeatureRecipeVersion = (typeof FEATURE_RECIPE_VERSIONS)[number];
 
 /**
@@ -326,11 +340,11 @@ export function featureRecipe(version: FeatureRecipeVersion): WorkflowSnapshot {
 }
 
 /**
- * The built-in `feature` Recipe, Phase C cut so far: version 3, with
- * `integration` (ADR-0034); without `integration_review` and the delivery
- * Stages yet (ROADMAP).
+ * The built-in `feature` Recipe, Phase C cut so far: version 4, with
+ * `integration` (ADR-0034) and `integration_review` (ADR-0035); without the
+ * delivery Stages yet (ROADMAP).
  */
-export const FEATURE_RECIPE: WorkflowSnapshot = featureRecipe(3);
+export const FEATURE_RECIPE: WorkflowSnapshot = featureRecipe(4);
 
 /**
  * A Job's status, derived from its Stage Runs (ARCHITECTURE §4.2; precedence

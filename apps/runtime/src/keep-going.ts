@@ -59,12 +59,18 @@ function settlePlanTasks(tx: Tx, state: JobState, step: StageRunStepper): void {
     const closure = state.stageRuns.find((r) => r.stageId === 'closure' && r.state === 'pending');
     if (closure !== undefined) step(closure, 'queued');
   };
-  // A failed execution has nothing to integrate: `integration` is skipped and closure reports
-  // the partial results (ADR-0028, ADR-0034).
+  // A failed execution has nothing to integrate or review: `integration` and
+  // `integration_review` are skipped and closure reports the partial results (ADR-0028,
+  // ADR-0034, ADR-0035).
   const skipIntegration = () => {
-    const integration = latestStageRun(readJobState(tx, state.job.id), 'integration');
+    const now = readJobState(tx, state.job.id);
+    const integration = latestStageRun(now, 'integration');
     if (integration?.state === 'pending') {
       step(integration, 'skipped', { reason: 'execution failed: there is nothing to integrate' });
+    }
+    const review = latestStageRun(now, 'integration_review');
+    if (review?.state === 'pending') {
+      step(review, 'skipped', { reason: 'execution failed: there is nothing to review' });
     }
   };
   if (outcome.kind !== 'running') {

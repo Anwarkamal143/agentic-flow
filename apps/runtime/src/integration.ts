@@ -22,6 +22,7 @@ import {
   TaskDefinitionSchema,
   TaskStateSchema,
   type Blocker,
+  type IntegrationReviewSkip,
   type TaskDefinition,
 } from '@factory/domain';
 import { commitTree, mergeCommits } from '@factory/git';
@@ -36,6 +37,7 @@ import {
 import { newId } from './ids.js';
 import { latestArtifact } from './plan-approval.js';
 import { latestStageRun } from './replan.js';
+import { reviewStarted } from './task-stage.js';
 import { releaseAttemptTokens } from './worktree.js';
 
 type TaskRow = typeof schema.tasks.$inferSelect;
@@ -141,15 +143,20 @@ export function startIntegration(
 }
 
 /**
- * Ends the `integration` Stage once no Integration Task is in progress, by the
- * keep-going rule `execution` uses (`executionOutcome`): `succeeded` (closure
- * queued) when every one is approved, `waiting_human` or `blocked` on the first
- * Blocker, else `failed` (closure queued for the partial results). Only the
- * Integration Tasks of the newest Plan count.
+ * Ends the Stage the Integration Tasks run in (`integration`, or
+ * `integration_review` once the Integration Review started, ADR-0035) once
+ * no Integration Task is in progress, by the keep-going rule `execution` uses
+ * (`executionOutcome`): `succeeded` (closure queued) when every one is
+ * approved, `waiting_human` or `blocked` on the first Blocker, else `failed`
+ * (closure queued for the partial results). Only the Integration Tasks of the
+ * newest Plan count. An `integration` can succeed here only with its
+ * Integration Review already skipped (`enterIntegrationReview`, in the
+ * transaction that approved the Task).
  */
 export function settleIntegration(tx: Tx, state: JobState, step: StageRunStepper): void {
-  const integration = latestStageRun(state, 'integration');
-  if (integration?.state !== 'running') return;
+  const review = latestStageRun(state, 'integration_review');
+  const stage = reviewStarted(review) ? review : latestStageRun(state, 'integration');
+  if (stage?.state !== 'running') return;
   const plan = latestArtifact(tx, state.job.id, 'plan');
   const tasks = tx
     .select()
@@ -180,23 +187,61 @@ export function settleIntegration(tx: Tx, state: JobState, step: StageRunStepper
       return;
     case 'waiting_human':
     case 'blocked':
-      step(integration, outcome.kind, { blocker: outcome.blocker });
+      step(stage, outcome.kind, { blocker: outcome.blocker });
       return;
     case 'failed':
-      step(integration, 'failed', {
+      step(stage, 'failed', {
         failure: {
           reason: 'task_failed',
           message: `the Integration Task failed: its last Attempt ended with no Rework or Blocker route left`,
           issues: [],
         },
       });
+      if (stage.stageId === 'integration' && review?.state === 'pending') {
+        step(review, 'skipped', { reason: 'integration failed: there is nothing to review' });
+      }
       queueClosure();
       return;
     case 'succeeded':
-      step(integration, 'succeeded');
+      step(stage, 'succeeded');
+      if (stage.stageId === 'integration' && review?.state === 'pending') {
+        throw new Error(
+          `Job ${state.job.id}: integration succeeded with its Integration Review neither run nor skipped`,
+        );
+      }
       queueClosure();
       return;
   }
+}
+
+/**
+ * The Integration Task's Gates passed on the integration head in
+ * `integration` (ADR-0035). In the transaction that records it: with no
+ * `integration_review` Stage (a Job created at `feature` v3) nothing changes;
+ * when the skip rule holds, `integration_review` is `skipped` with its reason
+ * (the Task is then approved and `integration` succeeds as before); else
+ * `integration` succeeds and `integration_review` starts (`queued → running`),
+ * where the Integration Review and any Rework it asks for run.
+ */
+export function enterIntegrationReview(
+  tx: Tx,
+  jobId: string,
+  step: StageRunStepper,
+  skip: IntegrationReviewSkip,
+): void {
+  const state = readJobState(tx, jobId);
+  const review = latestStageRun(state, 'integration_review');
+  const integration = latestStageRun(state, 'integration');
+  if (review?.state !== 'pending' || integration?.state !== 'running') return;
+  if (skip.skip) {
+    step(review, 'skipped', { reason: skip.reason });
+    return;
+  }
+  step(integration, 'succeeded', { reason: 'the Integration Branch passed every Gate' });
+  step(review, 'queued', { reason: 'the Integration Branch passed every Gate' });
+  const queued = latestStageRun(readJobState(tx, jobId), 'integration_review');
+  if (queued === undefined) throw new Error(`Job ${jobId} lost its integration_review Stage Run`);
+  step(queued, 'running');
 }
 
 /** One approved Task Branch to merge: the Plan Task and the head its passing Attempt was approved on. */

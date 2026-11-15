@@ -55,7 +55,14 @@ interface AttemptBody {
   harness: { id: string };
   findings: { source: string; rule?: string; problem: string }[];
   verificationRuns: { key: string; command: string; headSha: string; baseSha: string }[];
-  evidence: { kind: string; verdict: string; headSha: string; baseSha: string }[];
+  evidence: {
+    kind: string;
+    source: string;
+    criterionCode: string | null;
+    verdict: string;
+    headSha: string;
+    baseSha: string;
+  }[];
 }
 interface WorktreeBody {
   taskId: string;
@@ -295,8 +302,24 @@ describe('the Integration Branch', { timeout: 90_000 }, () => {
     }
     expect(merge.evidence.length).toBeGreaterThan(0);
     for (const e of merge.evidence) {
-      expect([e.verdict, e.headSha, e.baseSha]).toEqual(['pass', head, upstreamHead]);
+      expect([e.headSha, e.baseSha]).toEqual([head, upstreamHead]);
     }
+    // Command Evidence passed; the review-sourced criterion Evidence is the approving
+    // Integration Review's: AC-01 pass, AC-02 (given no verdict) not_tested.
+    for (const e of merge.evidence.filter((x) => x.source === 'commands')) {
+      expect(e.verdict).toBe('pass');
+    }
+    expect(
+      merge.evidence.filter((x) => x.source === 'review').map((x) => [x.criterionCode, x.verdict]),
+    ).toEqual([
+      ['AC-01', 'pass'],
+      ['AC-02', 'not_tested'],
+    ]);
+    // Then the Integration Review (#56) approved that same head.
+    expect(job.stageRuns.map((s) => [s.stageId, s.state])).toContainEqual([
+      'integration_review',
+      'succeeded',
+    ]);
 
     // The Delivery Report names the Integration Branch and offers it, not the Task Branches.
     const report = await reportOf(rt, job.id);

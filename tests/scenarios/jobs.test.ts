@@ -53,6 +53,7 @@ describe('factory job create / job show', () => {
       ['plan_approval', 'pending'],
       ['execution', 'pending'],
       ['integration', 'pending'],
+      ['integration_review', 'pending'],
       ['closure', 'pending'],
     ]);
 
@@ -98,7 +99,7 @@ describe('factory job create / job show', () => {
     const first = await createJob(rt, repo.id, 'before any config edit');
     expect(first.workflowSnapshot).toEqual({
       recipeId: 'feature',
-      recipeVersion: 3,
+      recipeVersion: 4,
       stages: FEATURE_STAGES.map((id) => ({ id })),
     });
     expect(first.effectiveConfig).toEqual({

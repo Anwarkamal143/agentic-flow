@@ -169,6 +169,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       ['plan_approval', 'skipped'],
       ['execution', 'succeeded'],
       ['integration', 'succeeded'],
+      ['integration_review', 'skipped'],
       ['closure', 'succeeded'],
     ]);
     expect(job.status).toBe('completed');

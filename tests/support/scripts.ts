@@ -1,7 +1,9 @@
 /**
  * Fake Harness scripts shared by the scenarios. The proposals take the `tiny-ts`
  * fixture to one Task, `add-sum`; its execution response adds `sum()` and
- * commits it, and its reviewer approves it with one non-blocking Finding. Verification commands are plain shell checks, so no dependency
+ * commits it, and its reviewer approves it with one non-blocking Finding. A Job
+ * with more than one Task gets one approving Integration Review (key
+ * `integration`, ADR-0035); a single-Task Job on an unchanged base skips it. Verification commands are plain shell checks, so no dependency
  * install is needed in the Worktree.
  */
 import { parse, stringify } from 'yaml';
@@ -102,6 +104,15 @@ reviews:
           - code: AC-01
             verdict: pass
             detail: sum(a, b) returns a + b in the diff, and the test command passed.
+  integration:
+    - output:
+        outcome: approved
+        summary: The combined change is consistent.
+        findings: []
+        criteria:
+          - code: AC-01
+            verdict: pass
+            detail: the combined change satisfies it, and the factory's commands passed on the integration head.
 `;
 
 interface Script {

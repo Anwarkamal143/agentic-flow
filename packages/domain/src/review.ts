@@ -108,6 +108,13 @@ export function isBlocking(finding: Pick<FindingProposal, 'severity' | 'blocking
  */
 export const ReviewPacketSchema = z.object({
   packetVersion: z.literal(1),
+  /**
+   * `task`: one Task's change, against the Acceptance Criteria it covers.
+   * `integration`: the Integration Review (ADR-0035), the Job's whole combined
+   * change on the Integration Branch, against the whole Specification and
+   * every Acceptance Criterion. Packets stored before it are `task`.
+   */
+  scope: z.enum(['task', 'integration']).default('task'),
   /** What is reviewed: identifiers and SHAs only. */
   subject: z.object({
     jobId: z.string(),

@@ -194,7 +194,12 @@ export class FakeHarness implements AgentHarness {
 
   start(input: HarnessStartInput): Promise<HarnessRun> {
     const taskKey = input.subject.taskKey;
-    const key = `${input.subject.jobId}/${input.subject.stageId}/${taskKey ?? ''}/${input.role}`;
+    // A Task's Runs count per Role across its Stages: the Integration Task runs in
+    // `integration`, then `integration_review` (ADR-0035).
+    const key =
+      taskKey === undefined
+        ? `${input.subject.jobId}/${input.subject.stageId}//${input.role}`
+        : `${input.subject.jobId}/task/${taskKey}/${input.role}`;
     const n = (this.runs.get(key) ?? 0) + 1;
     this.runs.set(key, n);
     if (this.statePath !== undefined) {

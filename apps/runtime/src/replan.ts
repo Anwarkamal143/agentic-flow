@@ -32,16 +32,20 @@ type StageRunRow = JobState['stageRuns'][number];
 const IN_FLIGHT = ['claimed', 'running', 'verifying', 'in_review'];
 /** A `specification` Stage Run in these states during execution is a pending re-specification. */
 const RESPECIFYING = ['queued', 'running', 'waiting_human'];
-/** `execution` (or `integration`) states a Replan may replace. */
+/** `execution` (or `integration`, or `integration_review`) states a Replan may replace. */
 const ACTIVE_EXECUTION = ['queued', 'running', 'waiting_human', 'blocked'];
+
+/** The Stages Tasks run in, in Recipe order (ADR-0034, ADR-0035). */
+const TASK_STAGES = ['execution', 'integration', 'integration_review'] as const;
 
 /**
  * The Stage a Replan replaces: the newest `execution` while it is active, else
  * the newest `integration` while that is (a Replan from an integration
- * conflict, ADR-0034); `undefined` when neither is.
+ * conflict, ADR-0034), else the newest `integration_review` while that is (a
+ * Replan from an Integration Review Finding, ADR-0035); `undefined` when none is.
  */
 export function activeTaskStage(state: JobState): StageRunRow | undefined {
-  for (const stageId of ['execution', 'integration']) {
+  for (const stageId of TASK_STAGES) {
     const run = latestStageRun(state, stageId);
     if (run !== undefined && ACTIVE_EXECUTION.includes(run.state)) return run;
   }
@@ -159,9 +163,11 @@ export function raiseReplanCapIn(tx: Tx, item: { id: string; jobId: string }, ac
 
 /**
  * Starts `planning` for a requested Replan once no Attempt is in flight: the
- * active `execution` (or `integration`) is `superseded`, `replan_requested`
- * cleared, and new Stage Runs of `planning` (queued), `plan_approval` and
- * `execution` (pending) added, and of `integration` when it was replaced. `true` when it started. Call wherever an Attempt settles.
+ * active `execution` (or `integration`, or `integration_review`) is
+ * `superseded`, `replan_requested` cleared, and new Stage Runs of `planning`
+ * (queued), `plan_approval` and `execution` (pending) added, and of
+ * `integration` and `integration_review` where they had started. `true` when
+ * it started. Call wherever an Attempt settles.
  */
 export function startRequestedReplan(
   tx: Tx,
@@ -188,8 +194,12 @@ export function startRequestedReplan(
   const nextPlanning = addStageRun(tx, jobId, planning, actor);
   addStageRun(tx, jobId, requireLatest(state, 'plan_approval'), actor);
   addStageRun(tx, jobId, requireLatest(state, 'execution'), actor);
-  // Replacing `integration`: the new Plan's Tasks get a new Integration Task, in a new Stage Run.
-  if (execution.stageId === 'integration') addStageRun(tx, jobId, execution, actor);
+  // Replacing `integration` or `integration_review`: the new Plan's Tasks get a new Integration
+  // Task, in new Stage Runs of both (a Stage after the replaced one that never started is reused).
+  for (const stageId of TASK_STAGES.slice(1)) {
+    const latest = latestStageRun(state, stageId);
+    if (latest !== undefined && latest.state !== 'pending') addStageRun(tx, jobId, latest, actor);
+  }
   step(nextPlanning, 'queued');
   appendEvent(tx, {
     entityKind: 'job',
