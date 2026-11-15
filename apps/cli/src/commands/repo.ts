@@ -23,6 +23,8 @@ export interface RepoAddOptions {
   typecheckCommand: string | undefined;
   /** `owner/name`: the Repository's GitHub coordinates, over any its origin URL gives. */
   github: string | undefined;
+  /** The Merge Gate's required checks (`--required-check`, repeatable); empty: every check. */
+  requiredChecks: string[];
   /** Confirms the shown commands without prompting. */
   yes: boolean;
 }
@@ -74,7 +76,12 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
       }\n` +
       `Commands${inspection.packageManager === null ? '' : ` (package manager: ${inspection.packageManager})`}:\n` +
       `  test:      ${label('test', opts.testCommand)}\n` +
-      `  typecheck: ${label('typecheck', opts.typecheckCommand)}\n`,
+      `  typecheck: ${label('typecheck', opts.typecheckCommand)}\n` +
+      `Merge Gate checks: ${
+        opts.requiredChecks.length === 0
+          ? 'every check on the PR head (none required by name)'
+          : `only ${opts.requiredChecks.join(', ')} (from --required-check)`
+      }\n`,
   );
 
   if (!opts.yes) {
@@ -92,6 +99,7 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
     project,
     commands,
     ...(opts.github === undefined ? {} : { github: opts.github.trim() }),
+    ...(opts.requiredChecks.length === 0 ? {} : { requiredChecks: opts.requiredChecks }),
   };
   const result = await client.json<RegisterRepositoryResult>('POST', '/v1/repositories', {
     body: input,

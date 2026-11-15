@@ -45,7 +45,9 @@ import { changeJob, readJobState, type JobState, type StageRunStepper } from './
 import { newId } from './ids.js';
 import { integrationSources } from './integration.js';
 import { latestArtifact } from './plan-approval.js';
+import { openMergeApproval, skipMergeStages } from './merge-approval.js';
 import { latestStageRun } from './replan.js';
+import { createHash } from 'node:crypto';
 
 /** The Task scheduler, which runs this Stage. */
 const ACTOR = 'system:scheduler';
@@ -140,10 +142,10 @@ export function startPullRequest(tx: Tx, jobId: string, step: StageRunStepper): 
   if (run?.state !== 'pending') return false;
   const remote = integrationTasksOf(tx, jobId).filter((r) => coordinatesOf(r.repo) !== null);
   if (remote.length === 0) {
-    step(run, 'skipped', {
-      reason:
-        'no GitHub remote: the Repository has no GitHub coordinates, so the Job is delivered locally',
-    });
+    const reason =
+      'no GitHub remote: the Repository has no GitHub coordinates, so the Job is delivered locally';
+    step(run, 'skipped', { reason });
+    skipMergeStages(readJobState(tx, jobId), step, reason);
     return false;
   }
   step(run, 'queued', { reason: 'the Integration Branch was approved' });
@@ -154,6 +156,7 @@ export function startPullRequest(tx: Tx, jobId: string, step: StageRunStepper): 
 export function skipPullRequest(state: JobState, step: StageRunStepper, reason: string): void {
   const run = latestStageRun(state, 'pull_request');
   if (run?.state === 'pending') step(run, 'skipped', { reason });
+  skipMergeStages(state, step, reason);
 }
 
 // ---- the work ------------------------------------------------------------------------------
@@ -277,6 +280,7 @@ export async function runPullRequest(
         pushedSha: attempt.headSha,
         pr: ensured.pr,
         adopted: ensured.kind === 'adopted',
+        body,
       });
     }
   } catch (err) {
@@ -285,11 +289,12 @@ export async function runPullRequest(
     return;
   }
 
-  changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (_, state, step) => {
+  changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx, state, step) => {
     const run = state.stageRuns.find((r) => r.id === stageRunId);
     if (run?.state !== 'running') return; // cancelled meanwhile
     step(run, 'succeeded');
-    queueClosure(state, step);
+    // merge_approval waits for the merge (feature v6); a v5 Job goes straight to closure.
+    if (!openMergeApproval(tx, state, step)) queueClosure(state, step);
   });
   deps.onCommit();
 }
@@ -310,6 +315,7 @@ export function failPullRequest(
     const run = state.stageRuns.find((r) => r.id === stageRunId);
     if (run?.state !== 'running') return;
     step(run, 'failed', { failure: { reason, message, issues: [] } });
+    skipMergeStages(state, step, 'the pull request could not be opened');
     queueClosure(state, step);
   });
   deps.onCommit();
@@ -384,6 +390,11 @@ function describeFailure(failure: GitHubFailure): string {
   }
 }
 
+/** The SHA-256 of a PR body, to tell whether a re-rendering differs from what was sent. */
+export function bodyHash(body: string): string {
+  return createHash('sha256').update(body).digest('hex');
+}
+
 /** The pull request recorded for (Job, Repository, head branch), if any. */
 function recordedPullRequest(db: FactoryDb, jobId: string, repositoryId: string, branch: string) {
   return db
@@ -424,9 +435,12 @@ function recordPullRequest(
     pushedSha: string;
     pr: PullRequest;
     adopted: boolean;
+    /** The body the factory sent (its hash tells the poller when a re-rendering differs). */
+    body: string;
   },
 ): void {
   const id = newId('pr');
+  const now = new Date().toISOString();
   changeJob(deps.db, { jobId: r.jobId, expectedVersion: 'current', actor: ACTOR }, (tx) => {
     tx.insert(schema.pullRequests)
       .values({
@@ -445,8 +459,10 @@ function recordPullRequest(
         baseSha: r.pr.base.sha,
         pushedSha: r.pushedSha,
         adopted: r.adopted,
-        createdAt: new Date().toISOString(),
+        createdAt: now,
         lastPolledAt: null,
+        headSeenAt: now,
+        bodySha256: bodyHash(r.body),
         version: 0,
       })
       .run();
@@ -555,6 +571,8 @@ export function pullRequestBodyInput(
   job: typeof schema.jobs.$inferSelect,
   task: TaskRow,
   attempt: AttemptRow & { headSha: string },
+  /** The checks condition the poller recorded; `null` before the first poll. */
+  ci: PullRequestBodyInput['ci'] = null,
 ): PullRequestBodyInput {
   const spec = currentSpec(db, job.id);
   if (spec === undefined) throw new Error(`Job ${job.id} has no current Specification`);
@@ -648,6 +666,7 @@ export function pullRequestBodyInput(
     findings,
     questions,
     rollback,
+    ci,
   };
 }
 
@@ -659,5 +678,25 @@ export function pullRequestsOf(db: FactoryDb, jobId: string): PullRequestRecord[
     .where(eq(schema.pullRequests.jobId, jobId))
     .orderBy(asc(sql`rowid`))
     .all()
-    .map((r) => PullRequestRecordSchema.parse(r));
+    .map((r) => toPullRequestRecord(db, r));
+}
+
+/** A `pull_requests` row as the API shows it, with the checks recorded on its current head. */
+export function toPullRequestRecord(
+  db: FactoryDb | Tx,
+  row: typeof schema.pullRequests.$inferSelect,
+): PullRequestRecord {
+  // The schemas drop the columns the API doesn't show (ids, the body hash).
+  const checks = db
+    .select()
+    .from(schema.prChecks)
+    .where(and(eq(schema.prChecks.pullRequestId, row.id), eq(schema.prChecks.headSha, row.headSha)))
+    .orderBy(asc(schema.prChecks.source), asc(schema.prChecks.name))
+    .all();
+  return PullRequestRecordSchema.parse({
+    ...row,
+    changesRequestedBy: JSON.parse(row.changesRequestedJson) as unknown,
+    gate: row.gateJson === null ? null : (JSON.parse(row.gateJson) as unknown),
+    checks,
+  });
 }

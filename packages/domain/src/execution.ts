@@ -335,16 +335,24 @@ export type EvidenceVerdict = z.infer<typeof EvidenceVerdictSchema>;
  * Criterion, from the commands that verify it (source `commands`) or from the
  * independent review (source `review`).
  */
-/** Where a criterion verdict came from: the commands that name it, or the review that gave it. */
-export function evidenceSource(row: { reviewId: string | null }): 'commands' | 'review' {
+/**
+ * Where a verdict came from: the commands that name it, the review that gave
+ * it, or (kind `ci`, #58) the checks GitHub reported on the PR head.
+ */
+export function evidenceSource(row: {
+  kind: string;
+  reviewId: string | null;
+}): 'commands' | 'review' | 'github' {
+  if (row.kind === 'ci') return 'github';
   return row.reviewId === null ? 'commands' : 'review';
 }
 
 export const EvidenceSchema = z.object({
   id: z.string(),
   attemptId: z.string(),
-  kind: z.enum(['verification', 'criterion']),
-  source: z.enum(['commands', 'review']),
+  /** `ci`: the Merge Gate's checks condition on a PR `(head, base)`, as GitHub reported it (#58). */
+  kind: z.enum(['verification', 'criterion', 'ci']),
+  source: z.enum(['commands', 'review', 'github']),
   /** The review that gave the verdict, for source `review`. */
   reviewId: z.string().nullable(),
   verificationKey: z.string().nullable(),
@@ -443,10 +451,10 @@ export const AttemptSchema = z.object({
 });
 export type Attempt = z.infer<typeof AttemptSchema>;
 
-// ---- Delivery Report (v5: v4 of ADR-0034 plus the pull requests, ADR-0036) ----
+// ---- Delivery Report (v6: v5 of ADR-0036 plus the merge and the CI checks, ADR-0037) ----
 
 export const DeliveryReportSchema = z.object({
-  reportVersion: z.literal(5),
+  reportVersion: z.literal(6),
   /** How the Job ended: a `failed` Job's approved branches are partial results. */
   outcome: z.enum(['completed', 'failed']),
   /** One plain sentence on the outcome, saying so when the Job failed. */
@@ -576,9 +584,22 @@ export const DeliveryReportSchema = z.object({
       baseBranch: z.string(),
       /** The head the factory pushed: the one its Integration Review approved. */
       headSha: z.string(),
-      /** The merge commit, once merged; `null` while it awaits a human's merge. */
+      /** The merge commit the poller saw on GitHub; `null` when it was not merged. */
       mergeSha: z.string().nullable(),
       adopted: z.boolean(),
+      /**
+       * The Merge Gate's checks condition as last polled, with each check on
+       * the PR head and its link; `null` when the PR was never polled.
+       */
+      ci: z
+        .object({
+          status: z.enum(['pass', 'fail', 'pending']),
+          reason: z.string(),
+          checks: z.array(
+            z.object({ name: z.string(), outcome: z.string(), url: z.string().nullable() }),
+          ),
+        })
+        .nullable(),
     }),
   ),
   knownLimitations: z.array(z.string()),

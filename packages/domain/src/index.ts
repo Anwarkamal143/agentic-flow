@@ -49,6 +49,7 @@ export * from './respecification.js';
 export * from './github.js';
 export * from './integration.js';
 export * from './pull-request.js';
+export * from './merge-gate.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -70,6 +71,12 @@ export const RepositoryProfileSchema = z.object({
   version: z.literal(1),
   packageManager: PackageManagerSchema.nullable(),
   commands: RepositoryCommandsSchema,
+  /**
+   * The checks the Merge Gate counts (#58): when set, only these, and each
+   * must report (never passed by the grace window). Unset or empty: every
+   * check on the PR head.
+   */
+  requiredChecks: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
   confirmedBy: z.string(),
   confirmedAt: z.string(),
 });
@@ -167,6 +174,8 @@ export const RegisterRepositoryInputSchema = z.object({
   path: absolutePath,
   project: z.string().trim().min(1).max(100),
   commands: RepositoryCommandsSchema,
+  /** The Merge Gate's `requiredChecks`, from `repo add --required-check` (repeatable). */
+  requiredChecks: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
   /** `owner/name`, from `repo add --github`. Wins over the coordinates the origin URL gives. */
   github: z
     .string()
@@ -203,6 +212,8 @@ export const StageIdSchema = z.enum([
   'integration',
   'integration_review',
   'pull_request',
+  'merge_approval',
+  'merge',
   'closure',
 ]);
 export type StageId = z.infer<typeof StageIdSchema>;
@@ -286,7 +297,7 @@ export const WorkflowSnapshotSchema = z.object({
 export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
 
 /** The Stage IDs of each version of the built-in `feature` Recipe. */
-const FEATURE_RECIPE_STAGES: Readonly<Record<2 | 3 | 4 | 5, readonly StageId[]>> = {
+const FEATURE_RECIPE_STAGES: Readonly<Record<2 | 3 | 4 | 5 | 6, readonly StageId[]>> = {
   // Version 2 added `plan_approval` (ADR-0016).
   2: [
     'intake',
@@ -337,10 +348,26 @@ const FEATURE_RECIPE_STAGES: Readonly<Record<2 | 3 | 4 | 5, readonly StageId[]>>
     'pull_request',
     'closure',
   ],
+  // Version 6 adds `merge_approval` (the Merge Gate and the `merge` item) and `merge` (ADR-0037).
+  6: [
+    'intake',
+    'triage',
+    'discovery',
+    'specification',
+    'planning',
+    'plan_approval',
+    'execution',
+    'integration',
+    'integration_review',
+    'pull_request',
+    'merge_approval',
+    'merge',
+    'closure',
+  ],
 };
 
 /** The `feature` Recipe versions a Job can be created at. */
-export const FEATURE_RECIPE_VERSIONS = [2, 3, 4, 5] as const;
+export const FEATURE_RECIPE_VERSIONS = [2, 3, 4, 5, 6] as const;
 export type FeatureRecipeVersion = (typeof FEATURE_RECIPE_VERSIONS)[number];
 
 /**
@@ -356,12 +383,11 @@ export function featureRecipe(version: FeatureRecipeVersion): WorkflowSnapshot {
 }
 
 /**
- * The built-in `feature` Recipe, Phase C cut so far: version 5, with
- * `integration` (ADR-0034), `integration_review` (ADR-0035) and
- * `pull_request` (ADR-0036); `merge_approval` and `merge` come with the
- * Merge Gate (#58).
+ * The built-in `feature` Recipe, Phase C cut so far: version 6, with
+ * `integration` (ADR-0034), `integration_review` (ADR-0035), `pull_request`
+ * (ADR-0036), and `merge_approval` and `merge` (ADR-0037).
  */
-export const FEATURE_RECIPE: WorkflowSnapshot = featureRecipe(5);
+export const FEATURE_RECIPE: WorkflowSnapshot = featureRecipe(6);
 
 /**
  * A Job's status, derived from its Stage Runs (ARCHITECTURE §4.2; precedence

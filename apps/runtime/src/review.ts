@@ -14,7 +14,6 @@ import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   criterionVerdict,
   decideApproval,
-  evidenceSource,
   EvidenceVerdictSchema,
   isBlocking,
   isCurrent,
@@ -606,7 +605,8 @@ function approvalInput(
       evidence: evidence
         .filter((e) => e.criterionId === c.id)
         .map((e) => ({
-          source: evidenceSource(e),
+          // Criterion Evidence only: from the commands or the review, never GitHub's checks.
+          source: e.reviewId === null ? ('commands' as const) : ('review' as const),
           verdict: EvidenceVerdictSchema.parse(e.verdict),
           headSha: e.headSha,
           baseSha: e.baseSha,

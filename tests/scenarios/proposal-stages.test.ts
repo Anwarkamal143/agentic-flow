@@ -73,6 +73,8 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       ['integration', 'succeeded'],
       ['integration_review', 'skipped'],
       ['pull_request', 'skipped'],
+      ['merge_approval', 'skipped'],
+      ['merge', 'skipped'],
       ['closure', 'succeeded'],
     ]);
     expect(job).toMatchObject({ status: 'completed', currentStage: 'closure' });

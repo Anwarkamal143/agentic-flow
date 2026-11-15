@@ -127,6 +127,13 @@
       "when": 1794719107887,
       "tag": "0017_harsh_iron_patriot",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1794721740868,
+      "tag": "0018_special_deathbird",
+      "breakpoints": true
     }
   ]
 }

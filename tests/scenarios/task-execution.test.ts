@@ -171,6 +171,8 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       ['integration', 'succeeded'],
       ['integration_review', 'skipped'],
       ['pull_request', 'skipped'],
+      ['merge_approval', 'skipped'],
+      ['merge', 'skipped'],
       ['closure', 'succeeded'],
     ]);
     expect(job.status).toBe('completed');
@@ -253,7 +255,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       rt.request(`/v1/artifacts/${String(reportArtifact?.id)}/content`),
     );
     expect(report.repository).toMatchObject({ name: 'tiny-ts', clonePath: repo.clonePath });
-    expect(report).toMatchObject({ reportVersion: 5, outcome: 'completed' });
+    expect(report).toMatchObject({ reportVersion: 6, outcome: 'completed' });
     expect(report.statement).toMatch(/^The Job completed/);
     // The one Task is the one leaf; what is offered is the Integration Branch holding it.
     expect(report.branches).toMatchObject([

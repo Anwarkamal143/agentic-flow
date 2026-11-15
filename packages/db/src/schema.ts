@@ -570,12 +570,54 @@ export const pullRequests = sqliteTable(
     pushedSha: text('pushed_sha').notNull(),
     adopted: integer('adopted', { mode: 'boolean' }).notNull(),
     createdAt: text('created_at').notNull(),
-    /** When the poller last read it from GitHub (#58); null until then. */
+    /** When the poller last read it from GitHub (#58); null until then. Written without an event. */
     lastPolledAt: text('last_polled_at'),
+    /** The merge commit, once the poller saw the PR merged (#58). */
+    mergeSha: text('merge_sha'),
+    /** GitHub's `mergeable_state` as last read; null until the poller read it. */
+    mergeableState: text('mergeable_state'),
+    /** When the factory first saw `head_sha` as the head: the checks grace window starts here. */
+    headSeenAt: text('head_seen_at'),
+    /** JSON array of the GitHub users whose latest review is `CHANGES_REQUESTED`. */
+    changesRequestedJson: text('changes_requested_json').notNull().default('[]'),
+    /** The Merge Gate (`MergeGate`) the poller last evaluated, and when; null before the first poll. */
+    gateJson: text('gate_json'),
+    gateEvaluatedAt: text('gate_evaluated_at'),
+    /** SHA-256 of the body the factory last sent; it is PATCHed when the rendering differs. */
+    bodySha256: text('body_sha256'),
     version: integer('version').notNull(),
   },
   (t) => [
     uniqueIndex('pull_requests_job_head').on(t.jobId, t.repositoryId, t.headBranch),
     uniqueIndex('pull_requests_repo_number').on(t.owner, t.name, t.number),
   ],
+);
+
+/**
+ * A check GitHub reported on a PR head (#58, ADR-0037): a check run (the
+ * newest of its name) or a commit status (the newest of its context). Written
+ * only by the poller, and only when what it observed changed, in the
+ * transaction of its event. Rows of an earlier head stay as history.
+ */
+export const prChecks = sqliteTable(
+  'pr_checks',
+  {
+    id: text('id').primaryKey(),
+    pullRequestId: text('pull_request_id')
+      .notNull()
+      .references(() => pullRequests.id),
+    headSha: text('head_sha').notNull(),
+    /** `check_run | status`. */
+    source: text('source').notNull(),
+    name: text('name').notNull(),
+    /** GitHub's own status (check run) or state (commit status), as read. */
+    status: text('status').notNull(),
+    conclusion: text('conclusion'),
+    /** `pending | success | neutral | skipped | failure` (`CheckOutcome`). */
+    outcome: text('outcome').notNull(),
+    url: text('url'),
+    /** When the poller recorded this value. */
+    observedAt: text('observed_at').notNull(),
+  },
+  (t) => [uniqueIndex('pr_checks_identity').on(t.pullRequestId, t.headSha, t.source, t.name)],
 );

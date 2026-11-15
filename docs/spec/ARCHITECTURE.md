@@ -210,11 +210,18 @@ Added in Phase C: pull_requests, pr_checks (written only by the runtime: the `pu
 ```
 pull_requests(id, job_id, repository_id, task_id, owner, name, number, url, state,
               head_branch, base_branch, head_sha, base_sha, pushed_sha, adopted,
-              created_at, last_polled_at?, version)                          -- [Phase C, #57]
+              created_at, last_polled_at?, merge_sha?, mergeable_state?, head_seen_at?,
+              changes_requested_json, gate_json?, gate_evaluated_at?, body_sha256?,
+              version)                                               -- [Phase C, #57, #58]
          -- one per (Job, Repository, head branch); task_id: the Integration Task
          -- state: open | closed | merged;  pushed_sha: the last head the factory pushed
          -- adopted: recovery found it on the head branch carrying the Job's marker
-pr_checks(...)                                                               -- [Phase C, #58]
+         -- last_polled_at is the poller's only write without an event (ADR-0037)
+pr_checks(id, pull_request_id, head_sha, source, name, status, conclusion, outcome, url,
+          observed_at)                                                       -- [Phase C, #58]
+         -- one per (pull request, head, source, name): the newest check run of a name or
+         --   status of a context; source: check_run | status;
+         --   outcome: pending | success | neutral | skipped | failure
 ```
 
 Added in v1: organizations, users, memberships, budgets, usage_records, skills, recipes (as DB rows), notifications. Write a table's migration only in the phase that uses it.

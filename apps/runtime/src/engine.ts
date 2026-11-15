@@ -125,7 +125,13 @@ export function readJobState(tx: Tx | FactoryDb, jobId: string): JobState {
 export type StageRunStepper = (
   run: typeof schema.stageRuns.$inferSelect,
   to: StageRunState,
-  opts?: { reason?: string | undefined; failure?: StageFailure; blocker?: Blocker },
+  opts?: {
+    reason?: string | undefined;
+    failure?: StageFailure;
+    blocker?: Blocker;
+    /** Facts the event carries beside the transition (the `merge` Stage's merge SHA, ADR-0037). */
+    detail?: Record<string, unknown>;
+  },
 ) => void;
 
 function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper {
@@ -180,6 +186,7 @@ function stageRunStepper(tx: Tx, jobId: string, actor: string): StageRunStepper 
         ...(reason === undefined ? {} : { reason }),
         ...(failure === undefined ? {} : { failure }),
         ...(blocker === undefined ? {} : { blocker }),
+        ...opts.detail,
       },
     });
   };

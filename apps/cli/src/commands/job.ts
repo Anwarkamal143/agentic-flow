@@ -370,7 +370,11 @@ function writeAttempts(
   process.stdout.write(lines.join('\n') + '\n');
 }
 
-/** The Job's pull requests, as the runtime recorded them (never read live from GitHub). */
+/**
+ * The Job's pull requests, as the runtime recorded them (never read live from
+ * GitHub): state, the merge, the Merge Gate the poller last evaluated, each
+ * check with its link, and when GitHub was last polled.
+ */
 function writePullRequests(pullRequests: PullRequestRecord[]): void {
   if (pullRequests.length === 0) return;
   const lines = ['Pull requests (as recorded by the factory):'];
@@ -379,7 +383,22 @@ function writePullRequests(pullRequests: PullRequestRecord[]): void {
       `  ${pr.owner}/${pr.name}#${String(pr.number)}  ${pr.state.padEnd(7)} ${pr.url}`,
       `    ${pr.headBranch} → ${pr.baseBranch}, head ${pr.headSha.slice(0, 12)} (pushed ${pr.pushedSha.slice(0, 12)})` +
         (pr.adopted ? ', adopted on recovery' : ''),
-      `    last polled: ${pr.lastPolledAt ?? 'never (not polled yet)'}`,
+    );
+    if (pr.mergeSha !== null) lines.push(`    merged on GitHub as ${pr.mergeSha}`);
+    lines.push(`    last polled ${pr.lastPolledAt ?? 'never (not polled yet)'}`);
+    if (pr.gate !== null) {
+      lines.push(
+        `    Merge Gate: ${pr.gate.verdict} (evaluated ${pr.gateEvaluatedAt ?? 'never'})`,
+        ...pr.gate.conditions.map((c) => `      ${c.status.padEnd(8)} ${c.label}: ${c.reason}`),
+      );
+    }
+    lines.push(
+      pr.checks.length === 0
+        ? `    Checks on ${pr.headSha.slice(0, 12)}: none reported`
+        : `    Checks on ${pr.headSha.slice(0, 12)}:`,
+      ...pr.checks.map(
+        (c) => `      ${c.name.padEnd(20)} ${c.outcome.padEnd(8)} ${c.url ?? '(no link)'}`,
+      ),
     );
   }
   process.stdout.write(lines.join('\n') + '\n');
@@ -438,6 +457,8 @@ function writeDelivery(report: DeliveryReport): void {
           ? ', awaiting human merge'
           : `, merged as ${pr.mergeSha.slice(0, 12)}`),
     );
+    const ci = version >= 6 ? pr.ci : null;
+    if (ci !== null) lines.push(`    CI checks: ${ci.status}: ${ci.reason}`);
   }
   lines.push(...report.notes.map((n) => `  ${n}`));
   if (report.knownLimitations.length > 0) {
