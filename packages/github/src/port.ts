@@ -11,6 +11,9 @@
  *   `transient` (a 5xx or a network error: retry with backoff) or `refused`
  *   (any other 4xx, or a token reference that doesn't resolve: retrying won't
  *   help). The port never retries on its own; callers decide.
+ * - A rate limit pauses every call (ADR-0045): with a {@link RateLimitGate},
+ *   each rate-limit response is reported to it, and while it holds a pause no
+ *   request is sent; the call fails `rate_limited` until the reset at once.
  * - The token is resolved for each request and is never part of a result.
  * - Response bodies are validated; text in them (bodies, comments, messages)
  *   is GitHub content and untrusted.
@@ -92,6 +95,19 @@ export interface ReviewComment extends Comment {
   path: string | null;
 }
 
+/** The GitHub-wide pause a rate limit sets (ADR-0045), kept by the caller. */
+export interface RateLimitGate {
+  /** The pause in force, or null: while `until` is in the future, no request is sent. */
+  current(): { until: string; status: number } | null;
+  /** GitHub answered a request with a rate limit. */
+  limited(limit: { status: number; resetAt: string }): void;
+}
+
+/** Whether `pause` still holds at `now`: no request is sent before its `until`. */
+export function pauseInForce(pause: { until: string } | null, now = Date.now()): boolean {
+  return pause !== null && Date.parse(pause.until) > now;
+}
+
 export interface GitHubPortOptions {
   /** The REST API base: `https://api.github.com` for github.com. */
   apiBaseUrl: string;
@@ -99,6 +115,8 @@ export interface GitHubPortOptions {
   token: () => Promise<TokenResolution>;
   /** Per-request limit; a request that takes longer is a transient failure. */
   timeoutMs?: number;
+  /** The GitHub-wide pause; without one, each call is sent whatever came before. */
+  rateLimit?: RateLimitGate;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -444,6 +462,13 @@ export class GitHubPort {
     body: unknown,
     etag: string | undefined,
   ): Promise<Raw> {
+    const paused = this.opts.rateLimit?.current() ?? null;
+    if (paused !== null && pauseInForce(paused)) {
+      return {
+        ok: false,
+        failure: { kind: 'rate_limited', status: paused.status, resetAt: paused.until },
+      };
+    }
     const token = await this.opts.token();
     if (!token.ok) {
       return {
@@ -501,7 +526,11 @@ export class GitHubPort {
       }
       return { ok: true, status: res.status, body: parsed, etag: res.headers.get('etag') };
     }
-    return { ok: false, failure: classify(res.status, res.headers, text, Date.now()) };
+    const failure = classify(res.status, res.headers, text, Date.now());
+    if (failure.kind === 'rate_limited') {
+      this.opts.rateLimit?.limited({ status: failure.status, resetAt: failure.resetAt });
+    }
+    return { ok: false, failure };
   }
 }
 

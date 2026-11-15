@@ -807,7 +807,11 @@ async function remoteDefaultHead(
   return sha;
 }
 
-/** Runs `tryOnce` until it is not a transient failure or the tries run out; `undefined` once shutting down. */
+/**
+ * Runs `tryOnce` until it is not a transient failure or the tries run out;
+ * `undefined` once shutting down. A rate limit is capacity, not failure
+ * (ADR-0045): it waits for the reset and tries again without spending a try.
+ */
 function withRetries<T extends { kind: string }>(
   deps: PullRequestDeps,
   tryOnce: () => Promise<T | { kind: 'failed'; failure: GitHubFailure }>,
@@ -832,6 +836,15 @@ async function retryTransient<R>(
   for (let n = 0; ; n++) {
     const result = await tryOnce();
     const failure = failureOf(result);
+    if (failure?.kind === 'rate_limited') {
+      deps.log(`pull_request: GitHub ${describeFailure(failure)}; waiting for the reset`);
+      // At least the first retry delay, so a reset already past (clock skew) is no tight loop.
+      const reset = Date.parse(failure.resetAt);
+      const at = Math.max(Number.isFinite(reset) ? reset : 0, Date.now() + (delays[0] ?? 2_000));
+      if (!(await sleepUntil(deps, at))) return undefined;
+      n--;
+      continue;
+    }
     const delay = delays[n];
     if (failure === undefined || failure.kind === 'refused' || delay === undefined) {
       return result;
@@ -841,6 +854,17 @@ async function retryTransient<R>(
     );
     await new Promise((resolve) => setTimeout(resolve, delay));
     if (deps.closed()) return undefined;
+  }
+}
+
+/** Waits until `deadline` (ms since the epoch); `false` once shutting down meanwhile. */
+async function sleepUntil(deps: PullRequestDeps, deadline: number): Promise<boolean> {
+  // In slices, so a shutdown is not held up by a long reset.
+  for (;;) {
+    if (deps.closed()) return false;
+    const left = deadline - Date.now();
+    if (left <= 0) return true;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(left, 1_000)));
   }
 }
 

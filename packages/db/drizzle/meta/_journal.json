@@ -183,6 +183,13 @@
       "when": 1794762776134,
       "tag": "0025_strong_stephen_strange",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1794765004434,
+      "tag": "0026_careless_the_hunter",
+      "breakpoints": true
     }
   ]
 }

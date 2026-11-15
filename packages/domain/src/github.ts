@@ -143,3 +143,41 @@ export function tokenReferenceOf(text: string): TokenReference {
 export const TokenReferenceTextSchema = z.string().refine((text) => parseTokenReference(text).ok, {
   message: "must be 'gh' or 'env:NAME' (a token reference, never the token)",
 });
+
+// ---- capacity: the GitHub-wide pause and the transient backoff (#66, ADR-0045) ----
+
+/** The longest wait between polls of a PR after transient failures (Q23): 5 minutes. */
+export const GITHUB_BACKOFF_CAP_MS = 300_000;
+
+/**
+ * How long the poller waits before reading a PR again after `failures`
+ * transient failures in a row (a 5xx, a dropped connection, a timeout): the
+ * poll interval doubled for each, at most {@link GITHUB_BACKOFF_CAP_MS}, and
+ * never less than the poll interval itself.
+ */
+export function transientBackoffMs(failures: number, pollIntervalMs: number): number {
+  const doubled = pollIntervalMs * 2 ** Math.min(Math.max(failures, 0), 32);
+  return Math.max(pollIntervalMs, Math.min(doubled, GITHUB_BACKOFF_CAP_MS));
+}
+
+/**
+ * The GitHub-wide pause a rate limit set (ADR-0045): no GitHub API call is
+ * made before `pausedUntil` (GitHub's reset time). Capacity, not failure: no
+ * Stage Run changes and no Blocker is raised.
+ */
+export const GitHubPauseSchema = z.object({
+  /** GitHub's reset time; calls resume on their own then. */
+  pausedUntil: z.string(),
+  /** When the factory first saw the rate limit. */
+  pausedAt: z.string(),
+  /** The HTTP status of the rate-limit response (429 or 403). */
+  status: z.number().int(),
+});
+export type GitHubPause = z.infer<typeof GitHubPauseSchema>;
+
+/** `GET /v1/github`: the GitHub-wide state the runtime persisted. */
+export const GitHubStateSchema = z.object({
+  /** `null` while GitHub calls are made. */
+  pause: GitHubPauseSchema.nullable(),
+});
+export type GitHubState = z.infer<typeof GitHubStateSchema>;

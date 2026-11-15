@@ -1,4 +1,5 @@
 import type {
+  GitHubState,
   AcceptanceCriterion,
   Approval,
   Artifact,
@@ -18,7 +19,7 @@ import type {
 import { API_KEY_BILLING_NOTE, costTagOf, SECURITY_TIER_LABELS } from '@factory/domain';
 import { resolveHome } from '@factory/home';
 import { ApiRequestError, findRuntime, type RuntimeClient } from '../client.js';
-import { EXIT_NOT_RUNNING } from './lifecycle.js';
+import { describePause, EXIT_NOT_RUNNING } from './lifecycle.js';
 
 export function client(): RuntimeClient | undefined {
   const found = findRuntime(resolveHome());
@@ -100,7 +101,7 @@ export async function jobShow(id: string, opts: { json: boolean }): Promise<numb
     return 0;
   }
   const path = `/v1/jobs/${encodeURIComponent(id)}`;
-  const [criteria, tasks, attempts, worktrees, artifacts, reviews, pullRequests] =
+  const [criteria, tasks, attempts, worktrees, artifacts, reviews, pullRequests, github] =
     await Promise.all([
       api.json<AcceptanceCriterion[]>('GET', `${path}/acceptance-criteria`),
       api.json<Task[]>('GET', `${path}/tasks`),
@@ -109,11 +110,12 @@ export async function jobShow(id: string, opts: { json: boolean }): Promise<numb
       api.json<Artifact[]>('GET', `${path}/artifacts`),
       api.json<Review[]>('GET', `${path}/reviews`),
       api.json<PullRequestRecord[]>('GET', `${path}/pull-requests`),
+      api.json<GitHubState>('GET', '/v1/github'),
     ]);
   writeJob(job);
   writePlan(criteria, tasks);
   writeAttempts(tasks, attempts, worktrees, reviews);
-  writePullRequests(pullRequests);
+  writePullRequests(pullRequests, github);
   const report = artifacts.find((a) => a.kind === 'report');
   if (report !== undefined) {
     writeDelivery(
@@ -426,9 +428,12 @@ function writeAttempts(
  * GitHub): state, the merge, the Merge Gate the poller last evaluated, each
  * check with its link, and when GitHub was last polled.
  */
-function writePullRequests(pullRequests: PullRequestRecord[]): void {
+function writePullRequests(pullRequests: PullRequestRecord[], github: GitHubState): void {
   if (pullRequests.length === 0) return;
-  const lines = ['Pull requests (as recorded by the factory):'];
+  const lines = [
+    'Pull requests (as recorded by the factory):',
+    `  GitHub: ${describePause(github)}`,
+  ];
   for (const pr of pullRequests) {
     lines.push(
       `  ${pr.owner}/${pr.name}#${String(pr.number)}  ${pr.state.padEnd(7)} ${pr.url}`,

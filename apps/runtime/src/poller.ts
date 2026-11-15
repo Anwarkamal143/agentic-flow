@@ -15,20 +15,29 @@
  *
  * When the PR body's rendering differs from the one the factory last sent
  * (the CI section follows the checks), the body is PATCHed. A failed read
- * writes nothing; the next poll tries again (the GitHub-wide pause and
- * backoff are #66's).
+ * writes nothing. After a transient one (a 5xx, a dropped connection, a
+ * default branch that could not be read) the PR is read again only after an
+ * exponential backoff, capped at 5 minutes (`transientBackoffMs`); any other
+ * failure is tried at the next poll. While GitHub calls are paused by a rate
+ * limit, no poll runs at all (#66, ADR-0045; `GitHubPauseGate`).
  */
 import { appendEvent, schema, type FactoryDb } from '@factory/db';
 import {
   observedChecks,
   renderPullRequestBody,
+  transientBackoffMs,
   unresolvedChangeRequests,
   type MergeGate,
   type ObservedCheck,
   type PullRequestBodyInput,
   type Redactor,
 } from '@factory/domain';
-import type { GitHubPort, GitHubRead } from '@factory/github';
+import {
+  pauseInForce,
+  type GitHubPort,
+  type GitHubRead,
+  type RateLimitGate,
+} from '@factory/github';
 import { and, desc, eq } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
 import { changeJob, readJobState } from './engine.js';
@@ -59,6 +68,8 @@ type PullRequestRow = typeof schema.pullRequests.$inferSelect;
 export interface PollerDeps {
   db: FactoryDb;
   github: GitHubPort;
+  /** The GitHub-wide pause: no poll runs while it holds one (ADR-0045). */
+  pause: Pick<RateLimitGate, 'current'>;
   artifacts: ArtifactStore;
   redact: Redactor;
   pollIntervalMs: number;
@@ -67,13 +78,22 @@ export interface PollerDeps {
   log: (message: string) => void;
 }
 
-/** A failed read: the poll stops for this PR, writing nothing. */
-class ReadFailed extends Error {}
+/** A failed read: the poll stops for this PR, writing nothing. `transient`: back off. */
+class ReadFailed extends Error {
+  constructor(
+    message: string,
+    readonly transient: boolean,
+  ) {
+    super(message);
+  }
+}
 
 export class GitHubPoller {
   private readonly loop: PassLoop;
   /** The last ETag and value of each read, by its key. In memory only: a restart reads afresh. */
   private readonly seen = new Map<string, { etag: string; value: unknown }>();
+  /** Each PR's transient failures in a row and when it may be read again. In memory only. */
+  private readonly backoff = new Map<string, { failures: number; nextAt: number }>();
 
   constructor(private readonly deps: PollerDeps) {
     this.loop = new PassLoop(() => this.pass(), deps.pollIntervalMs);
@@ -83,6 +103,11 @@ export class GitHubPoller {
     this.loop.start();
   }
 
+  /** Polls soon: after a pause ended. */
+  wake(): void {
+    this.loop.wake();
+  }
+
   async close(): Promise<void> {
     this.loop.halt();
     await this.loop.idle();
@@ -90,15 +115,39 @@ export class GitHubPoller {
 
   /** One poll of every tracked PR. Never "worked": the timer drives the next one. */
   private async pass(): Promise<boolean> {
-    for (const pr of trackedPullRequests(this.deps.db)) {
+    const tracked = trackedPullRequests(this.deps.db);
+    // A PR no longer polled forgets its backoff.
+    for (const id of this.backoff.keys()) {
+      if (!tracked.some((pr) => pr.id === id)) this.backoff.delete(id);
+    }
+    for (const pr of tracked) {
+      // Rate limited: nothing is read until the reset (GitHubPauseGate wakes the poller then).
+      if (this.paused()) return false;
+      const backoff = this.backoff.get(pr.id);
+      if (backoff !== undefined && Date.now() < backoff.nextAt) continue;
       try {
         await this.poll(pr);
+        this.backoff.delete(pr.id);
       } catch (err) {
         if (!(err instanceof ReadFailed)) throw err;
-        this.deps.log(`github poller: ${pr.owner}/${pr.name}#${String(pr.number)}: ${err.message}`);
+        const label = `${pr.owner}/${pr.name}#${String(pr.number)}`;
+        if (!err.transient) {
+          this.deps.log(`github poller: ${label}: ${err.message}`);
+          continue;
+        }
+        const failures = (backoff?.failures ?? 0) + 1;
+        const wait = transientBackoffMs(failures, this.deps.pollIntervalMs);
+        this.backoff.set(pr.id, { failures, nextAt: Date.now() + wait });
+        this.deps.log(
+          `github poller: ${label}: ${err.message}; ${String(failures)} in a row, reading it again in ${String(wait)} ms`,
+        );
       }
     }
     return false;
+  }
+
+  private paused(): boolean {
+    return pauseInForce(this.deps.pause.current());
   }
 
   /** A read through the ETag cache: on 304 the value read before is reused. */
@@ -109,10 +158,11 @@ export class GitHubPoller {
       const f = res.failure;
       throw new ReadFailed(
         f.kind === 'rate_limited' ? `rate limited until ${f.resetAt}` : `${f.kind}: ${f.reason}`,
+        f.kind === 'transient',
       );
     }
     if (res.notModified) {
-      if (cached === undefined) throw new ReadFailed('304 without a value read before');
+      if (cached === undefined) throw new ReadFailed('304 without a value read before', false);
       return cached.value as T;
     }
     if (res.etag !== null) this.seen.set(key, { etag: res.etag, value: res.value });
@@ -274,6 +324,7 @@ export class GitHubPoller {
       const output = (err instanceof Error ? err.message : String(err)).replace(/\s*\n\s*/g, ' ');
       throw new ReadFailed(
         `could not read ${repository.defaultBranch}: ${this.deps.redact(output)}`,
+        true,
       );
     }
   }
