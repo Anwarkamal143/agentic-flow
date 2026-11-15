@@ -7,6 +7,9 @@
  * written only when it changed (`recordPoll`); a quiet poll writes nothing but
  * `last_polled_at`.
  *
+ * A default branch that moved under the head the factory pushed is merged
+ * into the Integration Branch (C2, ADR-0041; `startBaseMergeIn`).
+ *
  * When the PR body's rendering differs from the one the factory last sent
  * (the CI section follows the checks), the body is PATCHed. A failed read
  * writes nothing; the next poll tries again (the GitHub-wide pause and
@@ -44,6 +47,7 @@ import {
 } from './pr-feedback.js';
 import { latestStageRun } from './replan.js';
 import { bodyHash, pullRequestBodyInput } from './pull-request.js';
+import { baseMoved, defaultBranchTip, startBaseMergeIn } from './base-change.js';
 
 type PullRequestRow = typeof schema.pullRequests.$inferSelect;
 
@@ -113,6 +117,8 @@ export class GitHubPoller {
   private async poll(row: PullRequestRow): Promise<void> {
     const { github } = this.deps;
     const repo = { owner: row.owner, name: row.name };
+    // First, so the window between GitHub's reads and the poll's write stays as short as before.
+    const tip = await this.defaultTip(row);
     const pr = await this.read(`pr:${row.id}`, (etag) =>
       github.getPullRequest(repo, row.number, etag === undefined ? {} : { etag }),
     );
@@ -150,10 +156,19 @@ export class GitHubPoller {
       .from(schema.pullRequests)
       .where(eq(schema.pullRequests.id, row.id))
       .get();
-    if (before === undefined) return;
+    // The row changed while GitHub was read (the PR was updated in place, ADR-0039, ADR-0041):
+    // what was read may predate it, so nothing is recorded; the next poll reads afresh.
+    if (before === undefined || before.version !== row.version) return;
     const assessed = assessPoll(db, before, seen, opts);
     let gate: MergeGate = assessed.gate;
+    // The default branch moved under the head the factory pushed (C2): merge it in (ADR-0041).
+    // Either read may show the move first (the tip is read before the PR): either one counts.
+    const moved =
+      seen.state === 'open' && seen.headSha === before.pushedSha
+        ? [tip, seen.baseSha].find((b) => b !== undefined && baseMoved(db, before.taskId, b))
+        : undefined;
     const quiet =
+      moved === undefined &&
       assessed.changes.length === 0 &&
       !assessed.gateChanged &&
       !assessed.itemsStale &&
@@ -194,16 +209,47 @@ export class GitHubPoller {
               actor: POLLER,
               why: describeTriggers(triggers),
             });
+          // Feedback goes first; a move it left is caught by a poll after the update.
+          const merging =
+            !reworked &&
+            moved !== undefined &&
+            startBaseMergeIn(tx, state, step, {
+              taskId: pr.taskId,
+              observedBaseSha: moved,
+              seen: 'poll',
+              actor: POLLER,
+            });
           const polled = recordPoll(tx, row.id, seen, opts, step, readJobState(tx, row.jobId));
-          return { gate: polled, reworked };
+          return { gate: polled, reworked: reworked || merging };
         },
       );
       this.deps.onCommit();
-      // A Rework re-renders the body when it updates the PR (the next pull_request).
+      // A Rework or a base merge-in re-renders the body when it updates the PR (the next pull_request).
       if (recorded === undefined || recorded.reworked) return;
       gate = recorded.gate;
     }
     if (seen.state === 'open') await this.updateBody(row.id, gate, seen.checks);
+  }
+
+  /**
+   * The default branch's head on GitHub (`defaultBranchTip`, ARCHITECTURE §14):
+   * the base check compares it, not the PR's `base.sha`. A failure is a failed read.
+   */
+  private async defaultTip(row: PullRequestRow): Promise<string | undefined> {
+    const repository = this.deps.db
+      .select()
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, row.repositoryId))
+      .get();
+    if (repository === undefined) throw new Error(`no Repository ${row.repositoryId}`);
+    try {
+      return await defaultBranchTip(repository, { owner: row.owner, name: row.name });
+    } catch (err) {
+      const output = (err instanceof Error ? err.message : String(err)).replace(/\s*\n\s*/g, ' ');
+      throw new ReadFailed(
+        `could not read ${repository.defaultBranch}: ${this.deps.redact(output)}`,
+      );
+    }
   }
 
   /**

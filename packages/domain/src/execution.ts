@@ -134,18 +134,31 @@ export type AttemptExitReason = z.infer<typeof AttemptExitReasonSchema>;
  * infrastructure failure, not a verdict on the work). `answer`: a human
  * answered the questions of the one before (ADR-0023). `merge`: the
  * Integration Task's first, in which the factory merges the approved Task
- * Branches and verifies the result; no Harness runs (ADR-0034).
+ * Branches and verifies the result; no Harness runs (ADR-0034). `base_merge`:
+ * the factory merges a moved default branch into the approved Integration
+ * Branch and verifies it again; no Harness runs, and its Review is re-anchored
+ * or re-run (ADR-0041).
  */
-export const AttemptCauseSchema = z.enum(['initial', 'rework', 'retry', 'answer', 'merge']);
+export const AttemptCauseSchema = z.enum([
+  'initial',
+  'rework',
+  'retry',
+  'answer',
+  'merge',
+  'base_merge',
+]);
 export type AttemptCause = z.infer<typeof AttemptCauseSchema>;
 
 /**
  * How many of a Task's Attempts count toward its `max_attempts` (the Rework
- * cap): every Attempt but a Retry, which redoes an interrupted one, and an
- * answer Attempt, which `max_questions` caps instead. Pure.
+ * cap): every Attempt but a Retry, which redoes an interrupted one, an
+ * answer Attempt, which `max_questions` caps instead, and a base merge, which
+ * the default branch moving caused, not a verdict on the work (ADR-0041). Pure.
  */
 export function attemptsCountedForRework(attempts: readonly { cause: AttemptCause }[]): number {
-  return attempts.filter((a) => a.cause !== 'retry' && a.cause !== 'answer').length;
+  return attempts.filter(
+    (a) => a.cause !== 'retry' && a.cause !== 'answer' && a.cause !== 'base_merge',
+  ).length;
 }
 
 /** How far a usage value can be trusted (ARCHITECTURE §13). */

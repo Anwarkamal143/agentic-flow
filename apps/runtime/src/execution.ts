@@ -66,6 +66,7 @@ import {
   commitsBetween,
   fetchRemote,
   releaseBranch,
+  resetWorktreeTo,
   resolveCommit,
   treeOf,
   uncommittedPaths,
@@ -129,7 +130,19 @@ import { routeByFaultOrigin, type FaultRouteInput } from './fault-route.js';
 import { answersAfter, openQuestionItem } from './questions.js';
 import { guidanceAfter } from './blocker-approvals.js';
 import { feedbackForAttempt, markFeedbackCarried } from './pr-feedback.js';
-import { finishReview, recordedRuns, runReview, type AttemptOutcome } from './review.js';
+import {
+  finishReview,
+  recordedRuns,
+  runReview,
+  type AttemptOutcome,
+  type Reviewed,
+} from './review.js';
+import {
+  baseMergeReview,
+  blockOnBaseMergeConflict,
+  mergeBaseIn,
+  passedAttemptOf,
+} from './base-change.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
   allocatePortBlock,
@@ -636,6 +649,11 @@ export class TaskScheduler {
       await this.runMerge(harness, { task, definition, job, repo, n: 1 }, slot);
       return;
     }
+    // The default branch moved under the approved Integration Branch: merge it in (ADR-0041).
+    if (task.kind === 'integration' && task.baseMergeRequested && previous !== undefined) {
+      await this.runBaseMerge(harness, { task, definition, job, repo, n: previous.n + 1 }, slot);
+      return;
+    }
     const clone = repo.clonePath;
     const attemptId = newId('att');
     const n = (previous?.n ?? 0) + 1;
@@ -643,12 +661,15 @@ export class TaskScheduler {
     // asked: both carry its packet's Findings, none of its own (it raised none).
     // A merge Attempt interrupted before its Gates finished is verified again in its own
     // Worktree, as a new merge Attempt: it is never handed to a Harness (ADR-0034).
-    const remerge = previous?.cause === 'merge' && previous.state === 'interrupted';
+    // So is a base merge Attempt, in the Worktree its merge-in already moved (ADR-0041).
+    const remerge =
+      (previous?.cause === 'merge' || previous?.cause === 'base_merge') &&
+      previous.state === 'interrupted';
     const cause: AttemptCause =
       previous === undefined
         ? 'initial'
         : remerge
-          ? 'merge'
+          ? AttemptCauseSchema.parse(previous.cause)
           : previous.state === 'interrupted'
             ? 'retry'
             : previous.state === 'needs_decision'
@@ -1105,6 +1126,187 @@ export class TaskScheduler {
   }
 
   /**
+   * The approved Integration Task's base merge Attempt (ADR-0041; C2). Under
+   * the clone's setup lock: the default branch is fetched and merged into the
+   * approved Integration Branch head (one two-parent commit, never a rebase),
+   * and the Worktree's branch moved to it. A conflict blocks the Task with
+   * `base_merge_conflict` (no Attempt is made). Otherwise the Attempt starts at
+   * `verifying` on the new `(head, base)`, the Worktree's base becomes the new
+   * base, and the factory verifies it like the merge Attempt; its review step
+   * re-anchors the Review or runs the Integration Review ({@link reviewStep}).
+   */
+  private async runBaseMerge(
+    harness: AgentHarness,
+    input: {
+      task: TaskRow;
+      definition: TaskDefinition;
+      job: typeof schema.jobs.$inferSelect;
+      repo: typeof schema.repositories.$inferSelect;
+      n: number;
+    },
+    slot: Slot,
+  ): Promise<void> {
+    const { db } = this.opts;
+    const { task, definition, job, repo, n } = input;
+    const clone = repo.clonePath;
+    const approved = passedAttemptOf(db, task.id);
+    if (approved === undefined)
+      throw new Error(`Task ${task.key} has no approved head to merge into`);
+    const worktree = requireWorktree(db, approved.worktreeId);
+    if (worktree.state !== 'preserved') {
+      throw new Error(`the Worktree of Task ${task.key} is ${worktree.state}, not preserved`);
+    }
+    const built = await this.withClone(clone, async () => {
+      await fetchRemote(clone);
+      const baseSha =
+        (await resolveCommit(clone, `refs/remotes/origin/${repo.defaultBranch}`)) ??
+        (await resolveCommit(clone, `refs/heads/${repo.defaultBranch}`));
+      if (baseSha === undefined)
+        throw new Error(`the Factory Clone has no ${repo.defaultBranch} to merge in`);
+      const merged = await mergeBaseIn(clone, {
+        headSha: approved.headSha,
+        baseSha,
+        defaultBranch: repo.defaultBranch,
+        integrationBranch: worktree.branch,
+      });
+      if (merged.kind === 'conflict') return merged;
+      const dirty = await uncommittedPaths(worktree.path);
+      if (dirty.length > 0) {
+        throw new Error(
+          `the Integration Branch Worktree has uncommitted changes (${dirty.join(', ')}): the base is not merged over them`,
+        );
+      }
+      await resetWorktreeTo(worktree.path, merged.headSha);
+      return merged;
+    });
+    if (built.kind === 'conflict') {
+      blockOnBaseMergeConflict(db, { jobId: job.id, actor: ACTOR }, task.id, {
+        headSha: approved.headSha,
+        baseSha: built.baseSha,
+        paths: built.paths,
+        defaultBranch: repo.defaultBranch,
+        integrationBranch: worktree.branch,
+      });
+      this.opts.onCommit();
+      return;
+    }
+    const { baseSha, headSha } = built;
+    const attemptId = newId('att');
+    const packet = this.packet({
+      job,
+      task,
+      definition,
+      repo,
+      path: worktree.path,
+      branch: worktree.branch,
+      baseSha,
+      wallClockMs: this.wallClockMs,
+      priorFindings: [],
+      answers: [],
+      guidance: [],
+      prFeedback: [],
+    });
+    const portBase = changeJob(
+      db,
+      { jobId: job.id, expectedVersion: 'current', actor: ACTOR },
+      (tx) => {
+        const op = { jobId: job.id, actor: ACTOR };
+        const base = allocatePortBlock(tx, {
+          holder: `${this.holder}/${attemptId}`,
+          expiresAt: leaseExpiry(),
+        });
+        const now = new Date().toISOString();
+        // Later Attempts (a Rework) diff against the merged-in base.
+        tx.update(schema.worktrees)
+          .set({ portBase: base, baseSha })
+          .where(eq(schema.worktrees.id, worktree.id))
+          .run();
+        stepWorktree(tx, op, requireWorktree(tx, worktree.id), 'preserved', 'active', {
+          attemptId,
+          portBase: base,
+          baseSha,
+          headSha,
+        });
+        tx.insert(schema.attempts)
+          .values({
+            id: attemptId,
+            taskId: task.id,
+            n,
+            cause: 'base_merge',
+            state: 'verifying',
+            harnessId: MERGE_HARNESS_ID,
+            harnessVersion: null,
+            tier: TIER,
+            promptTemplateId: MERGE_TEMPLATE.id,
+            promptTemplateHash: MERGE_TEMPLATE.hash,
+            packetJson: JSON.stringify(packet),
+            worktreeId: worktree.id,
+            baseSha,
+            commitsJson: '[]',
+            protocolViolationsJson: '[]',
+            startedAt: now,
+            version: 0,
+          })
+          .run();
+        appendEvent(tx, {
+          entityKind: 'attempt',
+          entityId: attemptId,
+          jobId: job.id,
+          type: 'attempt.started',
+          actor: ACTOR,
+          payload: {
+            taskId: task.id,
+            n,
+            cause: 'base_merge',
+            harnessId: MERGE_HARNESS_ID,
+            tier: TIER,
+            worktreeId: worktree.id,
+            fromHeadSha: approved.headSha,
+            fromBaseSha: approved.baseSha,
+            headSha,
+            baseSha,
+            // False when the base was already in the head: no merge commit was needed.
+            mergedIn: built.merged,
+          },
+        });
+        tx.update(schema.tasks)
+          .set({ baseMergeRequested: false })
+          .where(eq(schema.tasks.id, task.id))
+          .run();
+        const claimed = requireTask(tx, task.id, 'claimed');
+        const running = stepTask(tx, op, claimed, 'running', { payload: { attemptId } });
+        stepTask(tx, op, running, 'verifying', { payload: { attemptId, headSha } });
+        return base;
+      },
+    );
+    this.opts.onCommit();
+    const ctx: AttemptContext = {
+      harness,
+      slot,
+      job,
+      task,
+      definition,
+      repo,
+      attemptId,
+      n,
+      path: worktree.path,
+      baseSha,
+      worktreeId: worktree.id,
+      env: guardrailEnv(this.opts.runtimeEnv, {
+        FACTORY_JOB_ID: job.id,
+        FACTORY_TASK_ID: task.id,
+        FACTORY_ATTEMPT_ID: attemptId,
+        FACTORY_PORT_BASE: String(portBase),
+        PORT: String(portBase),
+        CI: 'true',
+      }),
+      packet,
+    };
+    if (await this.stopped(ctx)) return;
+    await this.verifyMerge(ctx);
+  }
+
+  /**
    * The factory's Gates on the integration head (ADR-0034): the path-scope
    * Gate over the union of the Plan Tasks' writable globs, every de-duplicated
    * verification command, and their criteria, with Evidence tied to the
@@ -1385,7 +1587,7 @@ export class TaskScheduler {
   private async verifyStep(ctx: AttemptContext): Promise<void> {
     const { path, baseSha, attemptId, definition, harness } = ctx;
     const attempt = requireAttempt(this.opts.db, attemptId);
-    if (attempt.cause === 'merge') {
+    if (attempt.cause === 'merge' || attempt.cause === 'base_merge') {
       await this.verifyMerge(ctx);
       return;
     }
@@ -1547,32 +1749,23 @@ export class TaskScheduler {
     // The Integration Task's review in `integration_review` is the Integration Review (ADR-0035).
     const scope =
       stageIdOfTask(this.opts.db, ctx.task.id) === 'integration_review' ? 'integration' : 'task';
-    const reviewed = await runReview(
-      this.opts,
-      {
-        subject: {
-          jobId: ctx.job.id,
-          taskId: ctx.task.id,
-          taskKey: ctx.task.key,
-          attemptId: ctx.attemptId,
-        },
-        worktree: ctx.path,
-        definition: ctx.definition,
-        at: { headSha: facts.headSha, baseSha: ctx.baseSha },
-        runs: recordedRuns(this.opts, ctx.attemptId, ctx.definition),
-        harnessId: ctx.harness.id,
-        wallClockMs: this.reviewWallClockMs,
-        firstRun: from?.run ?? 1,
-        scope,
-      },
-      {
-        run: (input, evaluate) =>
-          input.run === from?.run
-            ? this.finishRun(ctx, input, from.reattached, evaluate)
-            : this.harnessRun(ctx, input, evaluate),
-        stopped: () => this.stopped(ctx),
-      },
-    );
+    // A base merge-in that left the diff unchanged re-anchors the Review: no reviewer runs (ADR-0041).
+    const anchored =
+      attempt.cause === 'base_merge'
+        ? await baseMergeReview(this.opts.db, ctx.repo.clonePath, {
+            ...attempt,
+            headSha: facts.headSha,
+          })
+        : undefined;
+    const reviewed: Reviewed | undefined =
+      anchored?.kind === 'reanchor' && anchored.original !== undefined
+        ? {
+            kind: 'reanchored',
+            original: anchored.original,
+            reason: anchored.reason,
+            patchId: anchored.patchIdAfter,
+          }
+        : await this.runReviewer(ctx, facts.headSha, scope, from);
     if (reviewed === undefined) return; // stopped during the review
     finishReview(
       this.opts,
@@ -1586,7 +1779,10 @@ export class TaskScheduler {
           headSha: (await resolveCommit(ctx.path, 'HEAD')) ?? '(none)',
           baseSha: ctx.baseSha,
         },
-        reviewerChanges: await worktreeProblems(ctx.path, facts.headSha, 'reviewer'),
+        reviewerChanges:
+          reviewed.kind === 'reanchored'
+            ? []
+            : await worktreeProblems(ctx.path, facts.headSha, 'reviewer'),
         scope,
       },
       (tx, state, step, outcome) => {
@@ -1605,6 +1801,41 @@ export class TaskScheduler {
       },
     );
     this.dropSpools(ctx.attemptId);
+  }
+
+  /** The reviewer Harness Runs of {@link reviewStep}; `undefined` when the work stopped. */
+  private runReviewer(
+    ctx: AttemptContext,
+    headSha: string,
+    scope: 'integration' | 'task',
+    from: { run: number; reattached: HarnessRun | undefined } | undefined,
+  ): Promise<Reviewed | undefined> {
+    return runReview(
+      this.opts,
+      {
+        subject: {
+          jobId: ctx.job.id,
+          taskId: ctx.task.id,
+          taskKey: ctx.task.key,
+          attemptId: ctx.attemptId,
+        },
+        worktree: ctx.path,
+        definition: ctx.definition,
+        at: { headSha, baseSha: ctx.baseSha },
+        runs: recordedRuns(this.opts, ctx.attemptId, ctx.definition),
+        harnessId: ctx.harness.id,
+        wallClockMs: this.reviewWallClockMs,
+        firstRun: from?.run ?? 1,
+        scope,
+      },
+      {
+        run: (input, evaluate) =>
+          input.run === from?.run
+            ? this.finishRun(ctx, input, from.reattached, evaluate)
+            : this.harnessRun(ctx, input, evaluate),
+        stopped: () => this.stopped(ctx),
+      },
+    );
   }
 
   private packet(input: {

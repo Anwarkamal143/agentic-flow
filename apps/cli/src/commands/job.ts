@@ -330,6 +330,9 @@ function writeAttempts(
       `  ${task?.key ?? a.taskId} attempt ${String(a.n)}  ${a.state}` +
         (a.cause === 'rework' ? ' [rework]' : '') +
         (a.cause === 'merge' ? ' [merge: the factory merged, no Harness ran]' : '') +
+        (a.cause === 'base_merge'
+          ? ' [base merge: the factory merged the moved default branch in, no Harness ran]'
+          : '') +
         (a.exitReason === null
           ? ''
           : ` (${a.exitReason}${a.exitDetail === null ? '' : `: ${a.exitDetail}`})`),
@@ -361,7 +364,9 @@ function writeAttempts(
     }
     for (const r of reviews.filter((x) => x.attemptId === a.id)) {
       lines.push(
-        `    review       ${r.outcome}  on ${r.headSha.slice(0, 12)} (base ${r.baseSha.slice(0, 12)}), ${r.reviewer.harnessId} in Session ${r.sessionRef ?? '?'}: ${r.summary}`,
+        r.reanchoredFrom === null
+          ? `    review       ${r.outcome}  on ${r.headSha.slice(0, 12)} (base ${r.baseSha.slice(0, 12)}), ${r.reviewer.harnessId} in Session ${r.sessionRef ?? '?'}: ${r.summary}`
+          : `    review       ${r.outcome}  on ${r.headSha.slice(0, 12)} (base ${r.baseSha.slice(0, 12)}), re-anchored from review ${r.reanchoredFrom} (the base merge-in left the diff unchanged; no reviewer ran): ${r.summary}`,
       );
       for (const f of r.findings) {
         lines.push(

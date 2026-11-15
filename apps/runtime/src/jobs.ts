@@ -439,6 +439,7 @@ export class JobService {
         summary: r.summary,
         artifactId: r.artifactId,
         packet: JSON.parse(r.packetJson) as unknown,
+        reanchoredFrom: r.reanchoredFromReviewId,
         findings: findings
           .filter((f) => f.reviewId === r.id)
           .map((f) => ({

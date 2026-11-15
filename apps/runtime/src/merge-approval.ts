@@ -1050,7 +1050,8 @@ export function pullRequestOfItem(
   return pr;
 }
 
-function repositoryOf(tx: Tx | FactoryDb, pr: PullRequestRow) {
+/** The Repository a PR was opened for. */
+export function repositoryOf(tx: Tx | FactoryDb, pr: PullRequestRow) {
   const repo = tx
     .select()
     .from(schema.repositories)

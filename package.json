@@ -23,6 +23,7 @@
     "@eslint/js": "10.0.1",
     "@factory/db": "workspace:*",
     "@factory/domain": "workspace:*",
+    "@factory/git": "workspace:*",
     "@factory/github": "workspace:*",
     "@factory/harness": "workspace:*",
     "@types/node": "22.20.5",

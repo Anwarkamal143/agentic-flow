@@ -191,6 +191,11 @@ export const ReviewSchema = z.object({
   /** The Review Packet the reviewer was sent. */
   packet: ReviewPacketSchema,
   findings: z.array(FindingSchema),
+  /**
+   * The approving Review this one re-anchors to new SHAs after a base merge-in
+   * left the diff unchanged (ADR-0041): no reviewer ran for it. `null` otherwise.
+   */
+  reanchoredFrom: z.string().nullable(),
   createdAt: z.string(),
 });
 export type Review = z.infer<typeof ReviewSchema>;

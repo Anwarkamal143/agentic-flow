@@ -3,7 +3,7 @@
  * read-only: it uses plumbing that never refreshes the index or takes locks
  * (`GIT_OPTIONAL_LOCKS=0`), and never runs `status`, `fetch` or `gc` there.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 
 export class GitError extends Error {
   constructor(
@@ -423,4 +423,97 @@ export async function diffBetween(
   const bytes = Buffer.from(out, 'utf8');
   if (bytes.length <= maxBytes) return { patch: out, truncated: false };
   return { patch: bytes.subarray(0, maxBytes).toString('utf8'), truncated: true };
+}
+
+/** Whether `ancestor` is reachable from `descendant` (equal counts). */
+export async function isAncestor(
+  repo: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  try {
+    await worktreeGit(repo, ['merge-base', '--is-ancestor', ancestor, descendant]);
+    return true;
+  } catch (err) {
+    if (err instanceof GitError && err.exitCode === 1) return false;
+    throw err;
+  }
+}
+
+/**
+ * `git patch-id --stable` of the diff from the merge-base of `base` and `head`
+ * to `head` (ADR-0041): equal for two diffs that change the same lines the same
+ * way, whatever their line numbers. `null` for an empty diff. External diff
+ * drivers and textconv filters are off.
+ */
+export async function diffPatchId(
+  repo: string,
+  base: string,
+  head: string,
+): Promise<string | null> {
+  const mergeBase = (await worktreeGit(repo, ['merge-base', base, head])).trim();
+  const diff = await worktreeGit(repo, [
+    'diff',
+    '--no-color',
+    '--no-ext-diff',
+    '--no-textconv',
+    '--full-index',
+    `${mergeBase}..${head}`,
+  ]);
+  if (diff === '') return null;
+  // `patch-id` wants a commit-like header line before the diff; any SHA does.
+  const out = await withInput(repo, ['patch-id', '--stable'], `commit ${head}\n${diff}`);
+  return out.trim().split(/\s+/)[0] || null;
+}
+
+/** Runs `git <command>` in `repo` with `input` on its stdin, in the Worktree environment; resolves with stdout. */
+function withInput(repo: string, command: readonly string[], input: string): Promise<string> {
+  const args = ['-C', repo, ...NO_HOOKS, ...command];
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { env: worktreeGitEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (d: string) => (stdout += d));
+    child.stderr.setEncoding('utf8').on('data', (d: string) => (stderr += d));
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve(stdout);
+      else
+        reject(
+          new GitError(
+            `git ${command[0] ?? ''} failed: ${stderr.trim()}`,
+            [...args],
+            code,
+            stderr,
+            stdout,
+          ),
+        );
+    });
+    child.stdin.end(input);
+  });
+}
+
+/**
+ * Moves the branch checked out in `worktree` to `sha` and its files with it
+ * (`reset --keep`): git refuses when a file with uncommitted changes would be
+ * overwritten, so no work is discarded. Used to fast-forward the Integration
+ * Branch onto the factory's own base merge-in commit (ADR-0041).
+ */
+export async function resetWorktreeTo(worktree: string, sha: string): Promise<void> {
+  await worktreeGit(worktree, ['reset', '--quiet', '--keep', sha]);
+}
+
+/**
+ * The commit `branch` points at on the remote `url` (`git ls-remote`), without
+ * fetching into `repo`; `undefined` when the remote has no such branch. Runs
+ * with the runtime's environment, so git's own credentials work, and no hooks.
+ */
+export async function remoteBranchHead(
+  repo: string,
+  url: string,
+  branch: string,
+): Promise<string | undefined> {
+  const out = await git(['-C', repo, ...NO_HOOKS, 'ls-remote', url, `refs/heads/${branch}`]);
+  const [sha] = out.trim().split(/\s+/);
+  return sha === undefined || sha === '' ? undefined : sha;
 }
