@@ -85,7 +85,7 @@ A new Attempt started because the previous one was cut short by an infrastructur
 _Avoid_: Rework, rerun
 
 **Rework**:
-A new Attempt started because a Gate failed or a review produced blocking Findings, or (for the Integration Task) because of feedback on the open pull request: a `CHANGES_REQUESTED` review, a `/factory` comment, or `request_changes` in the Inbox. It carries those Findings or that feedback forward (GitHub text labelled untrusted) and counts against the Task's attempt limit.
+A new Attempt started because a Gate failed or a review produced blocking Findings, or (for the Integration Task) because of feedback on the open pull request: a `CHANGES_REQUESTED` review, a `/factory` comment, `request_changes` in the Inbox, or `rework` on a failed required check (`ci_failed`). It carries those Findings or that feedback forward (GitHub and CI text labelled untrusted) and counts against the Task's attempt limit.
 _Avoid_: Retry, fix-up, iteration
 
 **Blocker**:

@@ -364,6 +364,7 @@ const app = createApp({
     config.harness?.id === 'claude-code' ? config.harness.billing : null,
     // A Blocker Approval's "cancel the Job" is the cancel operation itself (ADR-0026).
     (jobId, input) => jobs.cancel(jobId, input),
+    githubPort,
   ),
   artifacts,
   logs: (jobId) => jobLogs(database.db, artifacts, jobId),

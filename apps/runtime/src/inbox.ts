@@ -16,6 +16,7 @@ import {
   attemptsCountedForRework,
   BlockerSchema,
   checkBlockerDecision,
+  checkRunsToRerun,
   grantedCap,
   KILL_AND_RETRY_OPTIONS,
   retriesAfterRetryNow,
@@ -65,11 +66,20 @@ import type { ArtifactStore } from './artifacts.js';
 import { inspectSpool } from '@factory/harness';
 import { openBlockerItem, raiseCap, replaceBlocker } from './blocker-approvals.js';
 import { applyCleanupDecision } from './cleanup.js';
-import { approveMerge, retryMerge } from './merge-approval.js';
-import { requestPullRequestChanges } from './pr-feedback.js';
+import {
+  ciFailedHolder,
+  label as pullRequestLabel,
+  requireFailedChecks,
+  requiredChecksOf,
+  approveMerge,
+  retryMerge,
+} from './merge-approval.js';
+import { requestPullRequestChanges, reworkFailedChecks } from './pr-feedback.js';
+import type { GitHubPort } from '@factory/github';
 import { currentSpec } from './criteria.js';
 import {
   changeJob,
+  readJobState,
   stepTask,
   stepWorktree,
   type JobState,
@@ -123,6 +133,8 @@ export class InboxService {
     /** The Job cancel operation (`JobService.cancel`), for a Blocker Approval's "cancel the Job". */
     private readonly cancelJob: (jobId: string, input: CancelJobInput) => Promise<unknown> = () =>
       Promise.reject(new Error('no cancel operation configured')),
+    /** GitHub, for a `ci_failed` Blocker Approval's `rerun_checks` (#61); `null` without one. */
+    private readonly github: Pick<GitHubPort, 'listCheckRuns' | 'rerunCheckRun'> | null = null,
   ) {}
 
   /** Open items not deferred, oldest first; `all` lists every item. */
@@ -369,10 +381,17 @@ export class InboxService {
 
     if (input.option === 'rework') {
       this.decideOnly(item, input, actor, null, (tx, state, step) => {
-        applyRework(tx, { item, actor }, state, step);
+        // A failed check goes to the PR feedback Rework (#61); a Specification Finding to its own.
+        if (ciFailedHolder(state, item) !== undefined) {
+          reworkFailedChecks(tx, item, actor, state, step);
+        } else {
+          applyRework(tx, { item, actor }, state, step);
+        }
       });
       return this.get(item.id);
     }
+
+    if (input.option === 'rerun_checks') return this.rerunChecksFromItem(item, input, actor);
 
     if (input.option === 'grant') {
       const grant = check.grant ?? 1;
@@ -436,6 +455,105 @@ export class InboxService {
     });
     // The process is gone: its spool (raw output) goes too.
     if (recorded !== undefined) rmSync(recorded.spool, { recursive: true, force: true });
+    return this.get(item.id);
+  }
+
+  /**
+   * `rerun_checks` on a `ci_failed` Blocker Approval (#61, Q14): GitHub is
+   * asked to re-run the newest run of each failed required check on the PR
+   * head, read afresh, before the item is decided. GitHub can't re-run a
+   * commit status, so failures that are only statuses are refused and the
+   * item stays open. The Blocker stays until the poller sees the checks no
+   * longer failing; a later failure raises a new one.
+   */
+  private async rerunChecksFromItem(
+    item: ApprovalRow,
+    input: DecideInput,
+    actor: string,
+  ): Promise<Approval> {
+    const failed = requireFailedChecks(this.db, readJobState(this.db, item.jobId), item);
+    const github = this.github;
+    if (github === null) {
+      throw new ApiFailure(
+        409,
+        'no_github',
+        'the runtime has no GitHub port to re-run checks with',
+      );
+    }
+    const prs = [...new Map(failed.map((f) => [f.pr.id, f.pr])).values()];
+    const requested: { pullRequest: string; headSha: string; name: string; checkRunId: number }[] =
+      [];
+    const alreadyRequested = () =>
+      requested.length === 0
+        ? ''
+        : ` (re-run already requested: ${requested.map((r) => r.name).join(', ')})`;
+    for (const pr of prs) {
+      const repo = { owner: pr.owner, name: pr.name };
+      const runs = await github.listCheckRuns(repo, pr.headSha);
+      if (!runs.ok || runs.notModified) {
+        throw new ApiFailure(
+          502,
+          'github_failed',
+          `could not read the check runs of ${pullRequestLabel(pr)}${runs.ok ? '' : `: ${runs.failure.kind}`}; nothing was decided${alreadyRequested()}`,
+        );
+      }
+      for (const run of checkRunsToRerun(runs.value, requiredChecksOf(this.db, pr))) {
+        const res = await github.rerunCheckRun(repo, run.id);
+        if (!res.ok) {
+          throw new ApiFailure(
+            502,
+            'github_failed',
+            `GitHub did not re-run ${run.name} on ${pullRequestLabel(pr)} (${res.failure.kind}); nothing was decided${alreadyRequested()}`,
+          );
+        }
+        requested.push({
+          pullRequest: pullRequestLabel(pr),
+          headSha: pr.headSha,
+          name: run.name,
+          checkRunId: run.id,
+        });
+      }
+    }
+    const statuses = failed.filter((f) => f.check.source === 'status').map((f) => f.check.name);
+    if (requested.length === 0) {
+      throw new ApiFailure(
+        409,
+        'nothing_to_rerun',
+        `no failed check run to re-run${statuses.length === 0 ? '' : `: ${statuses.join(', ')} ${statuses.length === 1 ? 'is a commit status' : 'are commit statuses'}, which GitHub can't re-run; re-run ${statuses.length === 1 ? 'it' : 'them'} on the CI provider, rework, or cancel the Job`}`,
+      );
+    }
+    const [first] = prs;
+    if (first === undefined) throw new Error(`ci_failed item ${item.id} names no pull request`);
+    const recordRerun = (tx: Tx) => {
+      appendEvent(tx, {
+        entityKind: 'pull_request',
+        entityId: first.id,
+        jobId: item.jobId,
+        type: 'pull_request.checks_rerun_requested',
+        actor,
+        payload: {
+          approvalId: item.id,
+          checks: requested.map((r) => r.name),
+          requested,
+          notRerun: statuses,
+        },
+      });
+    };
+    try {
+      this.decideOnly(item, input, actor, null, (tx) => {
+        recordRerun(tx);
+      });
+    } catch (err) {
+      // A poll may have seen the re-run queued and superseded the item meanwhile: the re-run
+      // was still asked for, so it is recorded, and the item is returned as it now is.
+      if (!(err instanceof ApiFailure) || requireItem(this.db, item.id).state !== 'superseded') {
+        throw err;
+      }
+      this.db.transaction((tx) => {
+        recordRerun(tx);
+      });
+      this.onCommit();
+    }
     return this.get(item.id);
   }
 

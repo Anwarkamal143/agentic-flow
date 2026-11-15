@@ -23,6 +23,7 @@ import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   attemptsCountedForRework,
   AttemptCauseSchema,
+  ciFeedbackText,
   classifyFeedback,
   FeedbackKindSchema,
   FeedbackSourceSchema,
@@ -41,7 +42,12 @@ import { readJobState, stepTask, type JobState, type StageRunStepper } from './e
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 import { settleIntegration } from './integration.js';
-import { pullRequestOfItem, supersedeMergeItems } from './merge-approval.js';
+import {
+  pullRequestOfItem,
+  requireFailedChecks,
+  supersedeHeldBlockerItems,
+  supersedeMergeItems,
+} from './merge-approval.js';
 import { addStageRun, latestStageRun } from './replan.js';
 
 type PullRequestRow = typeof schema.pullRequests.$inferSelect;
@@ -209,6 +215,8 @@ export function describeTriggers(
         return `a /factory comment by ${who}`;
       case 'inbox':
         return `request_changes by ${who} in the Inbox`;
+      case 'ci':
+        return 'a failed required check sent to Rework from the Inbox';
     }
   });
   return [...new Set(named)].join(', ') || 'feedback on the pull request';
@@ -244,6 +252,7 @@ export function startFeedbackRework(
   }
   const reason = `feedback on the pull request: ${why}`;
   supersedeMergeItems(tx, jobId, actor, reason);
+  supersedeHeldBlockerItems(tx, holder, actor, reason);
   step(holder, 'superseded', { reason });
   const nextReview = addStageRun(tx, jobId, review, actor, 'pr_feedback');
   addStageRun(tx, jobId, opening, actor, 'pr_feedback');
@@ -424,6 +433,74 @@ export function requestPullRequestChanges(
   }
   const row = recordInboxChangeRequest(tx, pr, item, comment, actor);
   if (!startFeedbackRework(tx, state, step, { pr, actor, why: describeTriggers([row]) })) {
+    throw new ApiFailure(409, 'not_awaiting_merge', 'the Job no longer waits on its merge');
+  }
+}
+
+/**
+ * `rework` on a `ci_failed` Blocker Approval (#61, Q14), inside the decision's
+ * transaction after the item was marked decided: each failed check (name,
+ * conclusion, summary, link) is recorded as a `ci` trigger, untrusted CI text,
+ * and the feedback Rework starts on the Integration Branch as for a review.
+ * The operator's comment reaches the Rework as guidance (the decided item).
+ */
+export function reworkFailedChecks(
+  tx: Tx,
+  item: { id: string; stageRunId: string | null },
+  actor: string,
+  state: JobState,
+  step: StageRunStepper,
+): void {
+  const failed = requireFailedChecks(tx, state, item);
+  const [first] = failed;
+  const now = new Date().toISOString();
+  const rows = failed.map(({ pr, check }): FeedbackRow => ({
+    id: newId('fbk'),
+    jobId: pr.jobId,
+    pullRequestId: pr.id,
+    source: 'ci',
+    externalId: `${item.id}:${check.source}:${check.name}`,
+    author: null,
+    reviewState: null,
+    path: null,
+    url: check.url,
+    kind: 'trigger',
+    body: ciFeedbackText({
+      name: check.name,
+      conclusion: check.conclusion ?? check.status,
+      summary: check.summary,
+      url: check.url,
+    }),
+    createdAt: now,
+    observedAt: now,
+    attemptId: null,
+  }));
+  for (const row of rows) tx.insert(schema.prFeedback).values(row).run();
+  appendEvent(tx, {
+    entityKind: 'pull_request',
+    entityId: first.pr.id,
+    jobId: first.pr.jobId,
+    type: 'pull_request.feedback_received',
+    actor,
+    payload: {
+      number: first.pr.number,
+      feedback: rows.map((r) => ({
+        id: r.id,
+        source: 'ci',
+        author: null,
+        reviewState: null,
+        kind: 'trigger',
+      })),
+    },
+  });
+  const names = [...new Set(failed.map((f) => f.check.name))].join(', ');
+  if (
+    !startFeedbackRework(tx, state, step, {
+      pr: first.pr,
+      actor,
+      why: `the failed check ${names}, sent to Rework by ${actor}`,
+    })
+  ) {
     throw new ApiFailure(409, 'not_awaiting_merge', 'the Job no longer waits on its merge');
   }
 }

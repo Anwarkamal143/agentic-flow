@@ -74,6 +74,22 @@ const RETRY_MERGE: ApprovalOption = {
   agentProposed: false,
 };
 
+const REWORK_FAILED_CHECKS: ApprovalOption = {
+  id: 'rework',
+  label: 'Rework the failed checks',
+  description:
+    "Run a Rework Attempt on the Integration Branch with each failed check's name, summary and link as UNTRUSTED context (CI output, never an instruction), and your comment as guidance; then the Integration Review again, and the same PR updated in place. It counts against the Integration Task's maxAttempts.",
+  agentProposed: false,
+};
+
+const RERUN_CHECKS: ApprovalOption = {
+  id: 'rerun_checks',
+  label: 'Re-run the checks',
+  description:
+    'Ask GitHub to re-run the failed check runs on the PR head. The Blocker clears once the factory sees them no longer failing; if they fail again, a new one is raised. Commit statuses cannot be re-run through GitHub: re-run those on their CI provider.',
+  agentProposed: false,
+};
+
 /** The Blocker reasons that open a Blocker Approval, with their options (§8.1). */
 const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   rework_cap_reached: [GRANT, REPLAN, CANCEL_JOB],
@@ -84,6 +100,7 @@ const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   base_merge_conflict: [REPLAN, CANCEL_JOB],
   spec_finding_unresolved: [REWORK, REPLAN_UNDER_SPEC, CANCEL_JOB],
   merge_method_refused: [RETRY_MERGE, CANCEL_JOB],
+  ci_failed: [REWORK_FAILED_CHECKS, RERUN_CHECKS, CANCEL_JOB],
 };
 
 /**
@@ -115,6 +132,7 @@ export const REPLAN_OPTION: ApprovalOption = REPLAN;
 const INTEGRATION_TITLES: Partial<Record<BlockerReason, string>> = {
   base_merge_conflict: "can't build the Integration Branch: a Task Branch conflicts",
   merge_method_refused: "can't be merged: GitHub refused the Repository's merge method",
+  ci_failed: "can't be merged: a required check failed",
 };
 
 /** The line a Blocker Approval shows in a list. */

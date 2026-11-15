@@ -28,6 +28,7 @@ import type { ArtifactStore } from './artifacts.js';
 import { changeJob, readJobState } from './engine.js';
 import {
   assessPoll,
+  ciBlockerStep,
   POLLER,
   recordPoll,
   trackedPullRequests,
@@ -156,6 +157,8 @@ export class GitHubPoller {
       assessed.changes.length === 0 &&
       !assessed.gateChanged &&
       !assessed.itemsStale &&
+      // A ci_failed Blocker out of step with the checks (#61), e.g. none open after a re-run.
+      ciBlockerStep(db, row.jobId).kind === 'none' &&
       unseenFeedback(db, row.id, feedback).length === 0;
     if (quiet) {
       // A quiet poll: nothing new, so no event and no Job change; only when it was read.

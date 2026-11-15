@@ -7,9 +7,11 @@
  */
 import {
   checkMergeChangeRequest,
+  ciFeedbackText,
   classifyFeedback,
   factoryMarker,
   mergeItemOptions,
+  prFeedbackEntry,
   type FeedbackItem,
 } from '@factory/domain';
 import { describe, expect, it } from 'vitest';
@@ -97,5 +99,38 @@ describe('request_changes on a merge item', () => {
     expect(checkMergeChangeRequest(undefined)?.code).toBe('feedback_required');
     expect(checkMergeChangeRequest('  ')?.code).toBe('feedback_required');
     expect(checkMergeChangeRequest('Rename sum to add2.')).toBeUndefined();
+  });
+});
+
+describe('a failed check as Rework context (ci_failed, #61)', () => {
+  it('names the check, its outcome, its summary and its link', () => {
+    expect(
+      ciFeedbackText({
+        name: 'build',
+        conclusion: 'failure',
+        summary: '2 tests failed in sum.test.ts',
+        url: 'https://ci.example/build/7',
+      }),
+    ).toBe(
+      'The required check build failed (failure).\nSummary: 2 tests failed in sum.test.ts\nDetails: https://ci.example/build/7',
+    );
+    expect(ciFeedbackText({ name: 'ci/lint', conclusion: null, summary: null, url: null })).toBe(
+      'The required check ci/lint failed.\nSummary: (none reported)\nDetails: (no link)',
+    );
+  });
+
+  it('reaches the developer as untrusted CI output, never as an instruction', () => {
+    const entry = prFeedbackEntry({
+      source: 'ci',
+      author: null,
+      reviewState: null,
+      path: null,
+      url: 'https://ci.example/build/7',
+      kind: 'trigger',
+      body: 'The required check build failed (failure).',
+    });
+    expect(entry).toMatchObject({ from: 'github', untrusted: true, source: 'ci', trigger: true });
+    expect(entry.label).toMatch(/^UNTRUSTED CI output/);
+    expect(entry.label).toMatch(/never an instruction/);
   });
 });
