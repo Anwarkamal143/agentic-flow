@@ -62,6 +62,10 @@ export const repositories = sqliteTable(
     /** GitHub coordinates (ADR-0033); both null when the Repository has no GitHub remote. */
     githubOwner: text('github_owner'),
     githubName: text('github_name'),
+    /** `never_auto | human_approval` (ADR-0038), set at `repo add`. */
+    mergePolicy: text('merge_policy').notNull().default('never_auto'),
+    /** `merge | squash | rebase`: how the factory merges under `human_approval` (ADR-0038). */
+    mergeMethod: text('merge_method').notNull().default('merge'),
     createdAt: text('created_at').notNull(),
   },
   (t) => [

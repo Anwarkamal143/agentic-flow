@@ -1,6 +1,8 @@
 import { resolve } from 'node:path';
 import {
   formatCoordinates,
+  MergeMethodSchema,
+  MergePolicySchema,
   parseCoordinates,
   type RegisterRepositoryInput,
   type RegisterRepositoryResult,
@@ -25,6 +27,9 @@ export interface RepoAddOptions {
   github: string | undefined;
   /** The Merge Gate's required checks (`--required-check`, repeatable); empty: every check. */
   requiredChecks: string[];
+  /** `--merge-policy` (default `never_auto`) and `--merge-method` (default `merge`); the runtime validates them. */
+  mergePolicy: string | undefined;
+  mergeMethod: string | undefined;
   /** Confirms the shown commands without prompting. */
   yes: boolean;
 }
@@ -42,6 +47,18 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
   }
   const { client } = found;
   const path = resolve(opts.path);
+  const mergePolicy = MergePolicySchema.safeParse(opts.mergePolicy ?? 'never_auto');
+  if (!mergePolicy.success) {
+    process.stderr.write(
+      `factory: --merge-policy takes ${MergePolicySchema.options.join(' or ')} (auto_if_low_risk_and_green is not available until Phase E)\n`,
+    );
+    return 2;
+  }
+  const mergeMethod = MergeMethodSchema.safeParse(opts.mergeMethod ?? 'merge');
+  if (!mergeMethod.success) {
+    process.stderr.write(`factory: --merge-method takes ${MergeMethodSchema.options.join(', ')}\n`);
+    return 2;
+  }
   const github = opts.github === undefined ? undefined : parseCoordinates(opts.github);
   if (github !== undefined && !github.ok) {
     process.stderr.write(`factory: --github: ${github.error}\n`);
@@ -81,7 +98,12 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
         opts.requiredChecks.length === 0
           ? 'every check on the PR head (none required by name)'
           : `only ${opts.requiredChecks.join(', ')} (from --required-check)`
-      }\n`,
+      }\n` +
+      `Merge Policy: ${mergePolicy.data}${
+        mergePolicy.data === 'never_auto'
+          ? ' (the factory never merges; a human merges on GitHub)'
+          : ' (the factory merges after your Inbox approval)'
+      }; merge method: ${mergeMethod.data}\n`,
   );
 
   if (!opts.yes) {
@@ -100,6 +122,8 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
     commands,
     ...(opts.github === undefined ? {} : { github: opts.github.trim() }),
     ...(opts.requiredChecks.length === 0 ? {} : { requiredChecks: opts.requiredChecks }),
+    mergePolicy: mergePolicy.data,
+    mergeMethod: mergeMethod.data,
   };
   const result = await client.json<RegisterRepositoryResult>('POST', '/v1/repositories', {
     body: input,

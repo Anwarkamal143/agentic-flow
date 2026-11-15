@@ -9,11 +9,51 @@ import { z } from 'zod';
 import type { ApprovalOption } from './approvals.js';
 
 /**
- * The Merge Policy. `never_auto` (the default, Q5): the factory never merges;
- * a human merges on GitHub. `human_approval` comes with C3 (#59).
+ * The Merge Policy (Q5, ADR-0038), stored on the Repository. `never_auto` (the
+ * default): the factory never merges; a human merges on GitHub.
+ * `human_approval`: the factory merges after a human approves the `merge`
+ * Inbox Item. `auto_if_low_risk_and_green` is refused until Phase E.
  */
-export const MergePolicySchema = z.enum(['never_auto']);
+export const MergePolicySchema = z.enum(['never_auto', 'human_approval']);
 export type MergePolicy = z.infer<typeof MergePolicySchema>;
+
+/** Strictest first: an override may move only toward the start. */
+const STRICTNESS: readonly MergePolicy[] = ['never_auto', 'human_approval'];
+
+/** How the factory merges a PR (`merge.method` per Repository; default a merge commit, ADR-0038). */
+export const MergeMethodSchema = z.enum(['merge', 'squash', 'rebase']);
+export type MergeMethod = z.infer<typeof MergeMethodSchema>;
+
+/** A Job's Merge Policy as frozen into its Effective Configuration, with the level it came from. */
+export const EffectiveMergePolicySchema = z.object({
+  value: MergePolicySchema,
+  source: z.enum(['repository', 'job']),
+});
+export type EffectiveMergePolicy = z.infer<typeof EffectiveMergePolicySchema>;
+
+export type MergePolicyResolution =
+  | { ok: true; policy: EffectiveMergePolicy }
+  | { ok: false; code: 'merge_policy_looser'; message: string };
+
+/**
+ * A Job's Merge Policy: the Repository's, or the Job's override when it is at
+ * least as strict (PRODUCT_SPEC §9: an override may only make it stricter). Pure.
+ */
+export function resolveMergePolicy(
+  repository: MergePolicy,
+  override: MergePolicy | undefined,
+): MergePolicyResolution {
+  if (override === undefined)
+    return { ok: true, policy: { value: repository, source: 'repository' } };
+  if (STRICTNESS.indexOf(override) > STRICTNESS.indexOf(repository)) {
+    return {
+      ok: false,
+      code: 'merge_policy_looser',
+      message: `a Job may only make the Repository's Merge Policy stricter: ${override} is looser than ${repository}`,
+    };
+  }
+  return { ok: true, policy: { value: override, source: 'job' } };
+}
 
 export const GateStatusSchema = z.enum(['pass', 'fail', 'pending']);
 export type GateStatus = z.infer<typeof GateStatusSchema>;
@@ -47,6 +87,12 @@ export type MergeGate = z.infer<typeof MergeGateSchema>;
 export const CheckOutcomeSchema = z.enum(['pending', 'success', 'neutral', 'skipped', 'failure']);
 export type CheckOutcome = z.infer<typeof CheckOutcomeSchema>;
 
+/** A human's approval of a `merge` item: who, and when (ISO time). */
+export interface MergeApproval {
+  by: string;
+  at: string;
+}
+
 export interface MergeGateInput {
   /** The PR as the poller last recorded it. */
   pr: {
@@ -78,6 +124,8 @@ export interface MergeGateInput {
   /** GitHub users whose latest review is `CHANGES_REQUESTED`. */
   changesRequestedBy: readonly string[];
   policy: MergePolicy;
+  /** Under `human_approval`: who approved the `merge` item at these SHAs, and when; else `null`. */
+  approval: MergeApproval | null;
 }
 
 /** The default grace window: checks have 2 minutes after a push to report (Q13). */
@@ -97,12 +145,27 @@ export function evaluateMergeGate(input: MergeGateInput): MergeGate {
     mergeable(input),
     policy(input),
   ];
-  const verdict: GateStatus = conditions.some((c) => c.status === 'fail')
+  return { verdict: verdictOf(conditions), conditions };
+}
+
+function verdictOf(conditions: readonly MergeGateCondition[]): GateStatus {
+  return conditions.some((c) => c.status === 'fail')
     ? 'fail'
     : conditions.some((c) => c.status === 'pending')
       ? 'pending'
       : 'pass';
-  return { verdict, conditions };
+}
+
+/**
+ * `gate` once a human approved its `merge` item under `human_approval`: the
+ * policy condition passes, naming who and when; the others are kept as they
+ * were evaluated. Pure.
+ */
+export function withMergeApproval(gate: MergeGate, approval: MergeApproval): MergeGate {
+  const conditions = gate.conditions.map((c) =>
+    c.id === 'policy' ? policyCondition('human_approval', approval) : c,
+  );
+  return { verdict: verdictOf(conditions), conditions };
 }
 
 function target({ pr, expected }: MergeGateInput): MergeGateCondition {
@@ -247,12 +310,41 @@ function mergeable({ pr }: MergeGateInput): MergeGateCondition {
 }
 
 function policy(input: MergeGateInput): MergeGateCondition {
-  return {
-    id: 'policy',
-    label: 'The Merge Policy',
-    status: 'pending',
-    reason: `${input.policy}: the factory never merges; a human merges the PR on GitHub`,
-  };
+  return policyCondition(input.policy, input.approval);
+}
+
+function policyCondition(
+  mergePolicy: MergePolicy,
+  approval: MergeApproval | null,
+): MergeGateCondition {
+  const label = 'The Merge Policy';
+  if (mergePolicy === 'never_auto') {
+    return {
+      id: 'policy',
+      label,
+      status: 'pending',
+      reason: 'never_auto: the factory never merges; a human merges the PR on GitHub',
+    };
+  }
+  return approval === null
+    ? {
+        id: 'policy',
+        label,
+        status: 'pending',
+        reason:
+          'human_approval: the factory merges once a human approves the merge item in the Inbox',
+      }
+    : {
+        id: 'policy',
+        label,
+        status: 'pass',
+        reason: `human_approval: approved by ${approval.by} at ${approval.at}`,
+      };
+}
+
+/** Every condition but the policy passes: what `merge` needs to be offered (Q15). */
+export function readyButForPolicy(gate: MergeGate): boolean {
+  return gate.conditions.every((c) => c.id === 'policy' || c.status === 'pass');
 }
 
 export const CheckSourceSchema = z.enum(['check_run', 'status']);
@@ -354,20 +446,44 @@ export function unresolvedChangeRequests(
     .sort();
 }
 
+const CANCEL_JOB_OPTION: ApprovalOption = {
+  id: 'cancel_job',
+  label: 'Cancel the Job',
+  description:
+    'Cancel the whole Job, as factory job cancel does: polling stops, Worktrees are preserved, branches kept. The PR stays open on GitHub.',
+  agentProposed: false,
+};
+
+/** The option that lets the factory merge (`human_approval` only); approving it is audited. */
+export const MERGE_OPTION: ApprovalOption = {
+  id: 'merge',
+  label: 'Merge',
+  description:
+    "Approve the merge: the factory re-reads the PR and merges it with the Repository's merge method, at the head and base this item names. Your approval is written to the audit log.",
+  agentProposed: false,
+};
+
 /**
  * The options of a `merge` item under `never_auto` (Q15): the merge is the
  * human's, on GitHub, and the poller closes the item when it sees it.
  * `request_changes` comes with the PR feedback loop (#60).
  */
-export const NEVER_AUTO_MERGE_OPTIONS: readonly ApprovalOption[] = [
-  {
-    id: 'cancel_job',
-    label: 'Cancel the Job',
-    description:
-      'Cancel the whole Job, as factory job cancel does: polling stops, Worktrees are preserved, branches kept. The PR stays open on GitHub.',
-    agentProposed: false,
-  },
-];
+export const NEVER_AUTO_MERGE_OPTIONS: readonly ApprovalOption[] = [CANCEL_JOB_OPTION];
+
+/**
+ * A `merge` item's options for `gate` (Q15): under `human_approval`, `merge`
+ * only while every other condition passes; `cancel_job` always. `null` is a
+ * gate not evaluated yet. `request_changes` is #60's. Pure.
+ */
+export function mergeItemOptions(
+  policy: MergePolicy,
+  gate: MergeGate | null,
+): readonly ApprovalOption[] {
+  if (policy === 'human_approval' && gate !== null && readyButForPolicy(gate)) {
+    return [MERGE_OPTION, CANCEL_JOB_OPTION];
+  }
+  return NEVER_AUTO_MERGE_OPTIONS;
+}
 
 /** What a `merge` item decides on: one PR at one `(head_sha, base_sha)`; any SHA change supersedes it. */
 export function mergeItemSubject(pullRequestId: string, headSha: string, baseSha: string): string {

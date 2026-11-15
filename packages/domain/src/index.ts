@@ -9,6 +9,12 @@ import { BlockerSchema } from './rework.js';
 import { GitHubCoordinatesSchema, parseCoordinates } from './github.js';
 import { TaskKindSchema } from './integration.js';
 import {
+  EffectiveMergePolicySchema,
+  MergeMethodSchema,
+  MergePolicySchema,
+  type EffectiveMergePolicy,
+} from './merge-gate.js';
+import {
   DEFAULT_TOOL_POLICIES,
   ToolPoliciesSchema,
   withInvariants,
@@ -143,6 +149,10 @@ export const RepositorySchema = z.object({
    * `remoteUrl`, or set with `repo add --github`. `null`: no GitHub remote.
    */
   github: GitHubCoordinatesSchema.nullable(),
+  /** Set at `repo add` (default `never_auto`); a Job may only make it stricter (ADR-0038). */
+  mergePolicy: MergePolicySchema,
+  /** How the factory merges under `human_approval` (default `merge`, a merge commit; ADR-0038). */
+  mergeMethod: MergeMethodSchema,
   createdAt: z.string(),
 });
 export type Repository = z.infer<typeof RepositorySchema>;
@@ -183,6 +193,10 @@ export const RegisterRepositoryInputSchema = z.object({
       message: 'must be a GitHub repository as owner/name (for example acme/widgets)',
     })
     .optional(),
+  /** `repo add --merge-policy`; default `never_auto`. `auto_if_low_risk_and_green` is refused until Phase E. */
+  mergePolicy: MergePolicySchema.optional(),
+  /** `repo add --merge-method`; default `merge`. */
+  mergeMethod: MergeMethodSchema.optional(),
 });
 export type RegisterRepositoryInput = z.infer<typeof RegisterRepositoryInputSchema>;
 
@@ -467,6 +481,8 @@ export const EffectiveConfigSchema = z.object({
       perRepository: { value: 2, source: 'recipe' },
       perJob: { value: 2, source: 'recipe' },
     }),
+  /** The Merge Policy (ADR-0038). Jobs created before #59 were all `never_auto`, the only policy then. */
+  mergePolicy: EffectiveMergePolicySchema.default({ value: 'never_auto', source: 'repository' }),
 });
 export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
 
@@ -501,6 +517,8 @@ export function resolveEffectiveConfig(levels: {
   project: ProjectConfig;
   /** The Job's own overrides, given at creation (ARCHITECTURE §12: concurrency only). */
   job?: { concurrency?: ConcurrencyOverride | undefined };
+  /** The Merge Policy resolved from the Repository and the Job's override (`resolveMergePolicy`). */
+  mergePolicy?: EffectiveMergePolicy;
 }): EffectiveConfig {
   const { project } = levels;
   const limit = (key: keyof ConcurrencyOverride) => {
@@ -534,6 +552,7 @@ export function resolveEffectiveConfig(levels: {
         ? { value: RECIPE_DEFAULTS.maxReplans, source: 'recipe' }
         : { value: project.maxReplans, source: 'project' },
     concurrency: { perRepository: limit('perRepository'), perJob: limit('perJob') },
+    mergePolicy: levels.mergePolicy ?? { value: 'never_auto', source: 'repository' },
   };
 }
 
@@ -617,6 +636,8 @@ export const CreateJobInputSchema = z.object({
   description: z.string().max(20_000).default(''),
   /** Overrides of the Effective Configuration's concurrency limits, up or down (ARCHITECTURE §12). */
   concurrency: ConcurrencyOverrideSchema.optional(),
+  /** A Merge Policy at least as strict as the Repository's (PRODUCT_SPEC §9); a looser one is refused. */
+  mergePolicy: MergePolicySchema.optional(),
 });
 export type CreateJobInput = z.infer<typeof CreateJobInputSchema>;
 

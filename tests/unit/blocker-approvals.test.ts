@@ -46,6 +46,10 @@ describe('the option sets of a Blocker Approval', () => {
     });
   });
 
+  it('a merge method GitHub refused offers retrying the merge and cancelling the Job (#59)', () => {
+    expect(ids('merge_method_refused')).toEqual(['retry_merge', 'cancel_job']);
+  });
+
   it('a live process turns "retry now" into "kill and retry"', () => {
     expect(KILL_AND_RETRY_OPTIONS.map((o) => o.id)).toEqual(['kill_and_retry', 'cancel_job']);
   });

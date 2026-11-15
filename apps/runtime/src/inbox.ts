@@ -64,6 +64,7 @@ import type { ArtifactStore } from './artifacts.js';
 import { inspectSpool } from '@factory/harness';
 import { openBlockerItem, raiseCap, replaceBlocker } from './blocker-approvals.js';
 import { applyCleanupDecision } from './cleanup.js';
+import { approveMerge, retryMerge } from './merge-approval.js';
 import { currentSpec } from './criteria.js';
 import {
   changeJob,
@@ -211,9 +212,16 @@ export class InboxService {
       });
       return this.get(item.id);
     },
-    // Under never_auto the only decision is to cancel the Job; the merge itself is the
-    // human's, on GitHub, and the poller closes the item when it sees it (ADR-0037).
+    // `merge` (human_approval only, offered while the rest of the gate passes): audited, and
+    // the merger merges (ADR-0038). Otherwise the only decision is to cancel the Job; under
+    // never_auto the merge is the human's, on GitHub, and the poller closes the item (ADR-0037).
     merge: async (item, input, actor) => {
+      if (input.option === 'merge') {
+        this.decideOnly(item, input, actor, null, (tx, state, step, row) => {
+          approveMerge(tx, row, actor, state, step);
+        });
+        return this.get(item.id);
+      }
       this.decideOnly(item, input, actor, null, (tx) => {
         const job = requireJob(tx, item.jobId);
         if (TERMINAL_JOB_STATUSES.includes(JobStatusSchema.parse(job.status))) {
@@ -318,6 +326,13 @@ export class InboxService {
     }
 
     if (input.option === 'replan') return this.replanFromItem(item, input, actor);
+
+    if (input.option === 'retry_merge') {
+      this.decideOnly(item, input, actor, null, (_tx, state, step) => {
+        retryMerge(state, step, actor);
+      });
+      return this.get(item.id);
+    }
 
     if (input.option === 'grant_replan') {
       // The held request is a Replan's, or a re-specification's (ADR-0031).
