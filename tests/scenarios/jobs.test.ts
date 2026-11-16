@@ -118,6 +118,7 @@ describe('factory job create / job show', () => {
       },
       mergePolicy: { value: 'never_auto', source: 'repository' },
       reviewRerunOnBaseChange: { value: 'if_diff_changed', source: 'recipe' },
+      setup: { value: null, source: 'repository' },
     });
 
     const edit = await post(rt, `/v1/projects/${repo.projectId}/config`, { maxAttempts: 5 });
@@ -137,6 +138,7 @@ describe('factory job create / job show', () => {
       },
       mergePolicy: { value: 'never_auto', source: 'repository' },
       reviewRerunOnBaseChange: { value: 'if_diff_changed', source: 'recipe' },
+      setup: { value: null, source: 'repository' },
     });
 
     expect(
@@ -171,6 +173,7 @@ describe('factory job create / job show', () => {
       },
       mergePolicy: { value: 'never_auto', source: 'repository' },
       reviewRerunOnBaseChange: { value: 'if_diff_changed', source: 'recipe' },
+      setup: { value: null, source: 'repository' },
     });
   });
 

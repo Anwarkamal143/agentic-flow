@@ -420,6 +420,46 @@ export const verificationRuns = sqliteTable(
   (t) => [index('verification_runs_attempt').on(t.attemptId)],
 );
 
+/**
+ * One run of the Repository's setup command in a Worktree (ADR-0047), tied to
+ * the `(head_sha, base_sha)` it ran on and the dependency files' hash. A
+ * Worktree's setup runs again only when the latest one failed or that hash
+ * changed. Not Evidence: a setup that passes proves nothing about the work.
+ */
+export const setupRuns = sqliteTable(
+  'setup_runs',
+  {
+    id: text('id').primaryKey(),
+    attemptId: text('attempt_id')
+      .notNull()
+      .references(() => attempts.id),
+    worktreeId: text('worktree_id')
+      .notNull()
+      .references(() => worktrees.id),
+    command: text('command').notNull(),
+    /** `null`: it timed out or was killed by a signal. */
+    exitCode: integer('exit_code'),
+    timedOut: integer('timed_out', { mode: 'boolean' }).notNull(),
+    /** Exited 0 and left the Worktree as it found it (ADR-0047). */
+    passed: integer('passed', { mode: 'boolean' }).notNull(),
+    /** Why it did not pass; `null` when it passed. */
+    failure: text('failure'),
+    dependencyHash: text('dependency_hash').notNull(),
+    headSha: text('head_sha').notNull(),
+    baseSha: text('base_sha').notNull(),
+    startedAt: text('started_at').notNull(),
+    durationMs: integer('duration_ms').notNull(),
+    diskBytes: integer('disk_bytes'),
+    outputArtifactId: text('output_artifact_id')
+      .notNull()
+      .references(() => artifacts.id),
+  },
+  (t) => [
+    index('setup_runs_attempt').on(t.attemptId),
+    index('setup_runs_worktree').on(t.worktreeId),
+  ],
+);
+
 /** A recorded verdict, valid only for its `(head_sha, base_sha)`. */
 export const evidence = sqliteTable(
   'evidence',

@@ -113,6 +113,7 @@ export class RepositoryService {
         ...(input.requiredChecks === undefined || input.requiredChecks.length === 0
           ? {}
           : { requiredChecks: input.requiredChecks }),
+        ...(input.setup === undefined ? {} : { setup: input.setup }),
         confirmedBy: ACTOR,
         confirmedAt: now,
       });
@@ -165,6 +166,8 @@ export class RepositoryService {
             github: github === null ? null : formatCoordinates(github),
             mergePolicy,
             mergeMethod,
+            // The command itself: a human set it, and it is shown before confirming.
+            setup: profile.setup ?? null,
           },
         });
         return proj;

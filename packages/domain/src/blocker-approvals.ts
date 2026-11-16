@@ -130,12 +130,22 @@ const NEW_PR: ApprovalOption = {
   agentProposed: false,
 };
 
+const RETRY_SETUP: ApprovalOption = {
+  id: 'retry_now',
+  label: 'Retry the setup',
+  description:
+    "Start a Retry in the preserved Worktree: the Repository's setup command runs again first, then the Attempt goes on. Fix what made it fail first (the network, the registry, the lockfile). A Retry counts against maxRetries; with none left it is raised by one, written to the audit log.",
+  agentProposed: false,
+};
+
 /** The Blocker reasons that open a Blocker Approval, with their options (§8.1). */
 const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   rework_cap_reached: [GRANT, REPLAN, CANCEL_JOB],
   question_cap_reached: [GRANT, REPLAN, CANCEL_JOB],
   replan_cap_reached: [GRANT_REPLAN, CANCEL_JOB],
   recovery_uncertain: [RETRY_NOW, CANCEL_JOB],
+  // The install failed, not the work: never an agent Rework (ADR-0047).
+  setup_failed: [RETRY_SETUP, CANCEL_JOB],
   retry_cap_reached: [RETRY_NOW, CANCEL_JOB],
   base_merge_conflict: [REPLAN, CANCEL_JOB],
   spec_finding_unresolved: [REWORK, REPLAN_UNDER_SPEC, CANCEL_JOB],
@@ -176,6 +186,7 @@ const TITLES: Partial<Record<BlockerReason, string>> = {
   rework_cap_reached: 'reached its Rework cap',
   question_cap_reached: 'reached its question cap',
   recovery_uncertain: 'stopped: recovery is uncertain',
+  setup_failed: 'stopped: its Worktree setup failed',
   retry_cap_reached: 'reached its Retry cap',
   replan_cap_reached: 'reached its Replan cap',
   base_merge_conflict: "can't start: its Dependency Base conflicts",

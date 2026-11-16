@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import {
   formatCoordinates,
   MergeMethodSchema,
+  SetupCommandSchema,
   MergePolicySchema,
   parseCoordinates,
   type RegisterRepositoryInput,
@@ -27,6 +28,11 @@ export interface RepoAddOptions {
   github: string | undefined;
   /** The Merge Gate's required checks (`--required-check`, repeatable); empty: every check. */
   requiredChecks: string[];
+  /**
+   * `--setup`: the command the factory runs in each Worktree before the
+   * Harness and verification (ADR-0047). Only ever from this flag.
+   */
+  setup: string | undefined;
   /** `--merge-policy` (default `never_auto`) and `--merge-method` (default `merge`); the runtime validates them. */
   mergePolicy: string | undefined;
   mergeMethod: string | undefined;
@@ -57,6 +63,13 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
   const mergeMethod = MergeMethodSchema.safeParse(opts.mergeMethod ?? 'merge');
   if (!mergeMethod.success) {
     process.stderr.write(`factory: --merge-method takes ${MergeMethodSchema.options.join(', ')}\n`);
+    return 2;
+  }
+  const setup = opts.setup === undefined ? undefined : SetupCommandSchema.safeParse(opts.setup);
+  if (setup !== undefined && !setup.success) {
+    process.stderr.write(
+      'factory: --setup takes one non-empty line of at most 1000 characters (for example --setup "npm ci")\n',
+    );
     return 2;
   }
   const github = opts.github === undefined ? undefined : parseCoordinates(opts.github);
@@ -94,6 +107,11 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
       `Commands${inspection.packageManager === null ? '' : ` (package manager: ${inspection.packageManager})`}:\n` +
       `  test:      ${label('test', opts.testCommand)}\n` +
       `  typecheck: ${label('typecheck', opts.typecheckCommand)}\n` +
+      `  setup:     ${
+        setup === undefined
+          ? 'none (the factory installs nothing in a Worktree; set one with --setup)'
+          : `${setup.data} (from --setup; run by the factory in each Worktree before the Harness and verification, lifecycle scripts off, the shared cache; on this machine, with network access)`
+      }\n` +
       `Merge Gate checks: ${
         opts.requiredChecks.length === 0
           ? 'every check on the PR head (none required by name)'
@@ -122,6 +140,7 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
     commands,
     ...(opts.github === undefined ? {} : { github: opts.github.trim() }),
     ...(opts.requiredChecks.length === 0 ? {} : { requiredChecks: opts.requiredChecks }),
+    ...(setup === undefined ? {} : { setup: setup.data }),
     mergePolicy: mergePolicy.data,
     mergeMethod: mergeMethod.data,
   };

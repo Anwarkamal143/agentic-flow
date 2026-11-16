@@ -29,9 +29,11 @@ Commands:
   repo add <path> [--project <name>] [--test-command <cmd>]
            [--typecheck-command <cmd>] [--github <owner/name>]
            [--required-check <name>]... [--merge-policy never_auto|human_approval]
-           [--merge-method merge|squash|rebase] [--yes]
+           [--merge-method merge|squash|rebase] [--setup <cmd>] [--yes]
                                   Register a Repository: make its Factory Clone and save
-                                  its confirmed commands (your checkout is never modified)
+                                  its confirmed commands (your checkout is never modified);
+                                  --setup runs in each Worktree before the Harness and
+                                  verification (for example "npm ci")
   job create --repo <id|name> --title <text> [--description <text>]
              [--per-repository <n>] [--per-job <n>] [--merge-policy <policy>]
                                   Create a Job for a registered Repository; the
@@ -116,6 +118,7 @@ async function main(argv: string[]): Promise<number> {
           'required-check': { type: 'string', multiple: true },
           'merge-policy': { type: 'string' },
           'merge-method': { type: 'string' },
+          setup: { type: 'string' },
           yes: { type: 'boolean', short: 'y' },
         },
       });
@@ -133,6 +136,7 @@ async function main(argv: string[]): Promise<number> {
         requiredChecks: values['required-check'] ?? [],
         mergePolicy: values['merge-policy'],
         mergeMethod: values['merge-method'],
+        setup: values.setup,
         yes: values.yes === true,
       });
     }

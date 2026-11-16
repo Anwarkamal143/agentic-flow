@@ -388,6 +388,11 @@ function writeAttempts(
         `    dropped:   ${c.sha.slice(0, 12)} by ${oneLine(c.author)}: ${oneLine(c.subject)} (an adopted rewrite dropped it)`,
       );
     }
+    for (const r of a.setupRuns) {
+      lines.push(
+        `    setup:     ${oneLine(r.command)}  ${r.passed ? 'passed' : `FAILED (${oneLine(r.failure ?? '')})`}, ${(r.durationMs / 1000).toFixed(1)} s, Worktree ${r.diskBytes === null ? 'size unknown' : `${(r.diskBytes / 2 ** 20).toFixed(1)} MiB`}, on ${r.headSha.slice(0, 12)} (log ${r.outputArtifactId})`,
+      );
+    }
     for (const v of a.protocolViolations) lines.push(`    violation: [${v.rule}] ${v.message}`);
     for (const f of a.findings.filter((x) => x.source === 'gate')) {
       lines.push(
