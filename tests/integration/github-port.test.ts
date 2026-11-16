@@ -135,14 +135,32 @@ describe('GitHub port: pull requests', () => {
     const branch = await port.getBranchHead(REPO, HEAD);
     expect(branch.ok && !branch.notModified && branch.value).toBe(headSha);
 
-    // Re-running a check queues it again.
-    const runId = runs.ok && !runs.notModified ? runs.value[0]?.id : undefined;
-    expect((await port.rerunCheckRun(REPO, runId ?? -1)).ok).toBe(true);
+    // An Actions check run is a job of a workflow run, in its check suite (#77).
+    const [run] = runs.ok && !runs.notModified ? runs.value : [];
+    expect(run).toMatchObject({ app: 'github-actions' });
+    const workflows = await port.listWorkflowRuns(REPO, headSha);
+    expect(workflows.ok && workflows.value).toEqual([
+      expect.objectContaining({
+        name: 'ci',
+        status: 'completed',
+        conclusion: 'failure',
+        checkSuiteId: run?.checkSuiteId,
+        runAttempt: 1,
+      }),
+    ]);
+    const workflowId = workflows.ok ? (workflows.value[0]?.id ?? -1) : -1;
+
+    // Re-running its failed jobs queues them again as a new attempt, with a new check run.
+    expect(await port.rerunFailedJobs(REPO, workflowId)).toEqual({ ok: true, value: null });
     const rerun = await port.listCheckRuns(REPO, headSha);
-    expect(rerun.ok && !rerun.notModified && rerun.value[0]).toMatchObject({
-      status: 'queued',
-      conclusion: null,
-    });
+    const newest = rerun.ok && !rerun.notModified ? rerun.value.at(-1) : undefined;
+    expect(newest).toMatchObject({ name: 'ci/test', status: 'queued', conclusion: null });
+    expect(newest?.id).not.toBe(run?.id);
+    const again = await port.listWorkflowRuns(REPO, headSha);
+    expect(again.ok && again.value[0]).toMatchObject({ status: 'in_progress', runAttempt: 2 });
+    // A running workflow can't be re-run: GitHub refuses it.
+    const refused = await port.rerunFailedJobs(REPO, workflowId);
+    expect(refused.ok || refused.failure).toMatchObject({ kind: 'refused', status: 403 });
   });
 
   it('merges a PR with a merge commit that keeps the head in the base history', async () => {

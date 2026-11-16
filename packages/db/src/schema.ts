@@ -706,6 +706,8 @@ export const prChecks = sqliteTable(
     url: text('url'),
     /** A check run's output summary (or title), a status's description: CI text, redacted (#61). */
     summary: text('summary'),
+    /** The slug of the app that made a check run (`github-actions`), or null (a status; a row before #77). */
+    app: text('app'),
     /** When the poller recorded this value. */
     observedAt: text('observed_at').notNull(),
   },

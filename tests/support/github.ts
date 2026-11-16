@@ -72,6 +72,14 @@ export interface CheckRunInput {
   detailsUrl?: string | null;
   /** Served as `output.summary`. */
   summary?: string | null;
+  /**
+   * The slug of the app that made it (`app.slug`): `github-actions` (the
+   * default) makes it a job of an Actions workflow run, re-run through the
+   * Actions API; any other app's run can't be re-run with the factory's token.
+   */
+  app?: string;
+  /** The Actions workflow run it is a job of, by name (default `ci`); only for `github-actions`. */
+  workflow?: string;
 }
 
 export interface StatusInput {
@@ -127,14 +135,53 @@ interface CheckRun {
   detailsUrl: string | null;
   summary: string | null;
   sha: string;
+  app: string;
+  checkSuiteId: number;
+}
+
+/** An Actions workflow run on a head: its jobs are the check runs of its check suite. */
+interface WorkflowRun {
+  id: number;
+  name: string;
+  sha: string;
+  checkSuiteId: number;
+  runAttempt: number;
 }
 
 interface Repo {
   remote: FakeRemote;
   pulls: PullRequest[];
   checkRuns: CheckRun[];
+  workflowRuns: WorkflowRun[];
+  /** The check suite of each other app on a head (`<sha>:<app>`). */
+  appSuites: Map<string, number>;
   statuses: (StatusInput & { id: number; sha: string; createdAt: string })[];
   refusedMethods: Set<MergeMethod>;
+}
+
+/** The newest check run of each job (name) of a workflow run. */
+function newestJobs(repo: Repo, run: WorkflowRun): CheckRun[] {
+  const newest = new Map<string, CheckRun>();
+  for (const c of repo.checkRuns) {
+    if (c.checkSuiteId !== run.checkSuiteId) continue;
+    const seen = newest.get(c.name);
+    if (seen === undefined || c.id > seen.id) newest.set(c.name, c);
+  }
+  return [...newest.values()];
+}
+
+/** A workflow run is completed once each of its jobs is; it failed when one did. */
+function workflowState(
+  repo: Repo,
+  run: WorkflowRun,
+): { status: string; conclusion: string | null } {
+  const jobs = newestJobs(repo, run);
+  if (jobs.some((j) => j.status !== 'completed'))
+    return { status: 'in_progress', conclusion: null };
+  const failed = jobs.some(
+    (j) => j.conclusion !== 'success' && j.conclusion !== 'skipped' && j.conclusion !== 'neutral',
+  );
+  return { status: 'completed', conclusion: failed ? 'failure' : 'success' };
 }
 
 export interface FakeGitHub {
@@ -516,6 +563,8 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
               conclusion: c.conclusion,
               details_url: c.detailsUrl,
               output: { title: null, summary: c.summary },
+              app: { slug: c.app },
+              check_suite: { id: c.checkSuiteId },
             })),
           },
         };
@@ -535,11 +584,43 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
           .reverse(),
       };
     }
-    if ((r = /^\/check-runs\/(\d+)\/rerequest$/.exec(rest)) !== null && method === 'POST') {
-      const run = repo.checkRuns.find((c) => c.id === Number(r?.[1]));
+    if (rest === '/actions/runs' && method === 'GET') {
+      const sha = query.get('head_sha');
+      const runs = repo.workflowRuns.filter((w) => sha === null || w.sha === sha);
+      return {
+        status: 200,
+        body: {
+          total_count: runs.length,
+          workflow_runs: runs.map((w) => ({
+            id: w.id,
+            name: w.name,
+            head_sha: w.sha,
+            check_suite_id: w.checkSuiteId,
+            run_attempt: w.runAttempt,
+            ...workflowState(repo, w),
+          })),
+        },
+      };
+    }
+    if (
+      (r = /^\/actions\/runs\/(\d+)\/rerun-failed-jobs$/.exec(rest)) !== null &&
+      method === 'POST'
+    ) {
+      const run = repo.workflowRuns.find((w) => w.id === Number(r?.[1]));
       if (run === undefined) return notFound;
-      run.status = 'queued';
-      run.conclusion = null;
+      if (workflowState(repo, run).status !== 'completed')
+        return { status: 403, body: { message: 'This workflow is already running' } };
+      const failedJobs = newestJobs(repo, run).filter(
+        (c) =>
+          c.conclusion !== 'success' && c.conclusion !== 'skipped' && c.conclusion !== 'neutral',
+      );
+      if (failedJobs.length === 0)
+        return { status: 403, body: { message: 'This workflow run has no failed jobs' } };
+      // As GitHub does: a new attempt, each failed job a new check run, queued.
+      run.runAttempt += 1;
+      for (const job of failedJobs) {
+        repo.checkRuns.push({ ...job, id: nextId++, status: 'queued', conclusion: null });
+      }
       return { status: 201, body: {} };
     }
     if ((r = /^\/branches\/(.+)$/.exec(rest)) !== null && method === 'GET') {
@@ -731,6 +812,8 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
         remote,
         pulls: [],
         checkRuns: [],
+        workflowRuns: [],
+        appSuites: new Map(),
         statuses: [],
         refusedMethods: new Set(),
       });
@@ -759,16 +842,34 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
       })),
     setCheckRun(fullName, sha, run) {
       const repo = repoOf(fullName);
-      const existing = repo.checkRuns.find((c) => c.sha === sha && c.name === run.name);
+      // The newest run of the name: after a re-run, that is the re-run's.
+      const existing = repo.checkRuns.findLast((c) => c.sha === sha && c.name === run.name);
       const values = {
         status: run.status,
         conclusion: run.conclusion ?? null,
         detailsUrl: run.detailsUrl ?? null,
         summary: run.summary ?? null,
       };
-      if (existing === undefined)
-        repo.checkRuns.push({ id: nextId++, name: run.name, sha, ...values });
-      else Object.assign(existing, values);
+      if (existing !== undefined) {
+        Object.assign(existing, values);
+        return;
+      }
+      const app = run.app ?? 'github-actions';
+      let checkSuiteId: number;
+      if (app === 'github-actions') {
+        const name = run.workflow ?? 'ci';
+        let workflow = repo.workflowRuns.find((w) => w.sha === sha && w.name === name);
+        if (workflow === undefined) {
+          workflow = { id: nextId++, name, sha, checkSuiteId: nextId++, runAttempt: 1 };
+          repo.workflowRuns.push(workflow);
+        }
+        checkSuiteId = workflow.checkSuiteId;
+      } else {
+        const key = `${sha}:${app}`;
+        checkSuiteId = repo.appSuites.get(key) ?? nextId++;
+        repo.appSuites.set(key, checkSuiteId);
+      }
+      repo.checkRuns.push({ id: nextId++, name: run.name, sha, app, checkSuiteId, ...values });
     },
     setStatus(fullName, sha, status) {
       repoOf(fullName).statuses.push({

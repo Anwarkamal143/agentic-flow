@@ -222,11 +222,13 @@ pull_requests(id, job_id, repository_id, task_id, owner, name, number, url, stat
          -- adopted: recovery found it on the head branch carrying the Job's marker
          -- last_polled_at is the poller's only write without an event (ADR-0037)
 pr_checks(id, pull_request_id, head_sha, source, name, status, conclusion, outcome, url,
-          summary?, observed_at)                                             -- [Phase C, #58]
+          summary?, app?, observed_at)                                       -- [Phase C, #58]
          -- one per (pull request, head, source, name): the newest check run of a name or
          --   status of a context; source: check_run | status;
          --   outcome: pending | success | neutral | skipped | failure
          --   summary: output.summary (or title) / a status's description; redacted (#61)
+         --   app: the slug of the app that made a check run (github-actions); null for a
+         --   status (#77: rerun_checks re-runs only Actions jobs)
 pr_feedback(id, job_id, pull_request_id, source, external_id, author, review_state?, path?,
             url?, kind, body, created_at, observed_at, attempt_id?)          -- [Phase C, #60]
          -- one per (pull request, source, external id); source: review | issue_comment |
@@ -322,7 +324,7 @@ Every human-kind Blocker opens an Inbox Approval (kind `blocker`) with fixed opt
 | `replan_cap_reached` | grant +1 replan, cancel the Job |
 | `recovery_uncertain`, `retry_cap_reached` | retry now, cancel the Job |
 | `base_merge_conflict` | replan, cancel the Job. [Phase C] also covers a Task Branch conflicting while merging into the Integration Branch, and a base merge-in conflict; the conflict details become the replan feedback |
-| `ci_failed` [Phase C] | rework (the check's name, summary and link as untrusted context), re-run the checks, cancel the Job. Held by `merge_approval`; raised and cleared by the poller from the `pr_checks` rows (ADR-0040) |
+| `ci_failed` [Phase C] | rework (the check's name, summary and link as untrusted context), re-run the checks (failed GitHub Actions jobs, through the Actions API; another app's check run or a commit status is named and not re-run), cancel the Job. Held by `merge_approval`; raised and cleared by the poller from the `pr_checks` rows (ADR-0040) |
 | `merge_method_refused` [Phase C] | retry the merge (after the repository's settings changed), cancel the Job |
 | `foreign_push_out_of_scope` [Phase C] | rework on top of the foreign commits (the path-scope Findings and the comment as guidance), cancel the Job. A foreign push to the Integration Branch failed the path-scope Gate (ADR-0042) |
 | `foreign_push_rewrite` [Phase C] | adopt the rewrite (audited; verified and reviewed like any foreign push, the dropped approved commits listed in the PR body and the Delivery Report), cancel the Job. No "restore our head": it would overwrite the foreign push (ADR-0042) |
