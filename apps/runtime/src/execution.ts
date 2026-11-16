@@ -59,6 +59,10 @@ import {
   integrationReviewSkip,
   type IntegrationReviewSkip,
   type Redactor,
+  EffectiveConfigSchema,
+  setupEnvironment,
+  setupNeeded,
+  type SetupLogContent,
 } from '@factory/domain';
 import type { GitHubPort } from '@factory/github';
 import {
@@ -150,6 +154,7 @@ import {
   passedAttemptOf,
 } from './base-change.js';
 import { blockOnForeignRewrite } from './foreign-push.js';
+import { dependencyHashOf, diskUsageBytes, recordSetupRun, setupRunsOf } from './setup.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
   allocatePortBlock,
@@ -205,6 +210,8 @@ export interface TaskSchedulerOptions {
   reviewWallClockMs?: number;
   /** Where each process's spool directory goes (ADR-0012). */
   spoolRoot: string;
+  /** The package managers' shared cache, for the Worktree setup step (ADR-0047). */
+  cacheDir: string;
   /** What recovery found to carry on with, before any new claim (ADR-0012). */
   recovered?: readonly Resumption[];
   /**
@@ -264,6 +271,13 @@ interface AttemptContext {
 
 type TaskRow = typeof schema.tasks.$inferSelect;
 
+/** What the setup step found (ADR-0047). */
+type SetupStep = { kind: 'ready' } | { kind: 'stopped' } | { kind: 'failed'; detail: string };
+
+function setupFailedOutcome(detail: string): Outcome {
+  return { state: 'failed', exitReason: 'setup_failed', detail };
+}
+
 /** What the factory read from git about an Attempt (as stored on its row). */
 interface GitFacts {
   headSha: string;
@@ -312,7 +326,7 @@ interface RunInput {
  * `startedAt`: ms since the epoch. `token`: the Harness's re-attach token.
  */
 const AttemptProcessSchema = z.object({
-  kind: z.enum(['harness', 'verification']),
+  kind: z.enum(['harness', 'verification', 'setup']),
   role: z.enum(['developer', 'reviewer']).optional(),
   run: z.number().int().optional(),
   spool: z.string(),
@@ -677,16 +691,18 @@ export class TaskScheduler {
     // Worktree, as a new merge Attempt: it is never handed to a Harness (ADR-0034).
     // So is a base merge Attempt, in the Worktree its merge-in already moved (ADR-0041).
     // So is a foreign push Attempt, in the Worktree already moved to the foreign head (ADR-0042).
+    // A failed setup is not a verdict on the work: its Retry is redone the same way (ADR-0047).
+    const setupFailed = previous?.exitReason === 'setup_failed';
     const remerge =
       previous !== undefined &&
       FACTORY_MADE.has(AttemptCauseSchema.parse(previous.cause)) &&
-      previous.state === 'interrupted';
+      (previous.state === 'interrupted' || setupFailed);
     const cause: AttemptCause =
       previous === undefined
         ? 'initial'
         : remerge
           ? AttemptCauseSchema.parse(previous.cause)
-          : previous.state === 'interrupted'
+          : previous.state === 'interrupted' || setupFailed
             ? 'retry'
             : previous.state === 'needs_decision'
               ? 'answer'
@@ -1512,57 +1528,64 @@ export class TaskScheduler {
         findings: scopeViolations.map((v) => scopeFinding(self, v)),
       };
     } else {
-      const verified = await this.verify(ctx);
-      if (verified === undefined) return; // stopped during verification
-      verificationRuns = verified;
-      const at = { headSha, baseSha };
-      const problems: [rule: string, problem: string][] = [
-        ...verificationProblems(
-          at,
-          verificationRuns.map((r) => ({ ...r, ...at })),
-        ).map((p) => ['verification', p] as [string, string]),
-        ...(await worktreeProblems(path, headSha, 'verification')).map(
-          (p) => ['worktree.clean', p] as [string, string],
-        ),
-        ...commandCriteriaFailures(
-          verificationRuns,
-          criteriaCoveredBy(this.opts.db, ctx.job.id, definition.acceptance),
-        ).map((p) => ['criteria', p] as [string, string]),
-      ];
-      decision =
-        problems.length === 0 ? await this.integrationReviewDecision(ctx, headSha) : undefined;
-      // A merge Attempt redone after one interrupted in its Integration Review is reviewed
-      // again: an Integration Review once started is never skipped (ADR-0035).
-      const reviewing = stageIdOfTask(this.opts.db, ctx.task.id) === 'integration_review';
-      if (problems.length === 0 && (reviewing || (decision !== undefined && !decision.skip))) {
-        // Every Gate passed: the Integration Review judges the combined change (ADR-0035).
-        this.toReview({
-          jobId: ctx.job.id,
-          taskId: ctx.task.id,
-          attemptId,
-          baseSha,
-          inspection: facts,
-          resultContent: undefined,
-          verificationRuns,
-          usage: null,
-          ...(decision === undefined ? {} : { enterReview: decision }),
-        });
-        await this.reviewStep(ctx);
-        return;
+      // The Integration Branch is verified on installed dependencies too (ADR-0047).
+      const setup = await this.setup(ctx);
+      if (setup.kind === 'stopped') return;
+      if (setup.kind === 'failed') {
+        outcome = setupFailedOutcome(setup.detail);
+      } else {
+        const verified = await this.verify(ctx);
+        if (verified === undefined) return; // stopped during verification
+        verificationRuns = verified;
+        const at = { headSha, baseSha };
+        const problems: [rule: string, problem: string][] = [
+          ...verificationProblems(
+            at,
+            verificationRuns.map((r) => ({ ...r, ...at })),
+          ).map((p) => ['verification', p] as [string, string]),
+          ...(await worktreeProblems(path, headSha, 'verification')).map(
+            (p) => ['worktree.clean', p] as [string, string],
+          ),
+          ...commandCriteriaFailures(
+            verificationRuns,
+            criteriaCoveredBy(this.opts.db, ctx.job.id, definition.acceptance),
+          ).map((p) => ['criteria', p] as [string, string]),
+        ];
+        decision =
+          problems.length === 0 ? await this.integrationReviewDecision(ctx, headSha) : undefined;
+        // A merge Attempt redone after one interrupted in its Integration Review is reviewed
+        // again: an Integration Review once started is never skipped (ADR-0035).
+        const reviewing = stageIdOfTask(this.opts.db, ctx.task.id) === 'integration_review';
+        if (problems.length === 0 && (reviewing || (decision !== undefined && !decision.skip))) {
+          // Every Gate passed: the Integration Review judges the combined change (ADR-0035).
+          this.toReview({
+            jobId: ctx.job.id,
+            taskId: ctx.task.id,
+            attemptId,
+            baseSha,
+            inspection: facts,
+            resultContent: undefined,
+            verificationRuns,
+            usage: null,
+            ...(decision === undefined ? {} : { enterReview: decision }),
+          });
+          await this.reviewStep(ctx);
+          return;
+        }
+        outcome =
+          problems.length === 0
+            ? {
+                state: 'passed',
+                exitReason: 'completed',
+                detail: `the Integration Branch's verification passed on ${headSha}${decision?.skip === true ? `; the Integration Review is skipped: ${decision.reason}` : ''}`,
+              }
+            : {
+                state: 'failed',
+                exitReason: 'gates_failed',
+                detail: problems.map(([, p]) => p).join('; '),
+                findings: problems.map(([rule, p]) => gateFinding(self, rule, p)),
+              };
       }
-      outcome =
-        problems.length === 0
-          ? {
-              state: 'passed',
-              exitReason: 'completed',
-              detail: `the Integration Branch's verification passed on ${headSha}${decision?.skip === true ? `; the Integration Review is skipped: ${decision.reason}` : ''}`,
-            }
-          : {
-              state: 'failed',
-              exitReason: 'gates_failed',
-              detail: problems.map(([, p]) => p).join('; '),
-              findings: problems.map(([rule, p]) => gateFinding(self, rule, p)),
-            };
     }
     this.finish({
       jobId: ctx.job.id,
@@ -1713,6 +1736,15 @@ export class TaskScheduler {
     from?: { run: number; reattached: HarnessRun | undefined },
   ): Promise<void> {
     const { path } = ctx;
+    if (from === undefined) {
+      // The developer works on installed dependencies, as verification does (ADR-0047).
+      const setup = await this.setup(ctx);
+      if (setup.kind === 'stopped') return;
+      if (setup.kind === 'failed') {
+        await this.failSetup(ctx, setup.detail);
+        return;
+      }
+    }
     let result: HarnessRawResult | undefined;
     let rejected: RuleIssue[] | undefined;
     for (let run = from?.run ?? 1; run <= DEVELOPER_RUNS; run++) {
@@ -1823,60 +1855,67 @@ export class TaskScheduler {
         findings: scopeViolations.map((v) => scopeFinding(self, v)),
       };
     } else {
-      const verified = await this.verify(ctx);
-      if (verified === undefined) return; // stopped during verification
-      verificationRuns = verified;
-      const at = { headSha: inspection.headSha, baseSha };
-      const problems: [rule: string, problem: string][] = [
-        ...verificationProblems(
-          at,
-          verificationRuns.map((r) => ({ ...r, ...at })),
-        ).map((p) => ['verification', p] as [string, string]),
-        ...(await worktreeProblems(path, inspection.headSha, 'verification')).map(
-          (p) => ['worktree.clean', p] as [string, string],
-        ),
-        ...commandCriteriaFailures(
-          verificationRuns,
-          criteriaCoveredBy(this.opts.db, ctx.job.id, definition.acceptance),
-        ).map((p) => ['criteria', p] as [string, string]),
-      ];
-      // The Integration Task's Rework in `integration` enters its Integration Review (ADR-0035).
-      const decision =
-        problems.length === 0
-          ? await this.integrationReviewDecision(ctx, inspection.headSha)
-          : undefined;
-      if (problems.length === 0 && decision?.skip !== true) {
-        // Every factory Gate passed: the independent review decides the rest.
-        this.toReview({
-          jobId: ctx.job.id,
-          taskId: ctx.task.id,
-          attemptId,
-          baseSha,
-          inspection,
-          resultContent,
-          verificationRuns,
-          usage,
-          ...(decision === undefined ? {} : { enterReview: decision }),
-        });
-        // The reviewer never sees the implementer's claims (they are stored as an Artifact).
-        rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
-        await this.reviewStep(ctx);
-        return;
+      // Verification runs on installed dependencies: set up first when they changed (ADR-0047).
+      const setup = await this.setup(ctx);
+      if (setup.kind === 'stopped') return;
+      if (setup.kind === 'failed') {
+        outcome = setupFailedOutcome(setup.detail);
+      } else {
+        const verified = await this.verify(ctx);
+        if (verified === undefined) return; // stopped during verification
+        verificationRuns = verified;
+        const at = { headSha: inspection.headSha, baseSha };
+        const problems: [rule: string, problem: string][] = [
+          ...verificationProblems(
+            at,
+            verificationRuns.map((r) => ({ ...r, ...at })),
+          ).map((p) => ['verification', p] as [string, string]),
+          ...(await worktreeProblems(path, inspection.headSha, 'verification')).map(
+            (p) => ['worktree.clean', p] as [string, string],
+          ),
+          ...commandCriteriaFailures(
+            verificationRuns,
+            criteriaCoveredBy(this.opts.db, ctx.job.id, definition.acceptance),
+          ).map((p) => ['criteria', p] as [string, string]),
+        ];
+        // The Integration Task's Rework in `integration` enters its Integration Review (ADR-0035).
+        const decision =
+          problems.length === 0
+            ? await this.integrationReviewDecision(ctx, inspection.headSha)
+            : undefined;
+        if (problems.length === 0 && decision?.skip !== true) {
+          // Every factory Gate passed: the independent review decides the rest.
+          this.toReview({
+            jobId: ctx.job.id,
+            taskId: ctx.task.id,
+            attemptId,
+            baseSha,
+            inspection,
+            resultContent,
+            verificationRuns,
+            usage,
+            ...(decision === undefined ? {} : { enterReview: decision }),
+          });
+          // The reviewer never sees the implementer's claims (they are stored as an Artifact).
+          rmSync(join(path, dirname(RESULT_FILE)), { recursive: true, force: true });
+          await this.reviewStep(ctx);
+          return;
+        }
+        outcome =
+          decision?.skip === true
+            ? {
+                state: 'passed',
+                exitReason: 'completed',
+                detail: `every Gate passed on the Integration Branch; the Integration Review is skipped: ${decision.reason}`,
+              }
+            : {
+                state: 'failed',
+                exitReason: 'gates_failed',
+                detail: problems.map(([, p]) => p).join('; '),
+                findings: problems.map(([rule, p]) => gateFinding(self, rule, p)),
+              };
+        if (decision?.skip === true) skip = decision;
       }
-      outcome =
-        decision?.skip === true
-          ? {
-              state: 'passed',
-              exitReason: 'completed',
-              detail: `every Gate passed on the Integration Branch; the Integration Review is skipped: ${decision.reason}`,
-            }
-          : {
-              state: 'failed',
-              exitReason: 'gates_failed',
-              detail: problems.map(([, p]) => p).join('; '),
-              findings: problems.map(([rule, p]) => gateFinding(self, rule, p)),
-            };
-      if (decision?.skip === true) skip = decision;
     }
 
     this.finish({
@@ -2324,6 +2363,131 @@ export class TaskScheduler {
   }
 
   /**
+   * The Repository's setup command in the Worktree (ADR-0047), when the Job
+   * has one and the Worktree needs it (`setupNeeded`: none passed yet, or the
+   * dependency files changed since). Run by the factory under the guardrail,
+   * with the shared cache and lifecycle scripts off, then recorded with its
+   * redacted log, the head and base it ran on and the Worktree's disk usage.
+   * It fails when the command does not exit 0 or leaves the Worktree changed.
+   */
+  private async setup(ctx: AttemptContext): Promise<SetupStep> {
+    const command = EffectiveConfigSchema.parse(JSON.parse(ctx.job.configSnapshotJson)).setup.value;
+    if (command === null) return { kind: 'ready' };
+    const dependencyHash = dependencyHashOf(ctx.path);
+    const runs = setupRunsOf(this.opts.db, ctx.worktreeId);
+    if (!setupNeeded(runs, dependencyHash)) return { kind: 'ready' };
+    if (await this.stopped(ctx)) return { kind: 'stopped' };
+    const headSha = await resolveCommit(ctx.path, 'HEAD');
+    if (headSha === undefined) throw new Error(`the Worktree ${ctx.path} has no HEAD`);
+    mkdirSync(this.opts.cacheDir, { recursive: true, mode: 0o700 });
+    const startedAt = new Date().toISOString();
+    const spool = this.spoolOf(ctx.attemptId, `setup-${String(runs.length + 1)}`);
+    rmSync(spool, { recursive: true, force: true });
+    this.recordProcess(this.opts.db, ctx.attemptId, {
+      kind: 'setup',
+      spool,
+      startedAt: Date.now(),
+      wallClockMs: this.verifyTimeoutMs,
+    });
+    const proc = spawnGuarded({
+      command: 'sh',
+      args: ['-c', command],
+      cwd: ctx.path,
+      env: setupEnvironment(ctx.env, this.opts.cacheDir),
+      timeoutMs: this.verifyTimeoutMs,
+      spool,
+    });
+    ctx.slot.proc = proc;
+    const exit = await proc.exit;
+    ctx.slot.proc = undefined;
+    this.recordProcess(this.opts.db, ctx.attemptId, undefined);
+    rmSync(spool, { recursive: true, force: true });
+    if (await this.stopped(ctx)) return { kind: 'stopped' };
+    const exitCode = exit.timedOut ? null : exit.code;
+    const changed = await uncommittedPaths(ctx.path);
+    const moved = (await resolveCommit(ctx.path, 'HEAD')) !== headSha;
+    const diskBytes = await diskUsageBytes(ctx.path);
+    const content = this.opts.artifacts.writeContent({
+      source: 'setup',
+      command,
+      exitCode,
+      timedOut: exit.timedOut,
+      truncated: exit.truncated,
+      output: exit.output,
+    } satisfies SetupLogContent);
+    // A setup that left changes is recorded as failed: the Worktree no longer matches its head.
+    const failed =
+      exitCode !== 0
+        ? `the setup command \`${command}\` ${exit.timedOut ? `timed out after ${String(this.verifyTimeoutMs)} ms` : exitCode === null ? 'was killed by a signal' : `exited ${String(exitCode)}`}`
+        : moved
+          ? `the setup command \`${command}\` moved HEAD`
+          : changed.length > 0
+            ? `the setup command \`${command}\` changed the Worktree (${changed.slice(0, 10).join(', ')}); it must leave git status clean (install into ignored paths, for example node_modules, and write no lockfile)`
+            : undefined;
+    changeJob(
+      this.opts.db,
+      { jobId: ctx.job.id, expectedVersion: 'current', actor: ACTOR },
+      (tx) => {
+        recordSetupRun(
+          tx,
+          this.opts.artifacts,
+          {
+            jobId: ctx.job.id,
+            taskId: ctx.task.id,
+            attemptId: ctx.attemptId,
+            worktreeId: ctx.worktreeId,
+            command,
+            exitCode,
+            timedOut: exit.timedOut,
+            failure: failed,
+            dependencyHash,
+            headSha,
+            baseSha: ctx.baseSha,
+            startedAt,
+            durationMs: exit.durationMs,
+            diskBytes,
+            content,
+          },
+          ACTOR,
+        );
+      },
+    );
+    this.opts.onCommit();
+    return failed === undefined ? { kind: 'ready' } : { kind: 'failed', detail: failed };
+  }
+
+  /**
+   * Ends an Attempt whose setup failed before its Harness Run (ADR-0047), in
+   * one transaction from `running`: no Harness ran and no Gate runs, and the
+   * Task waits on the human Blocker `setup_failed`. The Worktree is read from
+   * git as it is: nothing the setup left is committed (no WIP commit).
+   */
+  private async failSetup(ctx: AttemptContext, detail: string): Promise<void> {
+    const headSha = await resolveCommit(ctx.path, 'HEAD');
+    if (headSha === undefined) throw new Error(`the Worktree ${ctx.path} has no HEAD`);
+    const inspection: Inspection = {
+      headSha,
+      commits: (await commitsBetween(ctx.path, ctx.baseSha, headSha)).map((c) => c.sha),
+      wipCommit: null,
+      violations: [],
+      result: { kind: 'missing' },
+    };
+    this.finish({
+      fromRunning: true,
+      jobId: ctx.job.id,
+      taskId: ctx.task.id,
+      attemptId: ctx.attemptId,
+      worktreeId: ctx.worktreeId,
+      baseSha: ctx.baseSha,
+      inspection,
+      resultContent: undefined,
+      verificationRuns: [],
+      outcome: setupFailedOutcome(detail),
+      usage: null,
+    });
+  }
+
+  /**
    * Runs every verification command in the Worktree, in order, under the
    * guardrail, each recorded on the Attempt while it runs. `undefined` when
    * the work stopped (shutdown or cancellation).
@@ -2398,11 +2562,23 @@ export class TaskScheduler {
     usage: Usage | null;
     /** The Integration Task passed its Gates in `integration`: the skip-or-review decision to enter its Integration Review with (ADR-0035). */
     enterReview?: IntegrationReviewSkip;
+    /** The Attempt is still `running` (its setup failed before the Harness Run): it passes `verifying` in the same transaction. */
+    fromRunning?: boolean;
   }): void {
     changeJob(
       this.opts.db,
       { jobId: input.jobId, expectedVersion: 'current', actor: ACTOR },
       (tx, state, step) => {
+        if (input.fromRunning === true) {
+          const op = { jobId: input.jobId, actor: ACTOR };
+          stepAttempt(tx, op, input.attemptId, 'running', {
+            state: 'verifying',
+            developerExitJson: null,
+          });
+          stepTask(tx, op, requireTask(tx, input.taskId, 'running'), 'verifying', {
+            payload: { attemptId: input.attemptId },
+          });
+        }
         this.recordVerification(tx, input);
         if (input.enterReview !== undefined && input.outcome.state === 'passed') {
           enterIntegrationReview(tx, input.jobId, step, input.enterReview);

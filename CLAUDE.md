@@ -68,7 +68,7 @@ pnpm test:integration # only the integration tests (tests/integration); builds f
 pnpm test:real     # on demand only, never CI: [real] tests with the real Claude Code (needs `claude` logged in; minutes, uses your usage)
 pnpm format        # Prettier --write
 pnpm --filter @factory/db db:generate   # write a migration after editing packages/db/src/schema.ts
-pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | repo add [--github owner/name] [--required-check <name>]... [--merge-policy never_auto|human_approval] [--merge-method merge|squash|rebase] | job create [--merge-policy <stricter>]|list|show|cancel | job replan <job> --feedback <text> | logs | activity
+pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | repo add [--github owner/name] [--required-check <name>]... [--merge-policy never_auto|human_approval] [--merge-method merge|squash|rebase] [--setup <cmd>] | job create [--merge-policy <stricter>]|list|show|cancel | job replan <job> --feedback <text> | logs | activity
                    #   | plan show <job> [--raw] | plan edit <job> --file <plan.json>
                    #   | plan request-changes <job> --feedback <text> | inbox [--all] | inbox show|defer|undefer <id> | inbox decide <id> <option> --expect-version <n>
                    #   | inbox answer <id> --answer [<q>=]<text>... | --file <answers.json> [--expect-version <n>]
@@ -86,7 +86,7 @@ Integration tests (`tests/integration/`, ADR-0025) open a real SQLite file with 
 built runtime exports from real child processes, such as two processes racing `claimNextTask` (B2). They may seed
 fixture rows directly. The tier is test-only: in production only `apps/runtime` writes the database (one writer).
 The tier also drives the built `@factory/github` port against the fake GitHub (`tests/support/github.ts`, ADR-0033)
-over real local HTTP, with no database.
+over real local HTTP, with no database, and the C7 sandbox client (`tests/support/sandbox.ts`, ADR-0046) the same way.
 
 ## 7. Questions for the human, before Phase A
 

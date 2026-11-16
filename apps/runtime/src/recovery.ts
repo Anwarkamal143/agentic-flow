@@ -92,6 +92,16 @@ export async function recoverTasks(opts: RecoveryOptions): Promise<Resumption[]>
     const worktree = await worktreeStatus(worktreeRow.path);
     const state = AttemptStateSchema.parse(attempt.state);
     if (state !== 'running' && state !== 'verifying' && state !== 'in_review') continue;
+    if (recorded?.kind === 'setup' && !cancelled && worktree !== 'unknown') {
+      // The factory's own setup was cut short (ADR-0047): no agent ran since, and an
+      // unfinished run is never recorded, so resuming the Attempt sets the Worktree up again.
+      // Not a Retry: the Harness was not interrupted.
+      await stopIfAlive(recorded.spool, recorded.startedAt);
+      opts.log(`recovery: Attempt ${attempt.id} (${state}): its setup was cut short; resume`);
+      takeOverLeases(db, opts.holder, task.id, attempt.id, worktreeRow.portBase);
+      resumptions.push({ kind: 'resume', from: 'verification', attemptId: attempt.id });
+      continue;
+    }
     const retriesUsed = db
       .select({ id: schema.attempts.id })
       .from(schema.attempts)

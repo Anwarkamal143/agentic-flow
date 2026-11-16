@@ -107,6 +107,11 @@ export const BlockerReasonSchema = z.enum([
   'replan_cap_reached',
   'base_merge_conflict',
   'spec_finding_unresolved',
+  /**
+   * The Repository's setup command failed in the Worktree, or left it changed
+   * (ADR-0047). Not a verdict on the work: a human retries or cancels.
+   */
+  'setup_failed',
   /** `merge_approval` waits for a human to merge the PR on GitHub (`never_auto`, #58). */
   'awaiting_merge',
   /** GitHub refused the Repository's merge method (`human_approval`, #59); held by the `merge` Stage. */
@@ -207,6 +212,19 @@ export function routeFailedAttempt(input: {
   /** Why the failed Attempt exists; a `foreign_push` out of scope waits for a human (ADR-0042). */
   cause?: AttemptCause;
 }): ReworkRoute {
+  // The install, not the work, failed: no agent Rework, a human decides (ADR-0047).
+  if (input.exitReason === 'setup_failed') {
+    return {
+      kind: 'blocked',
+      blocker: {
+        kind: 'human',
+        reason: 'setup_failed',
+        detail: "the Repository's setup command failed in the Worktree, or left it changed",
+        requiredAction:
+          'look at the setup log on the Attempt, fix the cause (the network, the registry, the lockfile), then decide the Blocker Approval in the Inbox: retry (the setup runs again first) or cancel the Job',
+      },
+    };
+  }
   if (!REWORKABLE.includes(input.exitReason)) return { kind: 'fail' };
   if (
     input.cause === 'foreign_push' &&

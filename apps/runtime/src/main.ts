@@ -283,6 +283,7 @@ const tasks = new TaskScheduler({
   workspaceRoot: config.workspaceRoot,
   runtimeEnv: process.env,
   spoolRoot: home.spoolDir,
+  cacheDir: home.cacheDir,
   recovered,
   ...(crashAt === undefined ? {} : { crashAt }),
   github: githubPort,

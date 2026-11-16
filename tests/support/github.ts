@@ -142,8 +142,8 @@ export interface FakeGitHub {
   readonly url: string;
   /** Every API request received, in order (faults included). */
   readonly requests: RecordedRequest[];
-  /** A repository on the fake, its bare remote seeded from the checkout at `seed`. */
-  addRepository(fullName: string, seed: string): FakeRemote;
+  /** A repository on the fake, its bare remote seeded from the checkout at `seed` (empty without one). */
+  addRepository(fullName: string, seed?: string): FakeRemote;
   /** Git config (as environment) that makes each repository's github.com URL reach its bare remote. */
   gitEnv(): Record<string, string>;
   branchHead(fullName: string, branch: string): string | undefined;
@@ -548,6 +548,17 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
       if (sha === undefined) return { status: 404, body: { message: 'Branch not found' } };
       return { status: 200, body: { name: branch, commit: { sha } } };
     }
+    if ((r = /^\/git\/matching-refs\/(.+)$/.exec(rest)) !== null && method === 'GET') {
+      const prefix = `refs/${(r[1] ?? '').split('/').map(decodeURIComponent).join('/')}`;
+      const refs = git(repo.remote.bareDir, ['for-each-ref', '--format=%(refname) %(objectname)'])
+        .split('\n')
+        .filter((l) => l.startsWith(prefix))
+        .map((l) => {
+          const [ref = '', sha = ''] = l.split(' ');
+          return { ref, object: { sha, type: 'commit' } };
+        });
+      return { status: 200, body: refs };
+    }
     if ((r = /^\/git\/refs\/heads\/(.+)$/.exec(rest)) !== null && method === 'DELETE') {
       const branch = (r[1] ?? '').split('/').map(decodeURIComponent).join('/');
       const sha = head(repo, branch);
@@ -707,7 +718,10 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
       if (!/^[^/]+\/[^/]+$/.test(fullName))
         throw new Error(`fake GitHub: '${fullName}' is not owner/name`);
       const bareDir = join(tempDir('fake-gh-remote-'), `${fullName.replace('/', '__')}.git`);
-      git(dirname(bareDir), ['clone', '--quiet', '--bare', seed, bareDir]);
+      if (seed === undefined) {
+        mkdirSync(bareDir, { recursive: true });
+        git(bareDir, ['init', '--quiet', '--bare', '--initial-branch=main']);
+      } else git(dirname(bareDir), ['clone', '--quiet', '--bare', seed, bareDir]);
       const remote: FakeRemote = {
         fullName,
         bareDir,

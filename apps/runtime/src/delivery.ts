@@ -23,12 +23,14 @@ import {
   TaskCancelReasonSchema,
   TaskDefinitionSchema,
   TaskStateSchema,
+  DeliveredSetupSchema,
   type DeliveryReport,
   type PullRequestRecord,
 } from '@factory/domain';
 import { changedPaths, commitsBetween } from '@factory/git';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { latestSetupRun } from './setup.js';
 import { criteriaCoveredBy, currentCriteria } from './criteria.js';
 import { latestArtifact } from './plan-approval.js';
 import { integrationSources } from './integration.js';
@@ -207,6 +209,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   }
 
   const delivered: DeliveryReport['tasks'] = [];
+  const setupCommands = new Set<string>();
   for (const task of tasks) {
     if (task.state !== 'approved') continue;
     const definition = TaskDefinitionSchema.parse(JSON.parse(task.definitionJson));
@@ -304,6 +307,9 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
         `Task ${task.key}: open question from the developer (agent-proposed, not answered): ${q.text}`,
       );
     }
+    // What installed the dependencies its verification ran on (ADR-0047).
+    const setup = latestSetupRun(db, worktree.id);
+    if (setup !== undefined) setupCommands.add(setup.command);
     const commits = await commitsBetween(repo.clonePath, attempt.baseSha, attempt.headSha);
     delivered.push({
       key: task.key,
@@ -316,6 +322,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       changedFiles: await changedPaths(repo.clonePath, attempt.baseSha, attempt.headSha),
       wipCommit: attempt.wipCommit,
       openQuestions,
+      setup: setup === undefined ? null : DeliveredSetupSchema.parse(setup),
       verification: runs.map((r) => ({
         key: r.commandKey,
         exitCode: r.exitCode,
@@ -357,6 +364,11 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
         `Task ${task.key}: open ${f.severity} review finding at ${f.location}: ${f.problem}`,
       );
     }
+  }
+  for (const command of setupCommands) {
+    limitations.push(
+      `The Repository's setup command (\`${command}\`) ran in the Worktrees on this machine, with network access and lifecycle scripts off: the Tier 0 guardrail, not isolation.`,
+    );
   }
   const allCriteria = currentCriteria(db, jobId);
   for (const c of allCriteria) {

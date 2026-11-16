@@ -459,6 +459,7 @@ function AttemptPanel({ attempt: a, reviews }: { attempt: Attempt; reviews: Revi
           </ul>
         </div>
       )}
+      {a.setupRuns.length > 0 && <SetupRuns attempt={a} />}
       <VerificationRuns attempt={a} />
       <EvidenceTable evidence={a.evidence} />
       {gateFindings.length > 0 && <Findings title="Gate Findings" findings={gateFindings} />}
@@ -466,6 +467,60 @@ function AttemptPanel({ attempt: a, reviews }: { attempt: Attempt; reviews: Revi
         <ReviewPanel key={r.id} review={r} attempt={a} />
       ))}
     </section>
+  );
+}
+
+/** The Repository's setup command in this Attempt's Worktree (ADR-0047). */
+function SetupRuns({ attempt }: { attempt: Attempt }) {
+  return (
+    <div>
+      <h4 className="mb-1 text-sm font-medium">
+        Setup (run by the factory on this machine, lifecycle scripts off)
+      </h4>
+      <Table data-testid="setup-runs">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Command</TableHead>
+            <TableHead>Result</TableHead>
+            <TableHead>Time</TableHead>
+            <TableHead>Worktree size</TableHead>
+            <TableHead>Head</TableHead>
+            <TableHead>Log</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {attempt.setupRuns.map((r) => (
+            <TableRow key={r.id}>
+              <TableCell>
+                <code className="font-mono text-xs">{r.command}</code>
+              </TableCell>
+              <TableCell>
+                {r.passed ? (
+                  <Badge variant="success">passed</Badge>
+                ) : (
+                  <>
+                    <Badge variant="destructive">failed</Badge>{' '}
+                    <span className="text-xs">{r.failure}</span>
+                  </>
+                )}
+              </TableCell>
+              <TableCell>{formatDuration(r.durationMs)}</TableCell>
+              <TableCell>
+                {r.diskBytes === null ? 'unknown' : `${(r.diskBytes / 2 ** 20).toFixed(1)} MiB`}
+              </TableCell>
+              <TableCell>
+                <Sha value={r.headSha} />
+              </TableCell>
+              <TableCell>
+                <a className="underline" href={`/artifacts/${r.outputArtifactId}`}>
+                  log
+                </a>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
   );
 }
 
