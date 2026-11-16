@@ -8,12 +8,17 @@
  * Passing here is evidence about which PRs and branches the client selects,
  * not about the real GitHub.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { git, tempDir, tinyTsRepo } from '../support/factory.js';
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
-import { prepareSandbox, SANDBOX_WORKFLOW_PATH } from '../support/sandbox.js';
+import {
+  prepareSandbox,
+  SANDBOX_CHECK,
+  SANDBOX_RERUN_CHECK,
+  SANDBOX_WORKFLOW_PATH,
+} from '../support/sandbox.js';
 
 const SANDBOX = 'acme/sandbox';
 const OTHER = 'acme/other';
@@ -67,6 +72,39 @@ describe('the C7 sandbox setup', () => {
     gh.addRepository(SANDBOX, tinyTsRepo());
     const main = gh.branchHead(SANDBOX, 'main');
     await expect(prepare(gh)).rejects.toThrow(/precondition: .*\.github\/workflows\/ci\.yml/);
+    expect(gh.branchHead(SANDBOX, 'main')).toBe(main);
+  });
+
+  it('brings a workflow it seeded earlier up to date on main with a fast-forward commit, once (#77)', async () => {
+    const gh = await fakeGitHub();
+    gh.addRepository(SANDBOX, tinyTsRepo());
+    gh.pushForeignCommit(SANDBOX, 'main', {
+      [SANDBOX_WORKFLOW_PATH]:
+        "# Seeded by the Software Factory's C7 [real] test (tests/support/sandbox.ts).\nname: ci\n",
+    });
+    const old = gh.branchHead(SANDBOX, 'main') ?? '';
+
+    const first = await prepare(gh);
+    expect(first.workflowUpdated).toBe(true);
+    const main = gh.branchHead(SANDBOX, 'main') ?? '';
+    expect(main).not.toBe(old);
+    expect(git(first.checkout, ['rev-parse', 'HEAD']).trim()).toBe(main);
+    expect(git(first.checkout, ['rev-parse', `${main}^`]).trim()).toBe(old);
+    const workflow = readFileSync(join(first.checkout, SANDBOX_WORKFLOW_PATH), 'utf8');
+    expect(workflow).toContain(`${SANDBOX_RERUN_CHECK}:`);
+    expect(workflow).toContain(`${SANDBOX_CHECK}:`);
+
+    const second = await prepare(gh);
+    expect(second.workflowUpdated).toBe(false);
+    expect(gh.branchHead(SANDBOX, 'main')).toBe(main);
+  });
+
+  it("refuses a sandbox whose workflow it didn't seed, changing nothing", async () => {
+    const gh = await fakeGitHub();
+    gh.addRepository(SANDBOX, tinyTsRepo());
+    gh.pushForeignCommit(SANDBOX, 'main', { [SANDBOX_WORKFLOW_PATH]: 'name: theirs\n' });
+    const main = gh.branchHead(SANDBOX, 'main');
+    await expect(prepare(gh)).rejects.toThrow(/precondition: .*not one these tests seeded/);
     expect(gh.branchHead(SANDBOX, 'main')).toBe(main);
   });
 

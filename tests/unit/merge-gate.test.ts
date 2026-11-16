@@ -5,10 +5,11 @@
  * named in `requiredChecks`; a named one that never reports stays pending.
  */
 import {
-  checkRunsToRerun,
   evaluateMergeGate,
   failingChecks,
   observedChecks,
+  rerunPlan,
+  rerunnability,
   unresolvedChangeRequests,
   type MergeGateInput,
 } from '@factory/domain';
@@ -240,6 +241,27 @@ describe('observedChecks', () => {
       ['ci/lint', 'lint errors'],
     ]);
   });
+  it('records the app that made each check run (a status has none), so rerun_checks can tell what it can re-run', () => {
+    const checks = observedChecks(
+      [
+        {
+          id: 1,
+          name: 'test',
+          status: 'completed',
+          conclusion: 'failure',
+          detailsUrl: null,
+          app: 'github-actions',
+        },
+        { id: 2, name: 'circle', status: 'completed', conclusion: 'failure', detailsUrl: null },
+      ],
+      [{ context: 'ci/lint', state: 'failure', targetUrl: null }],
+    );
+    expect(checks.map((c) => [c.name, c.app])).toEqual([
+      ['circle', null],
+      ['test', 'github-actions'],
+      ['ci/lint', null],
+    ]);
+  });
 });
 
 describe('the checks that fail the gate (ci_failed, #61)', () => {
@@ -265,33 +287,110 @@ describe('the checks that fail the gate (ci_failed, #61)', () => {
   });
 });
 
-describe('checkRunsToRerun', () => {
-  const run = (id: number, name: string, conclusion: string | null, status = 'completed') => ({
+describe('rerunPlan', () => {
+  const ACTIONS = 'github-actions';
+  const run = (
+    id: number,
+    name: string,
+    conclusion: string | null,
+    opts: { status?: string; app?: string | null; suite?: number | null } = {},
+  ) => ({
     id,
     name,
-    status,
+    status: opts.status ?? 'completed',
     conclusion,
     detailsUrl: null,
+    app: opts.app === undefined ? ACTIONS : opts.app,
+    checkSuiteId: opts.suite === undefined ? 100 : opts.suite,
+  });
+  const ci = { id: 9001, name: 'ci', status: 'completed', checkSuiteId: 100 };
+  const nightly = { id: 9002, name: 'nightly', status: 'completed', checkSuiteId: 200 };
+
+  it('re-runs the workflow run of the newest run of each failed Actions check, once per workflow run', () => {
+    const plan = rerunPlan({
+      runs: [
+        run(1, 'build', 'failure'),
+        run(5, 'build', 'failure'),
+        run(2, 'test', 'failure'),
+        run(6, 'test', 'success'),
+        run(3, 'lint', 'timed_out'),
+        run(4, 'e2e', null, { status: 'in_progress' }),
+        run(7, 'docs', 'failure', { suite: 200 }),
+      ],
+      failedStatuses: [],
+      workflowRuns: [ci, nightly],
+      requiredChecks: [],
+    });
+    expect(plan).toEqual({
+      workflowRuns: [
+        { id: 9001, name: 'ci', checks: ['build', 'lint'] },
+        { id: 9002, name: 'nightly', checks: ['docs'] },
+      ],
+      notRerun: [],
+    });
   });
 
-  it('re-requests the newest run of each failed check name, never an older or a passing one', () => {
-    const runs = [
-      run(1, 'build', 'failure'),
-      run(5, 'build', 'failure'),
-      run(2, 'test', 'failure'),
-      run(6, 'test', 'success'),
-      run(3, 'lint', 'timed_out'),
-      run(4, 'e2e', null, 'in_progress'),
-    ];
-    expect(checkRunsToRerun(runs, [])).toEqual([
-      { id: 5, name: 'build' },
-      { id: 3, name: 'lint' },
+  it('only counts required checks when the Repository names them', () => {
+    const plan = rerunPlan({
+      runs: [run(1, 'build', 'failure'), run(2, 'flaky', 'failure', { suite: 200 })],
+      failedStatuses: [],
+      workflowRuns: [ci, nightly],
+      requiredChecks: ['build'],
+    });
+    expect(plan.workflowRuns).toEqual([{ id: 9001, name: 'ci', checks: ['build'] }]);
+  });
+
+  it("names what it can't re-run: another app's check run, a commit status, a run with no workflow run, a workflow still running", () => {
+    const plan = rerunPlan({
+      runs: [
+        run(1, 'build', 'failure'),
+        run(2, 'circle', 'failure', { app: 'circleci-checks', suite: 300 }),
+        run(3, 'orphan', 'failure', { suite: 400 }),
+        run(4, 'docs', 'failure', { suite: 200 }),
+      ],
+      failedStatuses: ['legacy/ci'],
+      workflowRuns: [ci, { ...nightly, status: 'in_progress' }],
+      requiredChecks: [],
+    });
+    expect(plan.workflowRuns).toEqual([{ id: 9001, name: 'ci', checks: ['build'] }]);
+    expect(plan.notRerun).toEqual([
+      { name: 'circle', why: 'other_app', app: 'circleci-checks' },
+      { name: 'docs', why: 'workflow_running', workflow: 'nightly' },
+      { name: 'orphan', why: 'no_workflow_run' },
+      { name: 'legacy/ci', why: 'commit_status' },
     ]);
   });
 
-  it('only re-requests required checks when the Repository names them', () => {
-    const runs = [run(1, 'build', 'failure'), run(2, 'flaky', 'failure')];
-    expect(checkRunsToRerun(runs, ['build'])).toEqual([{ id: 1, name: 'build' }]);
+  it('re-runs nothing when only checks from other apps and commit statuses fail', () => {
+    const plan = rerunPlan({
+      runs: [run(1, 'circle', 'failure', { app: 'circleci-checks', suite: null })],
+      failedStatuses: ['legacy/ci'],
+      workflowRuns: [ci],
+      requiredChecks: [],
+    });
+    expect(plan.workflowRuns).toEqual([]);
+    expect(plan.notRerun.map((n) => n.name)).toEqual(['circle', 'legacy/ci']);
+  });
+});
+
+describe('rerunnability', () => {
+  it('reads from what the poller recorded: only an Actions check run can be re-run', () => {
+    expect(
+      rerunnability([
+        { name: 'build', source: 'check_run', app: 'github-actions' },
+        { name: 'circle', source: 'check_run', app: 'circleci-checks' },
+        { name: 'old', source: 'check_run', app: null },
+        { name: 'legacy/ci', source: 'status', app: null },
+      ]),
+    ).toBe(
+      "rerun_checks can re-run build (GitHub Actions); it can't re-run circle (a check run made by the app circleci-checks), old (a check run made by an unknown app), legacy/ci (a commit status)",
+    );
+    expect(rerunnability([{ name: 'build', source: 'check_run', app: 'github-actions' }])).toBe(
+      'rerun_checks can re-run build (GitHub Actions)',
+    );
+    expect(rerunnability([{ name: 'legacy/ci', source: 'status', app: null }])).toBe(
+      "rerun_checks can't re-run legacy/ci (a commit status)",
+    );
   });
 });
 

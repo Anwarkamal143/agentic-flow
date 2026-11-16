@@ -4,9 +4,14 @@
  * human answer 4). Test support only, never shipped in the runtime.
  *
  * - **Seed, once.** An empty sandbox (no branches) gets two commits on `main`:
- *   the `tiny-ts` fixture's own, then a minimal GitHub Actions workflow whose job is
- *   named {@link SANDBOX_CHECK}. A sandbox with branches is never re-seeded,
- *   and one whose `main` has no workflow is refused, changing nothing.
+ *   the `tiny-ts` fixture's own, then a minimal GitHub Actions workflow with
+ *   the jobs {@link SANDBOX_CHECK} and {@link SANDBOX_RERUN_CHECK}. A sandbox
+ *   with branches is never re-seeded, and one whose `main` has no workflow is
+ *   refused, changing nothing.
+ * - **Keep the workflow current.** A workflow these tests seeded earlier (it
+ *   starts with {@link SEED_HEADER}) that differs from today's is replaced by
+ *   one fast-forward commit on `main`. Any other workflow is refused, changing
+ *   nothing.
  * - **Clean, between runs.** Closes the open PRs the factory opened (a head
  *   branch under `factory/` of the sandbox itself, and a body carrying a
  *   factory marker), then deletes the `factory/*` branches, except one that is
@@ -17,7 +22,7 @@
  * (credentials for the real GitHub, the fake's `insteadOf` rewrites in tests).
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { carriesFactoryMarker } from '@factory/domain';
 import { tinyTsRepo } from './factory.js';
@@ -28,9 +33,20 @@ export const SANDBOX = 'Anwarkamal143/factory-sandbox';
 /** The CI check the sandbox's workflow reports: the C7 Repository's required check. */
 export const SANDBOX_CHECK = 'test';
 
+/**
+ * The rerun probe's check (#77): it fails the first attempt of its workflow
+ * run when the head has {@link RERUN_PROBE_FILE}, and passes otherwise, so a
+ * re-run of its failed job passes. Without the file (C7) it always passes.
+ */
+export const SANDBOX_RERUN_CHECK = 'rerun-probe';
+export const RERUN_PROBE_FILE = 'rerun-probe.txt';
+
 export const SANDBOX_WORKFLOW_PATH = '.github/workflows/ci.yml';
 
-const WORKFLOW = `# Seeded by the Software Factory's C7 [real] test (tests/support/sandbox.ts).
+/** How every workflow these tests seed starts; only such a workflow is ever replaced. */
+const SEED_HEADER = "# Seeded by the Software Factory's";
+
+const WORKFLOW = `${SEED_HEADER} [real] tests (tests/support/sandbox.ts).
 name: ci
 on:
   pull_request:
@@ -50,6 +66,19 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
+  ${SANDBOX_RERUN_CHECK}:
+    name: ${SANDBOX_RERUN_CHECK}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail the first attempt when the rerun probe is present
+        env:
+          RUN_ATTEMPT: \${{ github.run_attempt }}
+        run: |
+          if [ -f ${RERUN_PROBE_FILE} ] && [ "$RUN_ATTEMPT" = "1" ]; then
+            echo "${RERUN_PROBE_FILE} is present: failing attempt 1 on purpose"
+            exit 1
+          fi
 `;
 
 export interface SandboxOptions {
@@ -68,6 +97,8 @@ export interface PreparedSandbox {
   /** A checkout of the sandbox with `origin` at its github.com URL, on `main`. */
   checkout: string;
   seeded: boolean;
+  /** `main`'s workflow was one these tests seeded earlier, and was brought up to date. */
+  workflowUpdated: boolean;
   cleaned: { closed: number[]; deleted: string[] };
 }
 
@@ -90,13 +121,33 @@ export async function prepareSandbox(opts: SandboxOptions): Promise<PreparedSand
 
   const checkout = join(opts.workDir, 'checkout');
   run(opts.workDir, ['clone', '--quiet', '--branch', 'main', url, checkout]);
-  if (!existsSync(join(checkout, SANDBOX_WORKFLOW_PATH)))
+  const workflowFile = join(checkout, SANDBOX_WORKFLOW_PATH);
+  if (!existsSync(workflowFile))
     throw new Error(
       `precondition: ${opts.fullName} main has no ${SANDBOX_WORKFLOW_PATH}; it is not a sandbox this test seeded, and is left as it is`,
     );
+  const current = readFileSync(workflowFile, 'utf8');
+  if (!current.startsWith(SEED_HEADER))
+    throw new Error(
+      `precondition: ${opts.fullName} main's ${SANDBOX_WORKFLOW_PATH} is not one these tests seeded; it is left as it is`,
+    );
+  const workflowUpdated = current !== WORKFLOW;
+  if (workflowUpdated) {
+    writeFileSync(workflowFile, WORKFLOW);
+    run(checkout, ['add', SANDBOX_WORKFLOW_PATH]);
+    run(checkout, [
+      'commit',
+      '--quiet',
+      '--no-gpg-sign',
+      '--message',
+      'ci: update the sandbox workflow',
+    ]);
+    // A fast-forward only: a main that moved meanwhile refuses the push.
+    run(checkout, ['push', '--quiet', 'origin', 'HEAD:refs/heads/main']);
+  }
 
   const cleaned = await clean(opts);
-  return { checkout, seeded, cleaned };
+  return { checkout, seeded, workflowUpdated, cleaned };
 }
 
 function seed(opts: SandboxOptions, url: string) {

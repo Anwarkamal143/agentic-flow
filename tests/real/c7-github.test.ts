@@ -27,7 +27,6 @@
  *
  * Each run writes its outcome to `tests/real/results/` (gitignored).
  */
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -43,9 +42,15 @@ import { json, post, skipPlanApproval, type JobBody } from '../support/api.js';
 import { useClaudeCode } from '../support/claude.js';
 import { killGroupsOnFinish } from '../support/processes.js';
 import { repoRoot } from '../support/paths.js';
-import { gitWith, prepareSandbox, SANDBOX, SANDBOX_CHECK, sandboxApi } from '../support/sandbox.js';
+import {
+  GH_CREDENTIALS,
+  GITHUB_API,
+  ghToken,
+  requireSandboxLogin,
+  sandboxGet,
+} from '../support/real-github.js';
+import { gitWith, prepareSandbox, SANDBOX, SANDBOX_CHECK } from '../support/sandbox.js';
 
-const API = 'https://api.github.com';
 const [OWNER = '', NAME = ''] = SANDBOX.split('/');
 const MINUTE = 60_000;
 const RESULTS = join(repoRoot, 'tests/real/results');
@@ -119,40 +124,6 @@ interface GitHubPull {
   base: { ref: string; sha: string };
 }
 
-/** The `gh` login's token, read with no GH_TOKEN/GITHUB_TOKEN in the way. Never printed. */
-function ghToken(): string {
-  try {
-    return execFileSync('gh', ['auth', 'token'], {
-      encoding: 'utf8',
-      env: { PATH: process.env['PATH'], HOME: homedir(), USER: userInfo().username },
-    }).trim();
-  } catch {
-    throw new Error('precondition: `gh auth token` failed. Run `gh auth login`.');
-  }
-}
-
-/** git credentials for github.com from the `gh` login only (no keychain helper). */
-const GH_CREDENTIALS: Record<string, string> = {
-  GIT_CONFIG_COUNT: '2',
-  GIT_CONFIG_KEY_0: 'credential.https://github.com.helper',
-  GIT_CONFIG_VALUE_0: '',
-  GIT_CONFIG_KEY_1: 'credential.https://github.com.helper',
-  GIT_CONFIG_VALUE_1: '!gh auth git-credential',
-};
-
-/** Reads of the sandbox on GitHub: the sandbox client, which reaches no other repository. */
-const sandboxGet = <T>(path: string) =>
-  sandboxApi({ fullName: SANDBOX, apiBaseUrl: API, token: ghToken })<T>('GET', path);
-
-async function ghLogin(): Promise<{ login: string; scopes: string[] }> {
-  const res = await fetch(`${API}/user`, {
-    headers: { authorization: `Bearer ${ghToken()}`, accept: 'application/vnd.github+json' },
-  });
-  if (!res.ok) throw new Error(`precondition: GET /user answered ${String(res.status)}`);
-  const scopes = (res.headers.get('x-oauth-scopes') ?? '').split(',').map((s) => s.trim());
-  return { login: ((await res.json()) as { login: string }).login, scopes };
-}
-
 /** Polls `read` every `everyMs` until `done` holds, or fails after `ms` naming `what`. */
 async function until<T>(
   read: () => Promise<T>,
@@ -215,21 +186,12 @@ describe('C7 [real] GitHub delivery', () => {
       };
 
       // ---- preconditions ----
-      const who = await ghLogin();
-      if (who.login.toLowerCase() !== OWNER.toLowerCase())
-        throw new Error(
-          `precondition: the active gh account is ${who.login}, not ${OWNER}. Run \`gh auth switch --user ${OWNER}\`.`,
-        );
-      for (const scope of ['repo', 'workflow'])
-        if (!who.scopes.includes(scope))
-          throw new Error(
-            `precondition: the gh login lacks the '${scope}' scope. Run \`gh auth refresh -s ${scope}\`.`,
-          );
+      await requireSandboxLogin();
 
       // ---- the sandbox: seed once, clean between runs, check out ----
       const sandbox = await prepareSandbox({
         fullName: SANDBOX,
-        apiBaseUrl: API,
+        apiBaseUrl: GITHUB_API,
         token: ghToken,
         gitEnv: GH_CREDENTIALS,
         workDir: tempDir('c7-sandbox-'),

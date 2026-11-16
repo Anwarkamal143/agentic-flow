@@ -64,6 +64,20 @@ export interface CheckRun {
   detailsUrl: string | null;
   /** `output.summary`, or `output.title` when it has none: CI text, untrusted. */
   summary: string | null;
+  /** The slug of the GitHub App that made it: `github-actions` for an Actions job. */
+  app: string | null;
+  /** Its check suite: for an Actions job, its workflow run's. */
+  checkSuiteId: number | null;
+}
+
+export interface WorkflowRun {
+  id: number;
+  name: string;
+  /** `queued`, `in_progress`, `completed`, … */
+  status: string;
+  conclusion: string | null;
+  checkSuiteId: number | null;
+  runAttempt: number | null;
 }
 
 export interface CommitStatus {
@@ -150,6 +164,8 @@ const checkRunsWire = z.object({
       status: z.string(),
       conclusion: z.string().nullable().optional(),
       details_url: z.string().nullable().optional(),
+      app: z.object({ slug: z.string() }).nullable().optional(),
+      check_suite: z.object({ id: z.number().int() }).nullable().optional(),
       output: z
         .object({
           title: z.string().nullable().optional(),
@@ -157,6 +173,18 @@ const checkRunsWire = z.object({
         })
         .nullable()
         .optional(),
+    }),
+  ),
+});
+const workflowRunsWire = z.object({
+  workflow_runs: z.array(
+    z.object({
+      id: z.number().int(),
+      name: z.string().nullable().optional(),
+      status: z.string().nullable().optional(),
+      conclusion: z.string().nullable().optional(),
+      check_suite_id: z.number().int().nullable().optional(),
+      run_attempt: z.number().int().optional(),
     }),
   ),
 });
@@ -315,6 +343,8 @@ export class GitHubPort {
         conclusion: c.conclusion ?? null,
         detailsUrl: c.details_url ?? null,
         summary: c.output?.summary ?? c.output?.title ?? null,
+        app: c.app?.slug ?? null,
+        checkSuiteId: c.check_suite?.id ?? null,
       })),
     );
   }
@@ -340,10 +370,40 @@ export class GitHubPort {
     );
   }
 
-  async rerunCheckRun(repo: GitHubCoordinates, checkRunId: number): Promise<GitHubResult<null>> {
+  // ---- GitHub Actions ----
+
+  /**
+   * The Actions workflow runs on `sha` (the latest attempt of each). A check
+   * run made by Actions belongs to the check suite of its workflow run.
+   */
+  async listWorkflowRuns(
+    repo: GitHubCoordinates,
+    sha: string,
+  ): Promise<GitHubResult<WorkflowRun[]>> {
+    const query = new URLSearchParams({ head_sha: sha, per_page: String(PER_PAGE) });
+    const res = await this.send('GET', `${repoPath(repo)}/actions/runs?${query.toString()}`);
+    return mapResult(res, workflowRunsWire, (w) =>
+      w.workflow_runs.map((r) => ({
+        id: r.id,
+        name: r.name ?? `workflow run ${String(r.id)}`,
+        status: r.status ?? 'unknown',
+        conclusion: r.conclusion ?? null,
+        checkSuiteId: r.check_suite_id ?? null,
+        runAttempt: r.run_attempt ?? null,
+      })),
+    );
+  }
+
+  /**
+   * Re-runs the failed jobs of a completed workflow run (and the jobs that
+   * depend on them) as a new attempt. The Actions API accepts an OAuth app
+   * token or a PAT with `repo`; check-run writes (`rerequest`) are for
+   * GitHub Apps only (#77).
+   */
+  async rerunFailedJobs(repo: GitHubCoordinates, runId: number): Promise<GitHubResult<null>> {
     const res = await this.send(
       'POST',
-      `${repoPath(repo)}/check-runs/${String(checkRunId)}/rerequest`,
+      `${repoPath(repo)}/actions/runs/${String(runId)}/rerun-failed-jobs`,
     );
     return res.ok ? { ok: true, value: null } : res;
   }

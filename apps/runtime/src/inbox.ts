@@ -18,7 +18,9 @@ import {
   attemptsCountedForRework,
   BlockerSchema,
   checkBlockerDecision,
-  checkRunsToRerun,
+  describeNotRerun,
+  rerunPlan,
+  type RerunPlan,
   grantedCap,
   KILL_AND_RETRY_OPTIONS,
   retriesAfterRetryNow,
@@ -143,7 +145,7 @@ export class InboxService {
     /** GitHub, for `rerun_checks` (#61) and `reopen_pr` (#64); `null` without one. */
     private readonly github: Pick<
       GitHubPort,
-      'listCheckRuns' | 'rerunCheckRun' | 'reopenPullRequest'
+      'listCheckRuns' | 'listWorkflowRuns' | 'rerunFailedJobs' | 'reopenPullRequest'
     > | null = null,
   ) {}
 
@@ -517,12 +519,14 @@ export class InboxService {
   }
 
   /**
-   * `rerun_checks` on a `ci_failed` Blocker Approval (#61, Q14): GitHub is
-   * asked to re-run the newest run of each failed required check on the PR
-   * head, read afresh, before the item is decided. GitHub can't re-run a
-   * commit status, so failures that are only statuses are refused and the
-   * item stays open. The Blocker stays until the poller sees the checks no
-   * longer failing; a later failure raises a new one.
+   * `rerun_checks` on a `ci_failed` Blocker Approval (#61, Q14; #77): before
+   * the item is decided, the check runs and the Actions workflow runs on each
+   * failing PR head are read afresh, and each workflow run holding a failed
+   * required Actions check has its failed jobs re-run (`rerunPlan`). GitHub
+   * lets only a GitHub App re-run a check run, and nothing re-runs a commit
+   * status, so those are named and not re-run; when nothing can be re-run the
+   * decision is refused and the item stays open. The Blocker stays until the
+   * poller sees the checks no longer failing; a later failure raises a new one.
    */
   private async rerunChecksFromItem(
     item: ApprovalRow,
@@ -539,46 +543,74 @@ export class InboxService {
       );
     }
     const prs = [...new Map(failed.map((f) => [f.pr.id, f.pr])).values()];
-    const requested: { pullRequest: string; headSha: string; name: string; checkRunId: number }[] =
-      [];
-    const alreadyRequested = () =>
-      requested.length === 0
-        ? ''
-        : ` (re-run already requested: ${requested.map((r) => r.name).join(', ')})`;
+    // Every read first: nothing is asked of GitHub until the whole plan is known.
+    const plans: { pr: (typeof prs)[number]; plan: RerunPlan }[] = [];
     for (const pr of prs) {
       const repo = { owner: pr.owner, name: pr.name };
-      const runs = await github.listCheckRuns(repo, pr.headSha);
-      if (!runs.ok || runs.notModified) {
-        throw new ApiFailure(
+      const readFailed = (what: string, failure?: { kind: string }) =>
+        new ApiFailure(
           502,
           'github_failed',
-          `could not read the check runs of ${pullRequestLabel(pr)}${runs.ok ? '' : `: ${runs.failure.kind}`}; nothing was decided${alreadyRequested()}`,
+          `could not read the ${what} of ${pullRequestLabel(pr)}${failure === undefined ? '' : `: ${failure.kind}`}; nothing was re-run or decided`,
         );
-      }
-      for (const run of checkRunsToRerun(runs.value, requiredChecksOf(this.db, pr))) {
-        const res = await github.rerunCheckRun(repo, run.id);
+      const runs = await github.listCheckRuns(repo, pr.headSha);
+      if (!runs.ok) throw readFailed('check runs', runs.failure);
+      if (runs.notModified) throw readFailed('check runs');
+      const workflowRuns = await github.listWorkflowRuns(repo, pr.headSha);
+      if (!workflowRuns.ok) throw readFailed('Actions workflow runs', workflowRuns.failure);
+      plans.push({
+        pr,
+        plan: rerunPlan({
+          runs: runs.value,
+          failedStatuses: failed
+            .filter((f) => f.pr.id === pr.id && f.check.source === 'status')
+            .map((f) => f.check.name),
+          workflowRuns: workflowRuns.value,
+          requiredChecks: requiredChecksOf(this.db, pr),
+        }),
+      });
+    }
+    const notRerun = plans.flatMap(({ pr, plan }) =>
+      plan.notRerun.map((n) => ({ pullRequest: pullRequestLabel(pr), ...n })),
+    );
+    const named = notRerun.map((n) => `${n.name} (${describeNotRerun(n)})`).join(', ');
+    if (plans.every(({ plan }) => plan.workflowRuns.length === 0)) {
+      throw new ApiFailure(
+        409,
+        'nothing_to_rerun',
+        `no failed check can be re-run with the factory's GitHub token${named === '' ? '' : `: ${named}`}. Re-run ${notRerun.length === 1 ? 'it' : 'them'} where ${notRerun.length === 1 ? 'it was' : 'they were'} made, rework, or cancel the Job`,
+      );
+    }
+    const requested: {
+      pullRequest: string;
+      headSha: string;
+      workflowRunId: number;
+      workflow: string;
+      checks: string[];
+    }[] = [];
+    for (const { pr, plan } of plans) {
+      const repo = { owner: pr.owner, name: pr.name };
+      for (const run of plan.workflowRuns) {
+        const res = await github.rerunFailedJobs(repo, run.id);
         if (!res.ok) {
+          const already =
+            requested.length === 0
+              ? ''
+              : ` (re-run already requested: ${requested.flatMap((r) => r.checks).join(', ')})`;
           throw new ApiFailure(
             502,
             'github_failed',
-            `GitHub did not re-run ${run.name} on ${pullRequestLabel(pr)} (${res.failure.kind}); nothing was decided${alreadyRequested()}`,
+            `GitHub did not re-run the failed jobs of workflow run ${run.name} (${run.checks.join(', ')}) on ${pullRequestLabel(pr)} (${res.failure.kind}: ${'reason' in res.failure ? res.failure.reason : `reset at ${res.failure.resetAt}`}); nothing was decided${already}`,
           );
         }
         requested.push({
           pullRequest: pullRequestLabel(pr),
           headSha: pr.headSha,
-          name: run.name,
-          checkRunId: run.id,
+          workflowRunId: run.id,
+          workflow: run.name,
+          checks: run.checks,
         });
       }
-    }
-    const statuses = failed.filter((f) => f.check.source === 'status').map((f) => f.check.name);
-    if (requested.length === 0) {
-      throw new ApiFailure(
-        409,
-        'nothing_to_rerun',
-        `no failed check run to re-run${statuses.length === 0 ? '' : `: ${statuses.join(', ')} ${statuses.length === 1 ? 'is a commit status' : 'are commit statuses'}, which GitHub can't re-run; re-run ${statuses.length === 1 ? 'it' : 'them'} on the CI provider, rework, or cancel the Job`}`,
-      );
     }
     const [first] = prs;
     if (first === undefined) throw new Error(`ci_failed item ${item.id} names no pull request`);
@@ -591,9 +623,9 @@ export class InboxService {
         actor,
         payload: {
           approvalId: item.id,
-          checks: requested.map((r) => r.name),
+          checks: requested.flatMap((r) => r.checks),
           requested,
-          notRerun: statuses,
+          notRerun,
         },
       });
     };

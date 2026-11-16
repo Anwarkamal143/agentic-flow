@@ -137,7 +137,7 @@ function script() {
   );
 }
 
-async function start() {
+async function start(requiredChecks: string[] = ['build']) {
   const gh = await fakeGitHub();
   const src = tinyTsRepo();
   const remote = gh.addRepository(FULL_NAME, src);
@@ -160,8 +160,7 @@ async function start() {
     '--project',
     'demo',
     '--yes',
-    '--required-check',
-    'build',
+    ...requiredChecks.flatMap((name) => ['--required-check', name]),
   ]);
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
@@ -246,8 +245,13 @@ const decide = (rt: RunningRuntime, item: ItemBody, option: string, comment?: st
     ...(comment === undefined ? {} : { comment }),
   });
 
+/** The Actions re-run requests (#77); the GitHub-App-only check-run rerequest is never sent. */
 const rerunRequests = (gh: FakeGitHub) =>
-  gh.requests.filter((r) => r.method === 'POST' && /\/check-runs\/\d+\/rerequest$/.test(r.path));
+  gh.requests.filter(
+    (r) => r.method === 'POST' && /\/actions\/runs\/\d+\/rerun-failed-jobs$/.test(r.path),
+  );
+const checkRunRerequests = (gh: FakeGitHub) =>
+  gh.requests.filter((r) => /\/check-runs\/\d+\/rerequest$/.test(r.path));
 
 function failBuild(gh: FakeGitHub, head: string) {
   gh.setCheckRun(FULL_NAME, head, {
@@ -270,6 +274,7 @@ describe('a CI failure', { timeout: 180_000 }, () => {
     // An optional check failing blocks nothing: only `build` is required.
     gh.setCheckRun(FULL_NAME, head, {
       name: 'flaky',
+      workflow: 'optional',
       status: 'completed',
       conclusion: 'failure',
       detailsUrl: 'https://ci.example/flaky/1',
@@ -288,6 +293,7 @@ describe('a CI failure', { timeout: 180_000 }, () => {
     expect(blocker?.detail).toContain('build');
     expect(blocker?.detail).toContain(BUILD_URL);
     expect(blocker?.detail).not.toContain('flaky');
+    expect(blocker?.detail).toContain('rerun_checks can re-run build (GitHub Actions)');
     const gated = await pullRequest(rt, job.id);
     expect(gated.gate?.verdict).toBe('fail');
     expect(gated.gate?.conditions.find((c) => c.id === 'checks')).toMatchObject({
@@ -301,6 +307,7 @@ describe('a CI failure', { timeout: 180_000 }, () => {
     expect(item.options.map((o) => o.id)).toEqual(['rework', 'rerun_checks', 'cancel_job']);
     expect(item.question).toMatch(/a required check failed/);
     expect(item.why).toContain(BUILD_URL);
+    expect(item.why).toContain('rerun_checks can re-run build (GitHub Actions)');
     expect((await itemsOf(rt, job.id, 'merge')).map((i) => i.state)).toEqual(['open']);
 
     // job show and the dashboard Job detail show the check's name with its link.
@@ -323,14 +330,20 @@ describe('a CI failure', { timeout: 180_000 }, () => {
       'no attempt + 1 Stage Run',
     ).toEqual([]);
 
-    // rerun_checks asks GitHub to re-run the failed required run only.
+    // rerun_checks re-runs the failed jobs of the required check's Actions workflow run only,
+    // through the Actions API: never the GitHub-App-only check-run rerequest.
     expect(rerunRequests(gh)).toEqual([]);
     const res = await decide(rt, item, 'rerun_checks');
     expect(res.status, await res.clone().text()).toBe(200);
     expect(rerunRequests(gh)).toHaveLength(1);
+    expect(checkRunRerequests(gh)).toEqual([]);
     const events = await eventsOf(rt, job.id);
     const requested = events.find((e) => e.type === 'pull_request.checks_rerun_requested');
     expect(requested?.payload['checks']).toEqual(['build']);
+    expect(requested?.payload['requested']).toEqual([
+      expect.objectContaining({ workflow: 'ci', checks: ['build'], headSha: head }),
+    ]);
+    expect(requested?.payload['notRerun']).toEqual([]);
 
     // The re-run is queued: the checks no longer fail, so the Blocker clears.
     const cleared = await until(
@@ -434,6 +447,58 @@ describe('a CI failure', { timeout: 180_000 }, () => {
     expect((await itemsOf(rt, job.id, 'merge')).map((i) => i.state)).toEqual([
       'superseded',
       'open',
+    ]);
+  });
+
+  it("refuses rerun_checks by name when only another app's check run and a commit status fail; in a mixed set it re-runs the Actions check and names the others", async () => {
+    const { gh, rt, job, pr } = await start(['build', 'circle', 'legacy/ci']);
+    const head = pr.headSha;
+    gh.setCheckRun(FULL_NAME, head, { name: 'build', status: 'completed', conclusion: 'success' });
+    gh.setCheckRun(FULL_NAME, head, {
+      name: 'circle',
+      app: 'circleci-checks',
+      status: 'completed',
+      conclusion: 'failure',
+      detailsUrl: 'https://circleci.example/1',
+    });
+    gh.setStatus(FULL_NAME, head, { context: 'legacy/ci', state: 'failure' });
+
+    // The item says up front what rerun_checks can't re-run.
+    const item = await openCiItem(rt, job.id);
+    expect(item.why).toContain(
+      "rerun_checks can't re-run circle (a check run made by the app circleci-checks), legacy/ci (a commit status)",
+    );
+    const refused = await decide(rt, item, 'rerun_checks');
+    expect(refused.status).toBe(409);
+    const body = (await refused.json()) as { error: string; message: string };
+    expect(body.error).toBe('nothing_to_rerun');
+    expect(body.message).toContain('circle (a check run made by the app circleci-checks)');
+    expect(body.message).toContain('legacy/ci (a commit status)');
+    expect(rerunRequests(gh)).toEqual([]);
+    expect(checkRunRerequests(gh)).toEqual([]);
+    const still = await itemsOf(rt, job.id, 'blocker');
+    expect(still.find((i) => i.id === item.id)?.state).toBe('open');
+
+    // The Actions check fails too: a new item; rerun_checks re-runs it and names the others.
+    failBuild(gh, head);
+    const mixed = await until(
+      () => itemsOf(rt, job.id, 'blocker'),
+      (all) => all.some((i) => i.state === 'open' && i.id !== item.id),
+      'the ci_failed item naming build',
+    );
+    const next = mixed.find((i) => i.state === 'open') as ItemBody;
+    expect(next.why).toContain('rerun_checks can re-run build (GitHub Actions)');
+    expect(next.why).toContain("it can't re-run circle");
+    const res = await decide(rt, next, 'rerun_checks');
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(rerunRequests(gh)).toHaveLength(1);
+    const requested = (await eventsOf(rt, job.id)).find(
+      (e) => e.type === 'pull_request.checks_rerun_requested',
+    );
+    expect(requested?.payload['checks']).toEqual(['build']);
+    expect(requested?.payload['notRerun']).toEqual([
+      expect.objectContaining({ name: 'circle', why: 'other_app', app: 'circleci-checks' }),
+      expect.objectContaining({ name: 'legacy/ci', why: 'commit_status' }),
     ]);
   });
 

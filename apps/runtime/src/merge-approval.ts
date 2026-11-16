@@ -23,6 +23,7 @@ import {
   EffectiveConfigSchema,
   evaluateMergeGate,
   failingChecks,
+  rerunnability,
   mergeItemOptions,
   MergeMethodSchema,
   readyButForPolicy,
@@ -425,6 +426,7 @@ function recordedChecks(tx: Tx | FactoryDb, pr: PullRequestRow): ObservedCheck[]
       outcome: CheckOutcomeSchema.parse(c.outcome),
       url: c.url,
       summary: c.summary,
+      app: c.app,
     }));
 }
 
@@ -880,7 +882,10 @@ function describeFailedCheck(c: ObservedCheck): string {
   return `${c.name} (${c.conclusion ?? c.status}, ${c.url ?? 'no link'})`;
 }
 
-/** What a `ci_failed` Blocker says: per PR and head, each failed check with its conclusion and link. */
+/**
+ * What a `ci_failed` Blocker says: per PR and head, each failed check with its
+ * conclusion and link, then which of them `rerun_checks` can re-run (#77).
+ */
 function ciFailedDetail(failed: readonly FailedCheck[]): string {
   const byPr = new Map<string, { pr: PullRequestRow; checks: ObservedCheck[] }>();
   for (const { pr, check } of failed) {
@@ -893,6 +898,7 @@ function ciFailedDetail(failed: readonly FailedCheck[]): string {
       ({ pr, checks }) =>
         `required checks failed on ${label(pr)} at head ${pr.headSha.slice(0, 12)}: ${checks.map(describeFailedCheck).join('; ')}`,
     )
+    .concat(rerunnability(failed.map((f) => f.check)))
     .join('. ');
 }
 
@@ -1092,6 +1098,7 @@ function writeChecks(tx: Tx, prId: string, seen: Observation, now: string): void
         outcome: c.outcome,
         url: c.url,
         summary: c.summary,
+        app: c.app,
         observedAt: now,
       })
       .onConflictDoUpdate({
@@ -1107,6 +1114,7 @@ function writeChecks(tx: Tx, prId: string, seen: Observation, now: string): void
           outcome: c.outcome,
           url: c.url,
           summary: c.summary,
+          app: c.app,
           observedAt: now,
         },
       })
