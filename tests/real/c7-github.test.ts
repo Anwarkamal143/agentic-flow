@@ -17,8 +17,9 @@
  * `factory/*` branches. It touches no other repository. The run's own PR is
  * left for the human to look at; the next run cleans it up.
  *
- * The Repository is registered with `--merge-policy human_approval` and the
- * sandbox workflow's check required. The test waits for the PR, checks its
+ * The Repository is registered with `--merge-policy human_approval`, the
+ * sandbox workflow's check required, and a `--setup` that installs the
+ * dependencies in each Worktree (ADR-0047). The test waits for the PR, checks its
  * head is the reviewed SHA, waits for CI to pass and the `merge` item to offer
  * `merge`, and then waits for **the human** to decide it (the command is
  * printed and written to `tests/real/results/c7-waiting.txt`). Nothing merges
@@ -48,6 +49,11 @@ const API = 'https://api.github.com';
 const [OWNER = '', NAME = ''] = SANDBOX.split('/');
 const MINUTE = 60_000;
 const RESULTS = join(repoRoot, 'tests/real/results');
+/**
+ * The Worktree setup (ADR-0047): `tiny-ts` has no lockfile, so `npm ci` would
+ * refuse; `--no-package-lock` writes none, so git status stays clean.
+ */
+const SANDBOX_SETUP = 'npm install --no-package-lock --ignore-scripts --no-audit --no-fund';
 
 interface RepoBody {
   id: string;
@@ -256,6 +262,8 @@ describe('C7 [real] GitHub delivery', () => {
         'human_approval',
         '--required-check',
         SANDBOX_CHECK,
+        '--setup',
+        SANDBOX_SETUP,
       ]);
       expect(added.code, added.stderr).toBe(0);
       const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));

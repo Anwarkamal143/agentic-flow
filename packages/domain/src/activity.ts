@@ -53,7 +53,9 @@ export const AttemptTailSchema = z.object({
    * The process whose output this is: `label` names it within the Attempt
    * (`developer-1`, `reviewer-1`, `verify-<key>`). `null`: none right now.
    */
-  process: z.object({ kind: z.enum(['harness', 'verification']), label: z.string() }).nullable(),
+  process: z
+    .object({ kind: z.enum(['harness', 'verification', 'setup']), label: z.string() })
+    .nullable(),
   /** At most {@link TAIL_LINES}, redacted. */
   lines: z.array(z.string()),
   /** Earlier output was left out. */

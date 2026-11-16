@@ -45,6 +45,11 @@ export interface FactoryHome {
    * removed once its process's end is recorded (ADR-0012).
    */
   readonly spoolDir: string;
+  /**
+   * The package managers' shared cache (npm cache, pnpm store, yarn cache),
+   * used by every Worktree's setup run (ADR-0047). Created on first use.
+   */
+  readonly cacheDir: string;
 }
 
 export function resolveHome(env: NodeJS.ProcessEnv = process.env): FactoryHome {
@@ -63,6 +68,7 @@ export function resolveHome(env: NodeJS.ProcessEnv = process.env): FactoryHome {
     logDir,
     runtimeLogPath: join(logDir, 'runtime.log'),
     spoolDir: join(root, 'run'),
+    cacheDir: join(root, 'cache'),
   };
 }
 

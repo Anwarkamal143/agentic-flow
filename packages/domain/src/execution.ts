@@ -4,6 +4,7 @@
  * claims, and what the factory records about both. No I/O.
  */
 import { z } from 'zod';
+import { DeliveredSetupSchema, SetupRunSchema } from './setup.js';
 import { BillingSchema, CostTagSchema, type CostTag } from './billing.js';
 import { AttemptFindingSchema } from './findings.js';
 import { RiskSchema, RuleIssueSchema, TaskRoleSchema } from './proposals.js';
@@ -112,6 +113,8 @@ export type AttemptState = z.infer<typeof AttemptStateSchema>;
  * `cancelled`: a human cancelled the Job (state `cancelled`). `interrupted`:
  * the runtime stopped while the Attempt was in progress and its Harness
  * process did not survive (state `interrupted`, set by recovery).
+ * `setup_failed`: the Repository's setup command failed in the Worktree, or
+ * left it changed (ADR-0047); a human decides, never Rework.
  */
 export const AttemptExitReasonSchema = z.enum([
   'completed',
@@ -125,6 +128,7 @@ export const AttemptExitReasonSchema = z.enum([
   'factory_error',
   'cancelled',
   'interrupted',
+  'setup_failed',
 ]);
 export type AttemptExitReason = z.infer<typeof AttemptExitReasonSchema>;
 
@@ -498,6 +502,8 @@ export const AttemptSchema = z.object({
   startedAt: z.string(),
   finishedAt: z.string().nullable(),
   verificationRuns: z.array(VerificationRunSchema),
+  /** The Repository's setup runs in this Attempt (ADR-0047), oldest first; none without a setup command. */
+  setupRuns: z.array(SetupRunSchema),
   evidence: z.array(EvidenceSchema),
 });
 export type Attempt = z.infer<typeof AttemptSchema>;
@@ -553,6 +559,12 @@ export const DeliveryReportSchema = z.object({
       wipCommit: z.string().nullable(),
       /** Non-blocking questions its approved Attempt left open (agent-proposed, unanswered). */
       openQuestions: z.array(z.object({ id: z.string(), text: z.string() })).default([]),
+      /**
+       * The latest setup run in the Task's Worktree (ADR-0047): what installed
+       * the dependencies its verification ran on. `null`: none ran (the Job
+       * has no setup command). Reports written before it have `null`.
+       */
+      setup: DeliveredSetupSchema.nullable().default(null),
       verification: z.array(
         z.object({
           key: z.string(),

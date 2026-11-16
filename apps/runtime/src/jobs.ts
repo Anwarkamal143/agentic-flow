@@ -21,6 +21,7 @@ import {
   JobStatusSchema,
   JobTypeSchema,
   ProjectConfigSchema,
+  RepositoryProfileSchema,
   resolveEffectiveConfig,
   resolveMergePolicy,
   MergePolicySchema,
@@ -55,6 +56,7 @@ import { currentCriteria } from './criteria.js';
 import { cancelOpenItems } from './inbox.js';
 import { requestReplanIn } from './replan.js';
 import { newId } from './ids.js';
+import { setupRunsOfAttempts } from './setup.js';
 
 const OPERATOR = 'user:local';
 
@@ -146,6 +148,8 @@ export class JobService {
           project: ProjectConfigSchema.parse(JSON.parse(project.configJson)),
           job: { concurrency: input.concurrency },
           mergePolicy: mergePolicy.policy,
+          // Frozen like the rest: a later profile change can't reach this Job (ADR-0047).
+          setup: RepositoryProfileSchema.parse(JSON.parse(repo.profileJson)).setup,
         });
         const jobId = newId('job');
         const now = new Date().toISOString();
@@ -342,6 +346,7 @@ export class JobService {
       .where(inArray(schema.evidence.attemptId, ids))
       .orderBy(asc(sql`"evidence"."rowid"`))
       .all();
+    const setups = setupRunsOfAttempts(this.db, ids);
     return rows.map((a) => {
       const own = runs.filter((r) => r.attemptId === a.id);
       return AttemptSchema.parse({
@@ -384,6 +389,7 @@ export class JobService {
           durationMs: r.durationMs,
           outputArtifactId: r.outputArtifactId,
         })),
+        setupRuns: setups.filter((r) => r.attemptId === a.id),
         evidence: evidence
           .filter((x) => x.e.attemptId === a.id)
           .map(({ e, code }) => ({

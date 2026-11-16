@@ -9,6 +9,7 @@ import { BlockerSchema } from './rework.js';
 import { GitHubCoordinatesSchema, parseCoordinates } from './github.js';
 import { TaskKindSchema } from './integration.js';
 import { ReviewRerunOnBaseChangeSchema } from './base-change.js';
+import { SetupCommandSchema } from './setup.js';
 import {
   EffectiveMergePolicySchema,
   MergeMethodSchema,
@@ -59,6 +60,7 @@ export * from './pull-request.js';
 export * from './merge-gate.js';
 export * from './pr-feedback.js';
 export * from './base-change.js';
+export * from './setup.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -86,6 +88,12 @@ export const RepositoryProfileSchema = z.object({
    * check on the PR head.
    */
   requiredChecks: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+  /**
+   * The setup command the factory runs in each Worktree before the Harness
+   * Run and verification (ADR-0047), from `repo add --setup`. Set by a human
+   * only, never detected. Unset: no setup runs.
+   */
+  setup: SetupCommandSchema.optional(),
   confirmedBy: z.string(),
   confirmedAt: z.string(),
 });
@@ -194,6 +202,8 @@ export const RegisterRepositoryInputSchema = z.object({
   commands: RepositoryCommandsSchema,
   /** The Merge Gate's `requiredChecks`, from `repo add --required-check` (repeatable). */
   requiredChecks: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+  /** `repo add --setup`: the Worktree setup command (ADR-0047). Never inferred. */
+  setup: SetupCommandSchema.optional(),
   /** `owner/name`, from `repo add --github`. Wins over the coordinates the origin URL gives. */
   github: z
     .string()
@@ -496,6 +506,16 @@ export const EffectiveConfigSchema = z.object({
     value: 'if_diff_changed',
     source: 'recipe',
   }),
+  /**
+   * The Repository's Worktree setup command, frozen at creation (ADR-0047);
+   * `null`: none. Jobs created before it have none.
+   */
+  setup: z
+    .object({ value: SetupCommandSchema.nullable(), source: z.literal('repository') })
+    .default({
+      value: null,
+      source: 'repository',
+    }),
 });
 export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
 
@@ -532,6 +552,8 @@ export function resolveEffectiveConfig(levels: {
   job?: { concurrency?: ConcurrencyOverride | undefined };
   /** The Merge Policy resolved from the Repository and the Job's override (`resolveMergePolicy`). */
   mergePolicy?: EffectiveMergePolicy;
+  /** The Repository's setup command (its profile's `setup`), if it has one. */
+  setup?: string | undefined;
 }): EffectiveConfig {
   const { project } = levels;
   const limit = (key: keyof ConcurrencyOverride) => {
@@ -570,6 +592,7 @@ export function resolveEffectiveConfig(levels: {
       project.review?.rerunOnBaseChange === undefined
         ? { value: 'if_diff_changed', source: 'recipe' }
         : { value: project.review.rerunOnBaseChange, source: 'project' },
+    setup: { value: levels.setup ?? null, source: 'repository' },
   };
 }
 
