@@ -86,7 +86,7 @@ Integration tests (`tests/integration/`, ADR-0025) open a real SQLite file with 
 built runtime exports from real child processes, such as two processes racing `claimNextTask` (B2). They may seed
 fixture rows directly. The tier is test-only: in production only `apps/runtime` writes the database (one writer).
 The tier also drives the built `@factory/github` port against the fake GitHub (`tests/support/github.ts`, ADR-0033)
-over real local HTTP, with no database.
+over real local HTTP, with no database, and the C7 sandbox client (`tests/support/sandbox.ts`, ADR-0046) the same way.
 
 ## 7. Questions for the human, before Phase A
 
