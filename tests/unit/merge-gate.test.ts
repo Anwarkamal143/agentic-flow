@@ -9,7 +9,7 @@ import {
   failingChecks,
   observedChecks,
   rerunPlan,
-  rerunnability,
+  describeRerunnability,
   unresolvedChangeRequests,
   type MergeGateInput,
 } from '@factory/domain';
@@ -373,22 +373,22 @@ describe('rerunPlan', () => {
   });
 });
 
-describe('rerunnability', () => {
+describe('describeRerunnability', () => {
   it('reads from what the poller recorded: only an Actions check run can be re-run', () => {
     expect(
-      rerunnability([
+      describeRerunnability([
         { name: 'build', source: 'check_run', app: 'github-actions' },
         { name: 'circle', source: 'check_run', app: 'circleci-checks' },
         { name: 'old', source: 'check_run', app: null },
         { name: 'legacy/ci', source: 'status', app: null },
       ]),
     ).toBe(
-      "rerun_checks can re-run build (GitHub Actions); it can't re-run circle (a check run made by the app circleci-checks), old (a check run made by an unknown app), legacy/ci (a commit status)",
+      "rerun_checks can re-run build (GitHub Actions), once its workflow run has finished; it can't re-run circle (a check run made by the app circleci-checks), old (a check run made by an unknown app), legacy/ci (a commit status)",
     );
-    expect(rerunnability([{ name: 'build', source: 'check_run', app: 'github-actions' }])).toBe(
-      'rerun_checks can re-run build (GitHub Actions)',
-    );
-    expect(rerunnability([{ name: 'legacy/ci', source: 'status', app: null }])).toBe(
+    expect(
+      describeRerunnability([{ name: 'build', source: 'check_run', app: 'github-actions' }]),
+    ).toBe('rerun_checks can re-run build (GitHub Actions), once its workflow run has finished');
+    expect(describeRerunnability([{ name: 'legacy/ci', source: 'status', app: null }])).toBe(
       "rerun_checks can't re-run legacy/ci (a commit status)",
     );
   });

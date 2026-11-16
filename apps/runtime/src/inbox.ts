@@ -81,7 +81,7 @@ import {
   retryMerge,
 } from './merge-approval.js';
 import { requestPullRequestChanges, reworkFailedChecks } from './pr-feedback.js';
-import type { GitHubPort } from '@factory/github';
+import { describeGitHubFailure, type GitHubFailure, type GitHubPort } from '@factory/github';
 import { currentSpec } from './criteria.js';
 import {
   changeJob,
@@ -547,11 +547,11 @@ export class InboxService {
     const plans: { pr: (typeof prs)[number]; plan: RerunPlan }[] = [];
     for (const pr of prs) {
       const repo = { owner: pr.owner, name: pr.name };
-      const readFailed = (what: string, failure?: { kind: string }) =>
+      const readFailed = (what: string, failure?: GitHubFailure) =>
         new ApiFailure(
           502,
           'github_failed',
-          `could not read the ${what} of ${pullRequestLabel(pr)}${failure === undefined ? '' : `: ${failure.kind}`}; nothing was re-run or decided`,
+          `could not read the ${what} of ${pullRequestLabel(pr)}${failure === undefined ? ' (not modified on a fresh read)' : ` (${describeGitHubFailure(failure)})`}; nothing was re-run or decided`,
         );
       const runs = await github.listCheckRuns(repo, pr.headSha);
       if (!runs.ok) throw readFailed('check runs', runs.failure);
@@ -600,7 +600,7 @@ export class InboxService {
           throw new ApiFailure(
             502,
             'github_failed',
-            `GitHub did not re-run the failed jobs of workflow run ${run.name} (${run.checks.join(', ')}) on ${pullRequestLabel(pr)} (${res.failure.kind}: ${'reason' in res.failure ? res.failure.reason : `reset at ${res.failure.resetAt}`}); nothing was decided${already}`,
+            `GitHub did not re-run the failed jobs of workflow run ${run.name} (${run.checks.join(', ')}) on ${pullRequestLabel(pr)} (${describeGitHubFailure(res.failure)}); nothing was decided${already}`,
           );
         }
         requested.push({
@@ -670,10 +670,7 @@ export class InboxService {
     for (const pr of closed) {
       const res = await github.reopenPullRequest({ owner: pr.owner, name: pr.name }, pr.number);
       if (!res.ok) {
-        const answer =
-          res.failure.kind === 'rate_limited'
-            ? `rate limited until ${res.failure.resetAt}`
-            : `${res.failure.kind}${res.failure.status === null ? '' : ` ${String(res.failure.status)}`}: ${res.failure.reason}`;
+        const answer = describeGitHubFailure(res.failure);
         this.reportOnItem(item, actor, {
           type: 'approval.reopen_refused',
           note: `GitHub did not reopen ${pullRequestLabel(pr)} (${answer}). Reopen it on GitHub yourself, try again, or cancel the Job.`,

@@ -117,6 +117,13 @@ export interface RateLimitGate {
   limited(limit: { status: number; resetAt: string }): void;
 }
 
+/** A failure in words, for a refusal the operator reads: never the request or the token. */
+export function describeGitHubFailure(failure: GitHubFailure): string {
+  if (failure.kind === 'rate_limited') return `rate limited until ${failure.resetAt}`;
+  const status = failure.status === null ? '' : ` ${String(failure.status)}`;
+  return `${failure.kind}${status}: ${failure.reason}`;
+}
+
 /** Whether `pause` still holds at `now`: no request is sent before its `until`. */
 export function pauseInForce(pause: { until: string } | null, now = Date.now()): boolean {
   return pause !== null && Date.parse(pause.until) > now;

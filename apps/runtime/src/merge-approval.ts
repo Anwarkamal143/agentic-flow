@@ -23,7 +23,7 @@ import {
   EffectiveConfigSchema,
   evaluateMergeGate,
   failingChecks,
-  rerunnability,
+  describeRerunnability,
   mergeItemOptions,
   MergeMethodSchema,
   readyButForPolicy,
@@ -898,7 +898,7 @@ function ciFailedDetail(failed: readonly FailedCheck[]): string {
       ({ pr, checks }) =>
         `required checks failed on ${label(pr)} at head ${pr.headSha.slice(0, 12)}: ${checks.map(describeFailedCheck).join('; ')}`,
     )
-    .concat(rerunnability(failed.map((f) => f.check)))
+    .concat(describeRerunnability(failed.map((f) => f.check)))
     .join('. ');
 }
 

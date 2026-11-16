@@ -28,7 +28,7 @@ The `merge` item stays open beside it. Under `human_approval` it doesn't offer `
   
   **Granularity.** `rerun-failed-jobs` re-runs every failed job of the workflow run (and the jobs that depend on them), not only the required ones. A per-job re-run (`POST /actions/jobs/:id/rerun`) would need the job id (undocumented as equal to the check run's id) and, for two failed jobs of one run, a second call that GitHub refuses while the first re-run is in progress. Re-running a non-required failed job of the same run is harmless.
   
-  **What the item says.** The `ci_failed` Blocker's detail (the item's `why`) ends with which failed checks `rerun_checks` can re-run (`rerunnability`, from the recorded rows: an Actions check run) and which it can't, with why. `pr_checks` gains `app` (migration 0028) so the poller records each check run's app; a row from before has none and reads as "an unknown app" until the next poll records it.
+  **What the item says.** The `ci_failed` Blocker's detail (the item's `why`) ends with which failed checks `rerun_checks` can re-run (`describeRerunnability`, from the recorded rows: an Actions check run, once its workflow run has finished) and which it can't, with why. `pr_checks` gains `app` (migration 0028) so the poller records each check run's app; a row from before has none and reads as "an unknown app" until the next poll records it.
 - **`cancel_job`:** the Job cancel operation, as for every Blocker Approval.
 
 A feedback Rework started by GitHub (a review, a `/factory` comment) while a `ci_failed` item is open supersedes that item along with the `merge` items.

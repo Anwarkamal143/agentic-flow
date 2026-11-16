@@ -222,11 +222,13 @@ pull_requests(id, job_id, repository_id, task_id, owner, name, number, url, stat
          -- adopted: recovery found it on the head branch carrying the Job's marker
          -- last_polled_at is the poller's only write without an event (ADR-0037)
 pr_checks(id, pull_request_id, head_sha, source, name, status, conclusion, outcome, url,
-          summary?, observed_at)                                             -- [Phase C, #58]
+          summary?, app?, observed_at)                                       -- [Phase C, #58]
          -- one per (pull request, head, source, name): the newest check run of a name or
          --   status of a context; source: check_run | status;
          --   outcome: pending | success | neutral | skipped | failure
          --   summary: output.summary (or title) / a status's description; redacted (#61)
+         --   app: the slug of the app that made a check run (github-actions); null for a
+         --   status (#77: rerun_checks re-runs only Actions jobs)
 pr_feedback(id, job_id, pull_request_id, source, external_id, author, review_state?, path?,
             url?, kind, body, created_at, observed_at, attempt_id?)          -- [Phase C, #60]
          -- one per (pull request, source, external id); source: review | issue_comment |

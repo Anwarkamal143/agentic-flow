@@ -486,9 +486,9 @@ export function rerunPlan(input: {
   const chosen = new Map<number, { id: number; name: string; checks: string[] }>();
   const notRerun: NotRerun[] = [];
   for (const run of failed) {
-    const app = run.app ?? null;
-    if (app !== GITHUB_ACTIONS_APP) {
-      notRerun.push({ name: run.name, why: 'other_app', app });
+    const refused = notRerunnable({ name: run.name, source: 'check_run', app: run.app ?? null });
+    if (refused !== null) {
+      notRerun.push(refused);
       continue;
     }
     const workflow = run.checkSuiteId == null ? undefined : bySuite.get(run.checkSuiteId);
@@ -502,7 +502,10 @@ export function rerunPlan(input: {
       chosen.set(workflow.id, entry);
     }
   }
-  for (const name of input.failedStatuses) notRerun.push({ name, why: 'commit_status' });
+  for (const name of input.failedStatuses) {
+    const refused = notRerunnable({ name, source: 'status', app: null });
+    if (refused !== null) notRerun.push(refused);
+  }
   return { workflowRuns: [...chosen.values()].sort((a, b) => a.id - b.id), notRerun };
 }
 
@@ -523,22 +526,36 @@ export function describeNotRerun(n: NotRerun): string {
 }
 
 /**
- * What a `ci_failed` Blocker says about `rerun_checks`, from the recorded
- * checks: which it can re-run (an Actions check run) and which it can't (a
- * check run of another app, a commit status). Pure.
+ * Why `rerun_checks` can never re-run a check, from what is known of it
+ * without reading GitHub: a commit status, or a check run another app made.
+ * Null for an Actions check run (its workflow run decides the rest). Pure.
  */
-export function rerunnability(
+function notRerunnable(check: {
+  name: string;
+  source: CheckSource;
+  app: string | null;
+}): NotRerun | null {
+  if (check.source === 'status') return { name: check.name, why: 'commit_status' };
+  if (check.app !== GITHUB_ACTIONS_APP)
+    return { name: check.name, why: 'other_app', app: check.app };
+  return null;
+}
+
+/**
+ * What a `ci_failed` Blocker says about `rerun_checks`, from the recorded
+ * checks: which it can re-run (an Actions check run, once its workflow run
+ * has finished) and which it can't (a check run of another app, a commit
+ * status). Pure.
+ */
+export function describeRerunnability(
   checks: readonly { name: string; source: CheckSource; app: string | null }[],
 ): string {
-  const can = checks.filter((c) => c.source === 'check_run' && c.app === GITHUB_ACTIONS_APP);
-  const cannot: NotRerun[] = checks.flatMap((c): NotRerun[] => {
-    if (c.source === 'status') return [{ name: c.name, why: 'commit_status' }];
-    return c.app === GITHUB_ACTIONS_APP ? [] : [{ name: c.name, why: 'other_app', app: c.app }];
-  });
+  const can = checks.filter((c) => notRerunnable(c) === null);
+  const cannot = checks.flatMap((c) => notRerunnable(c) ?? []);
   const parts: string[] = [];
   if (can.length > 0) {
     parts.push(
-      `rerun_checks can re-run ${can.map((c) => `${c.name} (GitHub Actions)`).join(', ')}`,
+      `rerun_checks can re-run ${can.map((c) => `${c.name} (GitHub Actions)`).join(', ')}, once ${can.length === 1 ? 'its workflow run has' : 'their workflow runs have'} finished`,
     );
   }
   if (cannot.length > 0) {
