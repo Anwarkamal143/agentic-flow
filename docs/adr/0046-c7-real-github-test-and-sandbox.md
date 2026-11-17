@@ -1,6 +1,6 @@
 # C7: the `[real]` GitHub test and its sandbox
 
-**Status:** accepted (#67, Phase C, C7). **C7 has not passed:** no dependency install in Worktrees (PROGRESS.md spec issue 43, waiting for the human). The sandbox is the human's answer 4 (PROGRESS.md): `Anwarkamal143/factory-sandbox`, a dedicated throwaway repository, used only by the `[real]` tests. The choices below are routine and reversible.
+**Status:** accepted (#67, Phase C, C7). **C7 passed on 2026-11-17** (run 5, `Anwarkamal143/factory-sandbox#6`), after the Worktree setup command (spec issue 43, ADR-0047) and the merge-guard fix (#87); its PR changed no files, because run 4 had already merged `sum()` (see PROGRESS.md and `docs/phases/C.md`). The sandbox is the human's answer 4 (PROGRESS.md): `Anwarkamal143/factory-sandbox`, a dedicated throwaway repository, used only by the `[real]` tests. The choices below are routine and reversible.
 
 ## Decision
 
