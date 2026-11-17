@@ -121,6 +121,8 @@ A good task is **one coherent engineering outcome in one repository**. Splitting
 
 Each task specifies: objective, repository, writable/forbidden globs, dependencies, mandatory ACs covered, verification commands, role, risk, and max attempts.
 
+[Phase D] A Task's verification names **commands of the Repository Profile** (`test`, `typecheck`, `lint`, `build`, or a custom named command a human added), never a free shell command: the plan validator refuses one (ADR-0051). A profile command marked `acceptsArgs` may take arguments, each matching `^[A-Za-z0-9._/:=@+,-]+$`, shell-quoted and appended, so a Task can run focused tests (`test -- src/auth`). Every mandatory AC still needs at least one verification entry naming it.
+
 The **plan approval view** shows: the spec, the DAG, the affected repos, which tasks will run in parallel, the risks, any human decision points, and an estimate (task count and expected attempts; cost only if it can be computed). Allowed edits: remove, add or edit a task, change dependencies, change a task's repo, and change priority. Every edit is re-validated.
 
 Phase B details:

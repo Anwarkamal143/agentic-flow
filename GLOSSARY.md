@@ -26,6 +26,18 @@ _Avoid_: token config, credentials
 The factory's own copy of a Repository, from which every Worktree is made. The owner's own checkout is never written to.
 _Avoid_: Mirror, local repo, checkout
 
+**Repository Profile**:
+What the factory knows about how to work in a Repository: its package manager, named commands, CI files, Sensitive Paths and instruction files. It is used only once a human has confirmed it.
+_Avoid_: Repo config, repo settings
+
+**Profile Detection**:
+The factory's own inspection of a Repository's files to propose a Repository Profile. It is not the Job's `discovery` Stage.
+_Avoid_: Repo discovery, scanning, onboarding scan
+
+**Sensitive Path**:
+A path in a Repository that no Task may write, such as environment files or CI workflows. It is listed in the Repository Profile.
+_Avoid_: Protected path, secret path
+
 ### Work
 
 **Job**:
@@ -198,6 +210,14 @@ _Avoid_: Release, deployment, shipping
 The closing Artifact of a Job, summarising what was delivered, the Evidence for it, and known limitations.
 _Avoid_: Summary, completion report
 
+**Delivery Order**:
+The order in which a multi-Repository Job's pull requests may merge, taken from the dependencies between its Tasks across Repositories.
+_Avoid_: Merge order, release order
+
+**Partial Completion**:
+A multi-Repository Job in which some Repositories are delivered and others are not. The pull requests are never atomic.
+_Avoid_: Partial success, partial failure
+
 ### Configuration
 
 **Policy**:
@@ -211,6 +231,10 @@ _Avoid_: Auto-merge setting, merge rule
 **Immutable Invariant**:
 A safety rule that no level of configuration can loosen. Lower levels may only narrow permissions, never widen them.
 _Avoid_: Safety invariant, hard rule, default
+
+**Factory Level**:
+The factory-wide configuration level, above every Project. It replaces "org" for a single-user factory.
+_Avoid_: Org, global config
 
 **Effective Configuration**:
 The settings that result for one Job once every configuration level is resolved, frozen when the Job is created. Unlike the Workflow Snapshot, a human may deliberately re-freeze it.
