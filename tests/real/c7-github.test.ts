@@ -27,7 +27,7 @@
  *
  * Each run writes its outcome to `tests/real/results/` (gitignored).
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -118,6 +118,7 @@ interface AuditBody {
 interface GitHubPull {
   state: string;
   merged: boolean;
+  changed_files: number;
   merge_commit_sha: string | null;
   body: string | null;
   head: { ref: string; sha: string };
@@ -140,6 +141,34 @@ async function until<T>(
       throw new Error(`timed out after ${String(ms / MINUTE)} min waiting for ${what}`);
     await new Promise((r) => setTimeout(r, everyMs));
   }
+}
+
+/**
+ * The change C7 asks for: the first of these that the sandbox's `src/math.ts`
+ * doesn't export yet. The sandbox is never reset, so a fixed change would be
+ * a no-op once a run has merged it (run 5's PR changed no files).
+ */
+const C7_FUNCTIONS = [
+  'sum',
+  'difference',
+  'product',
+  'quotient',
+  'remainder',
+  'power',
+  'maximum',
+  'minimum',
+  'average',
+  'absoluteDifference',
+];
+
+function nextFunction(checkout: string): string {
+  const math = readFileSync(join(checkout, 'src/math.ts'), 'utf8');
+  const name = C7_FUNCTIONS.find((f) => !new RegExp(`export function ${f}\\b`).test(math));
+  if (name === undefined)
+    throw new Error(
+      `the sandbox's src/math.ts already exports every C7 function (${C7_FUNCTIONS.join(', ')}); add names to C7_FUNCTIONS`,
+    );
+  return name;
 }
 
 const stagesOf = (job: JobBody, id: string) =>
@@ -234,10 +263,12 @@ describe('C7 [real] GitHub delivery', () => {
       expect(repo.mergePolicy).toBe('human_approval');
       await skipPlanApproval(rt, repo.projectId);
 
+      const fn = nextFunction(sandbox.checkout);
+      outcome['function'] = fn;
       const res = await post(rt, '/v1/jobs', {
         repositoryId: repo.id,
-        title: 'Add sum() to math.ts',
-        description: 'Export sum(a: number, b: number): number from src/math.ts, with a test.',
+        title: `Add ${fn}() to math.ts`,
+        description: `Export ${fn}(a: number, b: number): number from src/math.ts, with a test.`,
       });
       expect(res.status).toBe(201);
       const jobId = ((await res.json()) as JobBody).id;
@@ -272,6 +303,8 @@ describe('C7 [real] GitHub delivery', () => {
         expect(live.head.ref).toBe(branch);
         expect(live.base.ref).toBe('main');
         expect(live.body).toContain(`<!-- factory:${jobId}:pull_request -->`);
+        // A real change: the function C7 asked for isn't on main yet.
+        expect(live.changed_files, 'the PR changes files').toBeGreaterThan(0);
 
         // The PR head is the SHA the factory approved and pushed, and that head was reviewed.
         const tasks = await json<TaskBody[]>(rt.request(`/v1/jobs/${jobId}/tasks`));
@@ -347,10 +380,20 @@ describe('C7 [real] GitHub delivery', () => {
           async () => {
             // Nothing merges while the item waits. The factory merges seconds
             // after the decision, so a merged PR is only right if the item,
-            // read after the PR, is decided (not open, superseded or cancelled).
+            // read after the PR, was decided `merge` by the human. A merge on
+            // GitHub itself is decided by the poller (`MERGED_ON_GITHUB`):
+            // that bypasses the Inbox approval C7 is about, so it fails.
             const gh = await sandboxGet<GitHubPull>(`/pulls/${String(pr.number)}`);
             const waiting = await json<ItemBody>(rt.request(`/v1/inbox/${item.id}`));
-            if (gh.merged) expect(waiting.state, 'merged before the human decided').toBe('decided');
+            if (gh.merged)
+              expect(
+                {
+                  state: waiting.state,
+                  decidedBy: waiting.decidedBy,
+                  option: waiting.decision?.option,
+                },
+                'merged without the human approving the merge item (merged on GitHub directly?)',
+              ).toEqual({ state: 'decided', decidedBy: 'user:local', option: 'merge' });
             return waiting;
           },
           (i) => i.state !== 'open',
