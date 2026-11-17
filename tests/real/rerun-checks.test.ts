@@ -23,15 +23,16 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { json, post, skipPlanApproval, type JobBody } from '../support/api.js';
+import { json, post, skipPlanApproval, type EventBody, type JobBody } from '../support/api.js';
 import {
   initializedHome,
   patchFactoryConfig,
   startRuntime,
   tempDir,
   useFakeHarness,
+  type RunningRuntime,
 } from '../support/factory.js';
 import { repoRoot } from '../support/paths.js';
 import { killGroupsOnFinish } from '../support/processes.js';
@@ -58,6 +59,7 @@ const SANDBOX_SETUP = 'npm install --no-package-lock --ignore-scripts --no-audit
 interface RepoBody {
   id: string;
   projectId: string;
+  name: string;
 }
 interface PullRequestBody {
   number: number;
@@ -72,10 +74,6 @@ interface ItemBody {
   subjectRef: string;
   version: number;
   why: string;
-}
-interface EventBody {
-  type: string;
-  payload: Record<string, unknown>;
 }
 interface GitHubCheckRun {
   id: number;
@@ -99,12 +97,16 @@ const APPROVE = {
   },
 };
 
-/** One Plan Task adding the rerun probe file; every review approves. */
-function script() {
+/**
+ * One Plan Task adding the rerun probe file, in `repository` (the registered
+ * Repository's name: its checkout's directory); every review approves.
+ */
+function script(repository: string) {
   const [base] = (validOutput('planning') as { tasks: Record<string, unknown>[] }).tasks;
   const task = {
     ...structuredClone(base),
     key: 'probe',
+    repository,
     title: `Add ${RERUN_PROBE_FILE}`,
     scope: { writable: [RERUN_PROBE_FILE], forbidden: [] },
     dependsOn: [],
@@ -131,6 +133,38 @@ function script() {
     },
     { probe: [APPROVE], integration: [APPROVE] },
   );
+}
+
+/** The newest events kept in a run's results file: the ones that say why it stopped. */
+const EVENT_TAIL = 200;
+
+/**
+ * Why the Job stopped, for the results file: its stage runs (with failures and
+ * Blockers), its newest events and its logs. Each part is read on its own and
+ * records its own error, so a dead runtime never hides the test's own failure.
+ */
+async function diagnostics(rt: RunningRuntime, jobId: string): Promise<Record<string, unknown>> {
+  const allEvents = async () => {
+    const events: EventBody[] = [];
+    for (;;) {
+      const after = events.at(-1)?.seq ?? 0;
+      const page = await json<EventBody[]>(
+        rt.request(`/v1/jobs/${jobId}/events?after=${String(after)}&limit=1000`),
+      );
+      events.push(...page);
+      if (page.length < 1000) return events;
+    }
+  };
+  const [stageRuns, events, logs] = await Promise.allSettled([
+    json<JobBody>(rt.request(`/v1/jobs/${jobId}`)).then((j) => j.stageRuns),
+    allEvents().then((all) =>
+      all.slice(-EVENT_TAIL).map((e) => ({ seq: e.seq, type: e.type, payload: e.payload })),
+    ),
+    rt.home.cli(['logs', jobId]).then((r) => r.stdout),
+  ]);
+  const value = (r: PromiseSettledResult<unknown>) =>
+    r.status === 'fulfilled' ? r.value : { unavailable: String(r.reason) };
+  return { stageRuns: value(stageRuns), events: value(events), logs: value(logs) };
 }
 
 /** Polls `read` every `everyMs` until `done` holds, or fails after `ms` naming `what`. */
@@ -177,7 +211,7 @@ describe('rerun_checks [real] on GitHub Actions', () => {
       };
 
       const home = await initializedHome();
-      useFakeHarness(home, script());
+      useFakeHarness(home, script(basename(sandbox.checkout)));
       patchFactoryConfig(home, { github: { token: 'gh', pollIntervalMs: 10_000 } });
       const rt = await startRuntime(home, {
         env: { HOME: homedir(), USER: userInfo().username, ...GH_CREDENTIALS },
@@ -199,6 +233,8 @@ describe('rerun_checks [real] on GitHub Actions', () => {
       expect(added.code, added.stderr).toBe(0);
       const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
       if (repo === undefined) throw new Error('no Repository');
+      // The scripted plan names the Repository by its checkout's directory.
+      expect(repo.name, 'the Repository name the plan uses').toBe(basename(sandbox.checkout));
       await skipPlanApproval(rt, repo.projectId);
       const res = await post(rt, '/v1/jobs', {
         repositoryId: repo.id,
@@ -264,7 +300,7 @@ describe('rerun_checks [real] on GitHub Actions', () => {
         );
         outcome['after'] = after.workflow_runs;
         const checks = await sandboxGet<{ check_runs: GitHubCheckRun[] }>(
-          `/commits/${opened.headSha}/check-runs?check_name=${SANDBOX_RERUN_CHECK}`,
+          `/commits/${opened.headSha}/check-runs?check_name=${SANDBOX_RERUN_CHECK}&filter=all`,
         );
         outcome['checkRuns'] = checks.check_runs;
         expect(checks.check_runs.length, 'a new check run for the re-run').toBeGreaterThanOrEqual(
@@ -287,6 +323,7 @@ describe('rerun_checks [real] on GitHub Actions', () => {
         outcome['error'] = err instanceof Error ? err.message : String(err);
         throw err;
       } finally {
+        Object.assign(outcome, await diagnostics(rt, jobId));
         record();
       }
     },
