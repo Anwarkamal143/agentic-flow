@@ -299,7 +299,7 @@ TaskResult = {
 1. Check that the worktree is clean apart from the result file. If not, commit the leftovers as a `wip` commit on the task branch and flag them for review (never discard them).
 2. Read the actual `head_sha` from git. Commits that are listed but missing are a protocol violation.
 3. **Path gate:** `git diff --name-only base_sha..head_sha` must be inside `writable` and outside `forbidden`. A violation fails the gate, with the offending paths attached.
-4. Run every `verification` command in the worktree. Store the exit code and the redacted output as evidence tied to `head_sha`.
+4. Run every `verification` command in the worktree. [Phase D] Each entry names a Repository Profile command (with validated arguments when the command accepts them), resolved from the Job's frozen Effective Configuration, never a planner-written shell command (ADR-0051). Store the exit code and the redacted output as evidence tied to `head_sha`.
 5. Missing or invalid result → the attempt is `failed` with `invalid_output`. The commits are preserved.
 
 Question rules [Phase B]: the developer packet sets `may_ask_questions: true`; the reviewer can't ask. `needs_decision` without a blocking question, and `done` with a blocking question, are protocol violations that get the one re-prompt (ADR-0010). A `scope_change_request` is treated as `needs_decision` (§8); scope never changes mid-Plan ([Phase E] `scope_change` Approval).
@@ -377,7 +377,7 @@ The UI always shows the tier of every running attempt. Dangerous-operation polic
 ## 12. Scheduler [MVP basic; v1 fairness]
 
 Loop (every 1–2 s, plus a wake-up after any relevant event):
-1. Select `ready` tasks ordered by `effective_priority = priority_weight + aging(wait_time) − project_share_penalty`. [Phase B: task priority, then time ready; aging and project share are v1.]
+1. Select `ready` tasks ordered by `effective_priority = priority_weight + aging(wait_time) − project_share_penalty`. [Phase B: task priority, then time ready. Phase D, ADR-0050: `priority_weight + 0.5 × floor(wait_s / 60) − in_flight ÷ project limit` (0 when unlimited), shared by the proposal-Stage scheduler; `concurrency.perProjectJobs` counts Jobs with work in flight.]
 2. For each, check the capacity counters (global, per-project, per-repo, per-harness, per-job) and the usage-window state (§13). [Phase B: global (factory `config.json` `concurrency.global`, default 3), per repo and per job (Effective Configuration `concurrency.perRepository` / `perJob`, default 2 each, Job overrides may raise or lower). Per-project waits for v1, per-harness for Phase E. The proposal Stages keep their own one-slot scheduler.]
 3. Claim in one transaction: `INSERT INTO leases (...) ON CONFLICT DO NOTHING` for `('task', id)` plus the capacity tokens, then transition `ready → claimed` with an optimistic version check. If any step fails, roll back.
 4. Dispatch: create the worktree if needed, then `harness.start`. Heartbeat the lease every 15 s. A lease expires after 90 s without a heartbeat.
@@ -401,13 +401,13 @@ Loop (every 1–2 s, plus a wake-up after any relevant event):
 - **Transport:** one GitHub port, REST over `fetch` at a configurable API base URL. Authentication is a **token reference** (`gh` or `env:NAME`) resolved for each request, never stored, and taught to redaction. A Repository's coordinates (`owner/name`) come from a github.com remote or `repo add --github` (ADR-0033).
 - **Local-first:** GitHub is **polled** (conditional requests with ETag, 30–60 s while a PR is open). Webhooks or a tunnel are optional [Later].
 - **Rate limits and backoff:** a rate limit is capacity, not failure. It sets a GitHub-wide `paused_until` (the `github_state` row, GitHub's reset), with `github.paused` and `github.resumed` events. No GitHub API call is made until the reset, no Stage Run changes, and no Blocker is raised. Transient failures (5xx, network) back the poller off exponentially from the poll interval, capped at 5 minutes (ADR-0045).
-- **Multi-repo:** one integration branch and one PR per repository. Each job has a `delivery_order` (from the DAG). The default contract strategy is **expand → migrate consumers → contract**, with feature flags where a change can't be made additive. Reports must say that multiple PRs are *not* atomic.
+- **Multi-repo:** one integration branch and one PR per repository. Each job has a `delivery_order` (from the DAG). The default contract strategy is **expand → migrate consumers → contract**, with feature flags where a change can't be made additive. Reports must say that multiple PRs are *not* atomic. [Phase D] Every PR opens when its integration is ready; a later Repository's Merge Gate waits until the earlier PR in the Delivery Order has merged. The contract step (removing the old interface) is never in the same Job: the planner marks it deferred, and once every PR has merged an Approval offers a follow-up Job for it (ADR-0052).
 
 ## 15. Configuration [MVP minimal; v1 full hierarchy]
 
 - **The DB is authoritative at runtime.** `factory config export` / `import` gives a YAML GitOps path. An import is validated, diffed, and applied as one audited change.
-- Precedence: immutable invariants > org > project > repo > recipe defaults > job overrides > task restrictions. Lower levels may only **narrow** anything that is permission-related.
-- `resolveEffectiveConfig(job)` is a pure function. Its result is stored in `jobs.config_snapshot_json` at creation, so later config edits never change a running job (a job can be explicitly "re-snapshotted" by a human).
+- Levels [Phase D, ADR-0049], from least to most specific: recipe defaults < **Factory** (the factory-wide level in the DB; "org" for a single-user factory) < project < repository < job overrides < task restrictions. The most specific level that sets a value wins; Immutable Invariants are a ceiling no level lifts. A level may only **narrow** anything permission-related relative to the level above it (also on import). The Factory's `config.json` is bootstrap-only (home, port, workspace root, the API token's location).
+- `resolveEffectiveConfig(job)` is a pure function. Its result is stored in `jobs.config_snapshot_json` at creation, so later config edits never change a running job. The snapshot holds Job-wide values plus a section for every Repository of the Project at creation; the Job uses the sections of its confirmed Repository set. (Re-snapshotting by a human is promised but deferred past Phase D, spec issue 46.)
 - Each effective value records its source level (for the "effective value" UI).
 
 ## 16. Identity [MVP single user; v1 RBAC]
