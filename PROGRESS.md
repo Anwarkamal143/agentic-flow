@@ -4,7 +4,7 @@
 
 ## Current phase
 
-**Phase C — GitHub delivery: complete, awaiting human review (2026-11-17).** Report `docs/phases/C.md`. All eight exit tests pass: C1–C6 and C8 against the fake GitHub, C7 `[real]` on `factory-sandbox` (run 5, `#6`; its PR changed no files because run 4 had already merged `sum()`, see the report). The #77 `[real]` rerun test passed (`#5`). #53–#67 and #77 done, the Worktree setup command (spec issue 43, ADR-0047) built, the `[real]` test fixes merged (#87). The work stops at the gate: accepting Phase C, and closing #67 and #52, is the human's call. Phase D has not been started. (Phase B accepted 2026-11-14, report `docs/phases/B.md`; Phase A accepted 2026-11-09; API-key billing built between the gates, ADR-0015.)
+**Phase C — GitHub delivery: accepted 2026-11-17** (report `docs/phases/C.md`). All eight exit tests pass: C1–C6 and C8 against the fake GitHub, C7 `[real]` on `factory-sandbox` (run 5, `#6`; its PR changed no files because run 4 had already merged `sum()`, see the report). The #77 `[real]` rerun test passed (`#5`). **Next, decided with the acceptance:** a C7 run whose change isn't on the sandbox yet, and flagging a delivery whose diff is empty. Phase D has not been started. (Phase B accepted 2026-11-14, report `docs/phases/B.md`; Phase A accepted 2026-11-09; API-key billing built between the gates, ADR-0015.)
 
 ## Human answers (from CLAUDE.md §7)
 
@@ -24,7 +24,7 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 |---|---|---|---|
 | A — Walking skeleton | **Accepted** 2026-11-09 | 7 / 7 (A1–A7; A7 `[real]` on demand) | `docs/phases/A.md` |
 | B — Human-in-the-loop + DAG | **Accepted** 2026-11-14 | 8 / 8 (B1–B8) | `docs/phases/B.md` |
-| C — GitHub delivery | **Complete, awaiting human review** 2026-11-17 | 8 / 8 (C1–C6, C8 against the fake GitHub; C7 `[real]` on `factory-sandbox`) | `docs/phases/C.md` |
+| C — GitHub delivery | **Accepted** 2026-11-17 | 8 / 8 (C1–C6, C8 against the fake GitHub; C7 `[real]` on `factory-sandbox`) | `docs/phases/C.md` |
 | D — Multi-project, multi-repo, onboarding | Not started | — | — |
 | E — Policy hardening, budgets, evals | Not started | — | — |
 | F — Later | Not started | — | — |
@@ -141,6 +141,10 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 ## Human decisions (outside CLAUDE.md §7)
 
+- 2026-11-17 (the user's own answers, given directly in this session to the report's three questions), **Phase C gate:**
+  - **Phase C accepted** as reported in `docs/phases/C.md`.
+  - **C7 with a real change: yes.** Run C7 again with a change the sandbox doesn't have yet.
+  - **An empty delivery: flag it,** don't refuse it.
 - 2026-11-14 (the user's own answers, collected directly by session s-factory-aa through a question prompt and relayed), **Phase C design grilling, close** (Q11, Q32):
   - **Q11 Phase B accepted** as reported in `docs/phases/B.md`.
   - **Q32 Shared understanding confirmed**: the design of rounds 1–3 is what the user wants. Spec issues 29–35 applied before any code: ARCHITECTURE §5 (`merge` kind, PR-closed question, `pull_requests`/`pr_checks` moved to Phase C), §8.1 (`base_merge_conflict` widened; `ci_failed`, `merge_method_refused`, `integration_rewrite` added), §14 (`factory/<job-id>/integration`, the Integration Task, merge the base in, rewrite only through `integration_rewrite`, human-only conflict route); PRODUCT_SPEC §12 (the three keep-by-default cleanup questions); ROADMAP C1 and C2 wording.
