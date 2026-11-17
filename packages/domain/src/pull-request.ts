@@ -89,6 +89,20 @@ export interface PullRequestBodyInput {
    * from the branch (`adopt_rewrite`, ADR-0042), newest first.
    */
   droppedCommits: readonly ForeignCommit[];
+  /**
+   * The files `headSha` changes against `baseSha`; 0 is an empty delivery,
+   * flagged at the top of the body. `null` when not counted.
+   */
+  changedFiles: number | null;
+}
+
+/**
+ * The flag on an empty delivery: the head changes no files against its base,
+ * so merging it changes nothing. The factory delivers it and says so; it
+ * never refuses one. Shared by the PR body and the `merge` item.
+ */
+export function emptyDeliveryNote(headSha: string, baseSha: string): string {
+  return `This pull request changes no files: head ${headSha} has the same files as base ${baseSha}, so merging it changes nothing. The factory delivers it anyway and flags it; check whether the Job's change was already on the default branch.`;
 }
 
 /** A link GitHub reported, shown only when it is an http(s) URL. */
@@ -122,6 +136,9 @@ function list(items: readonly string[]): string {
 export function renderPullRequestBody(input: PullRequestBodyInput, redact: Redactor): string {
   const sections = [
     `Opened by the Software Factory for Job ${code(input.jobId)}: ${line(input.title)}. Generated from the factory's records; every result below is the factory's own, on head ${code(input.headSha)} over base ${code(input.baseSha)}.`,
+    ...(input.changedFiles === 0
+      ? [`## No changes\n\n**${emptyDeliveryNote(input.headSha, input.baseSha)}**`]
+      : []),
     `## Summary\n\n**Problem.** ${line(input.spec.problem)}\n\n**Objective.** ${line(input.spec.objective)}`,
     `## Acceptance Criteria\n\n${list(
       input.criteria.map(
@@ -257,6 +274,11 @@ export const PullRequestRecordSchema = z.object({
   baseSha: z.string(),
   /** The last head the factory pushed. */
   pushedSha: z.string(),
+  /**
+   * The files the pushed head changes against its base; 0 flags an empty
+   * delivery. `null` for a PR recorded before it was counted.
+   */
+  changedFiles: z.number().int().nullable(),
   /**
    * The number of the PR the factory opened in its place (`new_pr` on an
    * `integration_rewrite` Blocker, #65), or null while it is the current one.

@@ -10,7 +10,7 @@ import type {
   Review,
   Task,
 } from '@factory/domain';
-import { SECURITY_TIER_LABELS } from '@factory/domain';
+import { emptyDeliveryNote, SECURITY_TIER_LABELS } from '@factory/domain';
 import type { ReactNode } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -206,6 +206,17 @@ export function PullRequests({ pullRequests }: { pullRequests: PullRequestRecord
             ))}
           </TableBody>
         </Table>
+        {pullRequests
+          .filter((pr) => pr.changedFiles === 0)
+          .map((pr) => (
+            <p
+              key={pr.id}
+              className="text-sm font-medium"
+              data-testid={`empty-delivery-${String(pr.number)}`}
+            >
+              {`#${String(pr.number)}: ${emptyDeliveryNote(pr.headSha, pr.baseSha)}`}
+            </p>
+          ))}
         {pullRequests.map((pr) => (
           <MergeGateView key={pr.id} pr={pr} />
         ))}
