@@ -345,10 +345,13 @@ describe('C7 [real] GitHub delivery', () => {
         process.stderr.write(`\n${message}\n`);
         await until(
           async () => {
-            // Nothing merges while the item waits.
+            // Nothing merges while the item waits. The factory merges seconds
+            // after the decision, so a merged PR is only right if the item,
+            // read after the PR, is decided (not open, superseded or cancelled).
             const gh = await sandboxGet<GitHubPull>(`/pulls/${String(pr.number)}`);
-            expect(gh.merged, 'merged before the human decided').toBe(false);
-            return json<ItemBody>(rt.request(`/v1/inbox/${item.id}`));
+            const waiting = await json<ItemBody>(rt.request(`/v1/inbox/${item.id}`));
+            if (gh.merged) expect(waiting.state, 'merged before the human decided').toBe('decided');
+            return waiting;
           },
           (i) => i.state !== 'open',
           30 * MINUTE,
