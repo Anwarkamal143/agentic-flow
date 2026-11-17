@@ -16,7 +16,12 @@ import type {
   Review,
   Task,
 } from '@factory/domain';
-import { API_KEY_BILLING_NOTE, costTagOf, SECURITY_TIER_LABELS } from '@factory/domain';
+import {
+  API_KEY_BILLING_NOTE,
+  costTagOf,
+  emptyDeliveryNote,
+  SECURITY_TIER_LABELS,
+} from '@factory/domain';
 import { resolveHome } from '@factory/home';
 import { ApiRequestError, findRuntime, type RuntimeClient } from '../client.js';
 import { describePause, EXIT_NOT_RUNNING } from './lifecycle.js';
@@ -445,6 +450,9 @@ function writePullRequests(pullRequests: PullRequestRecord[], github: GitHubStat
       `    ${pr.headBranch} → ${pr.baseBranch}, head ${pr.headSha.slice(0, 12)} (pushed ${pr.pushedSha.slice(0, 12)})` +
         (pr.adopted ? ', adopted on recovery' : ''),
     );
+    if (pr.changedFiles === 0) {
+      lines.push(`    flagged: ${emptyDeliveryNote(pr.headSha, pr.baseSha)}`);
+    }
     if (pr.replacedByNumber !== null) {
       lines.push(
         `    closed by the factory and replaced by #${String(pr.replacedByNumber)} (a new PR for the rebuilt Integration Branch)`,

@@ -29,6 +29,7 @@ import {
   type TestHome,
 } from '../support/factory.js';
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
+import { emptyDeliveryNote } from '@factory/domain';
 import {
   json,
   post,
@@ -69,8 +70,10 @@ interface PullRequestBody {
   headBranch: string;
   baseBranch: string;
   headSha: string;
+  baseSha: string;
   pushedSha: string;
   adopted: boolean;
+  changedFiles: number | null;
 }
 interface ReportBody {
   reportVersion: number;
@@ -153,6 +156,37 @@ function twoTaskScript(rollback?: string, gate?: string) {
       b: [writes('src/b.ts', gate === undefined ? [] : [waitFor(gate)])],
     },
     { a: [APPROVE], b: [APPROVE], integration: [APPROVE] },
+  );
+}
+
+/** One Plan Task whose developer changes nothing: the delivery is empty (C7 run 5). */
+function emptyScript() {
+  const [base] = (validOutput('planning') as { tasks: Record<string, unknown>[] }).tasks;
+  const task = {
+    ...structuredClone(base),
+    key: 'noop',
+    title: 'Check src/math.ts already has it',
+    scope: { writable: ['src/math.ts'], forbidden: [] },
+    dependsOn: [],
+    acceptance: ['AC-01'],
+    verification: [{ key: 'test', command: 'test -f src/math.ts', criteria: ['AC-01'] }],
+  };
+  return scriptWith(
+    { planning: [{ output: { tasks: [task] } }] },
+    {
+      noop: [
+        {
+          steps: [],
+          result: {
+            status: 'done',
+            summary: 'Already there; nothing to change.',
+            commits: [],
+            criteria: [{ code: 'AC-01', claim: 'met', how: 'the file is there' }],
+          },
+        },
+      ],
+    },
+    { noop: [APPROVE] },
   );
 }
 
@@ -257,6 +291,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
     expect(body).toContain('## Rollback');
     expect(body).toContain('Revert the merge commit; nothing to migrate.');
     expect(body, 'the GitHub access value never reaches GitHub').not.toContain(GH_ACCESS);
+    expect(body, 'a PR that changes files is not flagged').not.toContain('## No changes');
 
     // Recorded in pull_requests, with its event, through the API.
     const recorded = await json<PullRequestBody[]>(rt.request(`/v1/jobs/${job.id}/pull-requests`));
@@ -271,6 +306,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
         headSha: approval?.headSha,
         pushedSha: approval?.headSha,
         adopted: false,
+        changedFiles: 2,
       }),
     ]);
     const [row] = recorded as [PullRequestBody];
@@ -333,6 +369,40 @@ describe('the pull request', { timeout: 120_000 }, () => {
     expect(text(html)).toContain('As recorded by the factory; not read live from GitHub.');
     // Nothing went upstream to the operator's own checkout.
     expect(git(src, ['branch', '--list', 'factory/*']).trim()).toBe('');
+  });
+
+  it('flags an empty delivery, never refusing it: the PR body, the merge item, the record and job show say it changes no files', async () => {
+    const { home, gh, src } = await githubHome(emptyScript());
+    const rt = await startRuntime(home, { env: runtimeEnv(gh) });
+    const repo = await register(rt, src);
+    const created = await createJob(rt, repo.id);
+    const job = await waitForJob(rt, created.id, settled, 90_000);
+
+    // Delivered, not refused: the PR is open and waits for the merge as any other.
+    expect(job.status, rt.output()).toBe('waiting_human');
+    expect(stagesOf(job, 'pull_request')).toEqual(['succeeded']);
+    expect(stagesOf(job, 'merge_approval')).toEqual(['waiting_human']);
+
+    const [row] = await json<PullRequestBody[]>(rt.request(`/v1/jobs/${job.id}/pull-requests`));
+    if (row === undefined) throw new Error('no pull request');
+    expect(row.changedFiles).toBe(0);
+    const note = emptyDeliveryNote(row.headSha, row.baseSha);
+
+    // On GitHub: flagged at the top of the body, before the summary.
+    const [pr] = gh.pullRequests(FULL_NAME);
+    const body = pr?.body ?? '';
+    expect(body).toContain(`## No changes\n\n**${note}**`);
+    expect(body.indexOf('## No changes')).toBeLessThan(body.indexOf('## Summary'));
+
+    // The merge item leads with it, where the human decides.
+    const items = await json<{ jobId: string; kind: string; why: string }[]>(
+      rt.request('/v1/inbox'),
+    );
+    const merge = items.find((i) => i.jobId === job.id && i.kind === 'merge');
+    expect(merge?.why.startsWith(note), merge?.why).toBe(true);
+
+    const shown = await rt.home.cli(['job', 'show', job.id]);
+    expect(shown.stdout).toContain(`flagged: ${note}`);
   });
 
   it('skips pull_request with "no GitHub remote" for a Repository without coordinates, and delivers locally', async () => {

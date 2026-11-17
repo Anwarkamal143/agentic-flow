@@ -6,6 +6,7 @@
  */
 import {
   createRedactor,
+  emptyDeliveryNote,
   hasFactoryMarker,
   pullRequestMarker,
   renderPullRequestBody,
@@ -74,6 +75,7 @@ function input(overrides: Partial<PullRequestBodyInput> = {}): PullRequestBodyIn
     ci: null,
     foreignCommits: [],
     droppedCommits: [],
+    changedFiles: 2,
     ...overrides,
   };
 }
@@ -211,6 +213,24 @@ describe('renderPullRequestBody', () => {
   it("says there are no foreign commits when every commit is the factory's own", () => {
     const body = renderPullRequestBody(input(), identity);
     expect(body).toMatch(/## Foreign commits\n\nNone\./);
+  });
+
+  it('flags an empty delivery at the top, before the summary, and still renders every section', () => {
+    const body = renderPullRequestBody(input({ changedFiles: 0 }), identity);
+    const flag = body.indexOf('## No changes');
+    expect(flag).toBeGreaterThan(-1);
+    expect(flag).toBeLessThan(body.indexOf('## Summary'));
+    expect(body).toContain(`**${emptyDeliveryNote(HEAD, BASE)}**`);
+    expect(body).toContain(`head ${HEAD} has the same files as base ${BASE}`);
+    expect(body).toContain('## Acceptance Criteria');
+    expect(hasFactoryMarker(body, 'job_01')).toBe(true);
+  });
+
+  it('has no flag when the head changes files, or when the count is unknown', () => {
+    expect(renderPullRequestBody(input(), identity)).not.toContain('## No changes');
+    expect(renderPullRequestBody(input({ changedFiles: null }), identity)).not.toContain(
+      '## No changes',
+    );
   });
 
   it('redacts every section, the marker kept', () => {

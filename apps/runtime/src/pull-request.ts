@@ -41,7 +41,7 @@ import {
   type PullRequestRecord,
   type Redactor,
 } from '@factory/domain';
-import { git } from '@factory/git';
+import { changedPaths, git } from '@factory/git';
 import type { GitHubFailure, GitHubPort, PullRequest } from '@factory/github';
 import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -274,8 +274,9 @@ async function openPullRequest(
     if (!closed) return false;
   }
 
+  const changedFiles = await changedFilesOf(repo.clonePath, attempt);
   const body = renderPullRequestBody(
-    pullRequestBodyInput(db, deps.artifacts, job, task, attempt, null, branch),
+    pullRequestBodyInput(db, deps.artifacts, job, task, attempt, null, branch, changedFiles),
     deps.redact,
   );
   // The first push of anything, only once no PR is on the branch (never a foreign PR's).
@@ -316,6 +317,7 @@ async function openPullRequest(
     pr: ensured.pr,
     adopted: ensured.kind === 'adopted',
     body,
+    changedFiles,
     replacing: r.replacing,
   });
   return true;
@@ -939,8 +941,9 @@ async function updateInPlace(
     }
     await push(deps.redact, repo.clonePath, coordinates, attempt.headSha, branch);
   }
+  const changedFiles = await changedFilesOf(repo.clonePath, attempt);
   const body = renderPullRequestBody(
-    pullRequestBodyInput(db, deps.artifacts, job, task, attempt, null, branch),
+    pullRequestBodyInput(db, deps.artifacts, job, task, attempt, null, branch, changedFiles),
     deps.redact,
   );
   const patched = await withResultRetries(deps, () =>
@@ -1016,6 +1019,7 @@ async function updateInPlace(
         gateJson: null,
         gateEvaluatedAt: null,
         bodySha256: bodyHash(body),
+        changedFiles,
         version: sql`${schema.pullRequests.version} + 1`,
       })
       .where(
@@ -1091,6 +1095,8 @@ function recordPullRequest(
     adopted: boolean;
     /** The body the factory sent (its hash tells the poller when a re-rendering differs). */
     body: string;
+    /** The files the pushed head changes against its base (0: an empty delivery, flagged). */
+    changedFiles: number;
     /** The PR this one replaces (`new_pr`, #65): closed on GitHub, marked replaced here. */
     replacing?: { recorded: PullRequestRow; approvalId: string } | undefined;
   },
@@ -1119,6 +1125,7 @@ function recordPullRequest(
         lastPolledAt: null,
         headSeenAt: now,
         bodySha256: bodyHash(r.body),
+        changedFiles: r.changedFiles,
         version: 0,
       })
       .run();
@@ -1254,6 +1261,8 @@ export function pullRequestBodyInput(
   ci: PullRequestBodyInput['ci'] = null,
   /** The branch the PR is on: `integration-<n>` after a `new_pr` (#65). */
   branch: string = integrationBranch(job.id),
+  /** The files the head changes against its base (`changedFilesOf`); `null` when not counted. */
+  changedFiles: number | null = null,
 ): PullRequestBodyInput {
   const spec = currentSpec(db, job.id);
   if (spec === undefined) throw new Error(`Job ${job.id} has no current Specification`);
@@ -1360,7 +1369,16 @@ export function pullRequestBodyInput(
       subject: c.subject,
       author: c.author,
     })),
+    changedFiles,
   };
+}
+
+/** The files `attempt`'s head changes against its base, in the Factory Clone: 0 is an empty delivery. */
+async function changedFilesOf(
+  clonePath: string,
+  attempt: { baseSha: string; headSha: string },
+): Promise<number> {
+  return (await changedPaths(clonePath, attempt.baseSha, attempt.headSha)).length;
 }
 
 /** The Job's pull requests as recorded, for the API and the views. */

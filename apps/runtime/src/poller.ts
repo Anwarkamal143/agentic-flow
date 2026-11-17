@@ -406,6 +406,7 @@ function renderedBody(
       { ...attempt, headSha: attempt.headSha },
       ci,
       row.headBranch,
+      row.changedFiles,
     ),
     redact,
   );

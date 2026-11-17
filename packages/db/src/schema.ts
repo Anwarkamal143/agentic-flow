@@ -668,6 +668,12 @@ export const pullRequests = sqliteTable(
     /** SHA-256 of the body the factory last sent; it is PATCHed when the rendering differs. */
     bodySha256: text('body_sha256'),
     /**
+     * The files the pushed head changes against its base, counted when the
+     * factory last pushed it; 0 flags an empty delivery (never refused). Null
+     * for a PR recorded before it was counted.
+     */
+    changedFiles: integer('changed_files'),
+    /**
      * The PR opened in its place (`new_pr` on an `integration_rewrite` Blocker,
      * #65): this one was closed by the factory, so it no longer counts as the
      * Job's PR (no `pr_closed`, no polling, no Merge Gate). Null while current.

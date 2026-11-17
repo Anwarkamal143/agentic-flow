@@ -24,6 +24,7 @@ import {
   evaluateMergeGate,
   failingChecks,
   describeRerunnability,
+  emptyDeliveryNote,
   mergeItemOptions,
   MergeMethodSchema,
   readyButForPolicy,
@@ -229,9 +230,10 @@ function openMergeItem(
           ? `Merge pull request ${label(pr)} on GitHub`
           : `Approve merging pull request ${label(pr)}`,
       why:
-        policy === 'never_auto'
+        (pr.changedFiles === 0 ? `${emptyDeliveryNote(pr.headSha, pr.baseSha)} ` : '') +
+        (policy === 'never_auto'
           ? `The Merge Policy is never_auto: the factory never merges. Merge ${pr.url} on GitHub when you are ready (the Job shows the Merge Gate: checks, reviews, mergeability). The factory sees the merge by polling, closes this item and completes the Job. Head ${pr.headSha}, base ${pr.baseSha}; a new head or base replaces this item.`
-          : `The Merge Policy is human_approval: the factory merges ${pr.url} once you approve. The merge option is offered only while every other Merge Gate condition passes (the Job shows them: checks, reviews, mergeability). Your approval is audited; the factory re-reads the PR right before merging, with the Repository's merge method. Head ${pr.headSha}, base ${pr.baseSha}; a new head or base replaces this item.`,
+          : `The Merge Policy is human_approval: the factory merges ${pr.url} once you approve. The merge option is offered only while every other Merge Gate condition passes (the Job shows them: checks, reviews, mergeability). Your approval is audited; the factory re-reads the PR right before merging, with the Repository's merge method. Head ${pr.headSha}, base ${pr.baseSha}; a new head or base replaces this item.`),
       questionsJson: null,
       optionsJson: JSON.stringify(mergeItemOptions(policy, storedGate(pr))),
       recommended: null,
