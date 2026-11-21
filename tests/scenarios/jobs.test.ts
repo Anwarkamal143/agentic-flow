@@ -31,12 +31,14 @@ describe('factory job create / job show', () => {
     expect(jobs).toHaveLength(1);
     const [listed] = jobs as [JobBody];
     expect(res.stdout).toContain(listed.id);
+    expect(listed.repositories).toEqual([{ id: repo.id, name: 'tiny-ts' }]);
+    expect(listed).not.toHaveProperty('repositoryId');
 
     const job = await json<JobBody>(rt.request(`/v1/jobs/${listed.id}`));
     expect(job).toMatchObject({
       id: listed.id,
       projectId: repo.projectId,
-      repositoryId: repo.id,
+      repositories: [{ id: repo.id, name: 'tiny-ts' }],
       title: 'Add sum() to math.ts',
       description: 'Export sum(a, b) from src/math.ts.',
       type: 'feature',
@@ -64,6 +66,7 @@ describe('factory job create / job show', () => {
     expect(show.code, show.stderr).toBe(0);
     expect(show.stdout).toContain('Add sum() to math.ts');
     expect(show.stdout).toMatch(/status: +active/);
+    expect(show.stdout).toMatch(new RegExp(`repositories: +tiny-ts \\(${repo.id}\\)`));
     expect(show.stdout).toMatch(/triage +queued/);
     expect(show.stdout).toMatch(/intake +succeeded/);
 

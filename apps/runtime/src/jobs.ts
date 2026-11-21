@@ -39,6 +39,7 @@ import {
   type CreateJobInput,
   type RequestReplanInput,
   type Job,
+  type JobRepository,
   type JobSummary,
   type StageRun,
   type Task,
@@ -220,7 +221,7 @@ export class JobService {
 
   get(id: string): Job {
     const state = readJobState(this.db, id);
-    return toJob(state, this.repositoryOf(id));
+    return toJob(state, this.repositoriesOf([id]).get(id) ?? []);
   }
 
   list(): JobSummary[] {
@@ -233,19 +234,13 @@ export class JobService {
       .where(inArray(schema.stageRuns.jobId, ids))
       .orderBy(asc(schema.stageRuns.position), asc(schema.stageRuns.attempt))
       .all();
-    const repos = this.db
-      .select()
-      .from(schema.jobRepositories)
-      .where(inArray(schema.jobRepositories.jobId, ids))
-      .all();
-    return rows.map((job) => {
-      const link = repos.find((r) => r.jobId === job.id);
-      if (link === undefined) throw new Error(`Job ${job.id} has no Repository`);
-      return toSummary(
+    const repos = this.repositoriesOf(ids);
+    return rows.map((job) =>
+      toSummary(
         { job, stageRuns: runs.filter((r) => r.jobId === job.id) },
-        link.repositoryId,
-      );
-    });
+        repos.get(job.id) ?? [],
+      ),
+    );
   }
 
   /**
@@ -495,14 +490,27 @@ export class JobService {
       );
   }
 
-  private repositoryOf(jobId: string): string {
-    const row = this.db
-      .select()
+  /** Each Job's Repositories, ordered by name. */
+  private repositoriesOf(jobIds: string[]): Map<string, JobRepository[]> {
+    const rows = this.db
+      .select({
+        jobId: schema.jobRepositories.jobId,
+        id: schema.repositories.id,
+        name: schema.repositories.name,
+      })
       .from(schema.jobRepositories)
-      .where(eq(schema.jobRepositories.jobId, jobId))
-      .get();
-    if (row === undefined) throw new Error(`Job ${jobId} has no Repository`);
-    return row.repositoryId;
+      .innerJoin(
+        schema.repositories,
+        eq(schema.repositories.id, schema.jobRepositories.repositoryId),
+      )
+      .where(inArray(schema.jobRepositories.jobId, jobIds))
+      .orderBy(asc(schema.repositories.name), asc(schema.repositories.id))
+      .all();
+    const byJob = new Map<string, JobRepository[]>();
+    for (const { jobId, id, name } of rows) {
+      byJob.set(jobId, [...(byJob.get(jobId) ?? []), { id, name }]);
+    }
+    return byJob;
   }
 }
 
@@ -563,12 +571,13 @@ function toStageRun(row: JobState['stageRuns'][number]): StageRun {
   };
 }
 
-function toSummary(state: JobState, repositoryId: string): JobSummary {
+function toSummary(state: JobState, repositories: JobRepository[]): JobSummary {
   const { job } = state;
+  if (repositories.length === 0) throw new Error(`Job ${job.id} has no Repository`);
   return {
     id: job.id,
     projectId: job.projectId,
-    repositoryId,
+    repositories,
     title: job.title,
     type: JobTypeSchema.parse(job.type),
     status: JobStatusSchema.parse(job.status),
@@ -579,10 +588,10 @@ function toSummary(state: JobState, repositoryId: string): JobSummary {
   };
 }
 
-function toJob(state: JobState, repositoryId: string): Job {
+function toJob(state: JobState, repositories: JobRepository[]): Job {
   const effectiveConfig = EffectiveConfigSchema.parse(JSON.parse(state.job.configSnapshotJson));
   return {
-    ...toSummary(state, repositoryId),
+    ...toSummary(state, repositories),
     description: state.job.description,
     workflowSnapshot: WorkflowSnapshotSchema.parse(JSON.parse(state.job.workflowSnapshotJson)),
     effectiveConfig,

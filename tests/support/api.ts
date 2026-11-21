@@ -14,7 +14,7 @@ export interface StageRunBody {
 export interface JobBody {
   id: string;
   projectId: string;
-  repositoryId: string;
+  repositories: { id: string; name: string }[];
   title: string;
   description: string;
   type: string;
