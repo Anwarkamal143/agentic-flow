@@ -30,6 +30,7 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
+  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput } from '../support/scripts.js';
 
@@ -124,6 +125,7 @@ async function setupRuntime(scriptText: string, setup: string) {
   const home = await initializedHome();
   useFakeHarness(home, scriptText);
   const rt = await startRuntime(home);
+  await createProject(rt, 'demo');
   const added = await rt.home.cli([
     'repo',
     'add',

@@ -30,6 +30,7 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
+  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput } from '../support/scripts.js';
 
@@ -147,6 +148,7 @@ async function githubHome(): Promise<Setup> {
 
 async function startRepo(setup: Setup, repoArgs: string[]) {
   const rt = await startRuntime(setup.home, { env: { ...setup.gh.gitEnv(), GH_ACCESS } });
+  await createProject(rt, 'demo');
   const added = await rt.home.cli([
     'repo',
     'add',

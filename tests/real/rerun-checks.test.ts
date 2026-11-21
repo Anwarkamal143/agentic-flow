@@ -25,7 +25,14 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { json, post, skipPlanApproval, type EventBody, type JobBody } from '../support/api.js';
+import {
+  json,
+  post,
+  skipPlanApproval,
+  type EventBody,
+  type JobBody,
+  createProject,
+} from '../support/api.js';
 import {
   initializedHome,
   patchFactoryConfig,
@@ -218,6 +225,7 @@ describe('rerun_checks [real] on GitHub Actions', () => {
       });
       killGroupsOnFinish(rt);
 
+      await createProject(rt, 'sandbox');
       const added = await rt.home.cli([
         'repo',
         'add',

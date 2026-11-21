@@ -347,7 +347,9 @@ pnpm factory init                      # optional: --workspace-root <dir>
 pnpm factory start
 pnpm factory doctor                    # tools found, credentials present (values are never read)
 
-# 4. Register a repository. The factory makes its own clone; your checkout is left alone.
+# 4. Create a project, then register a repository in it.
+#    The factory makes its own clone; your checkout is left alone.
+pnpm factory project create my-app
 pnpm factory repo add ~/code/my-app \
   --project my-app \
   --test-command "npm test" --typecheck-command "npm run typecheck" \
@@ -484,8 +486,10 @@ Run commands with `pnpm factory <cmd>` (or `node apps/cli/dist/main.js <cmd>`). 
 | `init [--workspace-root <dir>]` | Create the factory home, the API token and the config |
 | `start` / `stop` / `status` | Start the runtime in the background, stop it cleanly, or report whether it is running |
 | `doctor` | Check the tools and whether credentials are present (it never reads their values) |
-| `repo add <path> [options]` | Register a repository: make its factory clone and save its confirmed commands. Options: `--project`, `--test-command`, `--typecheck-command`, `--setup`, `--github owner/name`, `--required-check <name>`…, `--merge-policy never_auto\|human_approval`, `--merge-method merge\|squash\|rebase`, `--yes` |
-| `job create --repo <id\|name> --title <t> [--description <d>]` | Create a job. `--per-repository`/`--per-job` override the concurrency limits. `--merge-policy` may only be stricter than the repository's |
+| `project create <name>` / `project list` / `project show <project>` | Create a project (the only way one comes to exist), list projects with their repositories and active jobs, or show one with the config set on it |
+| `project config set <project> <key> <value>` | Set one project config key, dotted when nested (`concurrency.perJob`). New jobs use it; jobs already created keep their frozen configuration |
+| `repo add <path> [options]` | Register a repository in an existing project (`--project`; unset: the only project; an unknown one is refused): make its factory clone and save its confirmed commands. Options: `--project`, `--test-command`, `--typecheck-command`, `--setup`, `--github owner/name`, `--required-check <name>`…, `--merge-policy never_auto\|human_approval`, `--merge-method merge\|squash\|rebase`, `--yes` |
+| `job create --title <t> [--project <p>] [--repo <id\|name>] [--description <d>]` | Create a job. Without `--project`, the only project; without `--repo`, the project's only repository. `--per-repository`/`--per-job` override the concurrency limits. `--merge-policy` may only be stricter than the repository's |
 | `job list` / `job show <id>` | List jobs (newest first), or show one job: status, stages, workflow snapshot, config |
 | `job cancel <id> [--reason <t>]` | Cancel a job. Prints its cleanup approval and the questions it asks |
 | `job replan <id> --feedback <t>` | Request a replan during execution. Unaffected tasks keep their work |

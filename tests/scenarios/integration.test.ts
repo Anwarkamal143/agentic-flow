@@ -29,6 +29,7 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
+  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput } from '../support/scripts.js';
 
@@ -167,6 +168,7 @@ async function runtimeOn(
   const home = await initializedHome();
   useFakeHarness(home, script(src));
   const rt = await startRuntime(home, opts.env === undefined ? undefined : { env: opts.env });
+  await createProject(rt, 'demo');
   const added = await rt.home.cli(['repo', 'add', src, '--project', 'demo', '--yes']);
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));

@@ -1,10 +1,12 @@
 import { resolve } from 'node:path';
 import {
+  chooseProject,
   formatCoordinates,
   MergeMethodSchema,
   SetupCommandSchema,
   MergePolicySchema,
   parseCoordinates,
+  type ProjectSummary,
   type RegisterRepositoryInput,
   type RegisterRepositoryResult,
   type RepositoryCommands,
@@ -20,6 +22,7 @@ const REGISTER_TIMEOUT_MS = 10 * 60_000;
 
 export interface RepoAddOptions {
   path: string;
+  /** An existing Project's name or id; unset: the only Project. */
   project: string | undefined;
   /** Overrides for the detected commands. An empty string means "no command". */
   testCommand: string | undefined;
@@ -78,10 +81,19 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
     return 2;
   }
 
+  // A Project is named, or the only one; never created here (ADR-0055).
+  const chosen = chooseProject(
+    await client.json<ProjectSummary[]>('GET', '/v1/projects'),
+    opts.project,
+  );
+  if (!chosen.ok) {
+    process.stderr.write(`factory: ${chosen.message}\nNothing registered.\n`);
+    return 1;
+  }
+  const project = chosen.project.name;
   const inspection = await client.json<RepositoryInspection>('POST', '/v1/repositories/inspect', {
     body: { path },
   });
-  const project = opts.project ?? inspection.name;
   const commands: RepositoryCommands = {
     test: override(opts.testCommand, inspection.detectedCommands.test),
     typecheck: override(opts.typecheckCommand, inspection.detectedCommands.typecheck),

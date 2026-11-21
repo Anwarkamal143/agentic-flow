@@ -38,7 +38,7 @@ import {
   tempDir,
   type RunningRuntime,
 } from '../support/factory.js';
-import { json, post, skipPlanApproval, type JobBody } from '../support/api.js';
+import { json, post, skipPlanApproval, type JobBody, createProject } from '../support/api.js';
 import { useClaudeCode } from '../support/claude.js';
 import { killGroupsOnFinish } from '../support/processes.js';
 import { repoRoot } from '../support/paths.js';
@@ -242,6 +242,7 @@ describe('C7 [real] GitHub delivery', () => {
       if (status.harness?.credentials !== 'present')
         throw new Error('precondition: Claude Code reports no login. Run `claude /login`.');
 
+      await createProject(rt, 'sandbox');
       const added = await rt.home.cli([
         'repo',
         'add',
