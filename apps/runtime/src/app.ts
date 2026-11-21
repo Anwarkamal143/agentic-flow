@@ -10,7 +10,9 @@ import {
   EditPlanInputSchema,
   RequestPlanChangesInputSchema,
   InspectRepositoryInputSchema,
+  CreateProjectInputSchema,
   ProjectConfigSchema,
+  SetProjectConfigInputSchema,
   RegisterRepositoryInputSchema,
   type ApiError,
   type Billing,
@@ -29,6 +31,7 @@ import { MAX_EVENT_PAGE } from './events.js';
 import { ApiFailure } from './errors.js';
 import type { InboxService } from './inbox.js';
 import type { JobService } from './jobs.js';
+import type { ProjectService } from './projects.js';
 import type { RepositoryService } from './repositories.js';
 
 export interface RuntimeStatus {
@@ -62,6 +65,7 @@ export interface AppDeps {
   github(): GitHubState;
   /** Runs the environment checks (tools, credential presence). */
   doctor(): Promise<DoctorReport>;
+  projects: ProjectService;
   repositories: RepositoryService;
   jobs: JobService;
   inbox: InboxService;
@@ -96,10 +100,19 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get('/v1/doctor', async (c) => c.json(await deps.doctor()));
 
-  app.get('/v1/projects', (c) => c.json(deps.repositories.listProjects()));
+  app.get('/v1/projects', (c) => c.json(deps.projects.list()));
+  app.post('/v1/projects', async (c) => {
+    const input = await parseBody(c, CreateProjectInputSchema);
+    return c.json(deps.projects.create(input), 201);
+  });
+  app.get('/v1/projects/:ref', (c) => c.json(deps.projects.show(c.req.param('ref'))));
   app.post('/v1/projects/:id/config', async (c) => {
     const config = await parseBody(c, ProjectConfigSchema);
-    return c.json(deps.repositories.updateProjectConfig(c.req.param('id'), config));
+    return c.json(deps.projects.replaceConfig(c.req.param('id'), config));
+  });
+  app.post('/v1/projects/:ref/config/set', async (c) => {
+    const input = await parseBody(c, SetProjectConfigInputSchema);
+    return c.json(deps.projects.setConfigKey(c.req.param('ref'), input));
   });
   app.get('/v1/repositories', (c) => c.json(deps.repositories.listRepositories()));
   app.post('/v1/repositories/inspect', async (c) => {

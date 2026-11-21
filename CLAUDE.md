@@ -68,7 +68,9 @@ pnpm test:integration # only the integration tests (tests/integration); builds f
 pnpm test:real     # on demand only, never CI: [real] tests with the real Claude Code (needs `claude` logged in; minutes, uses your usage)
 pnpm format        # Prettier --write
 pnpm --filter @factory/db db:generate   # write a migration after editing packages/db/src/schema.ts
-pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | repo add [--github owner/name] [--required-check <name>]... [--merge-policy never_auto|human_approval] [--merge-method merge|squash|rebase] [--setup <cmd>] | job create [--merge-policy <stricter>]|list|show|cancel | job replan <job> --feedback <text> | logs | activity
+pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor
+                   #   | project create <name> | project list | project show <project> | project config set <project> <key> <value>
+                   #   | repo add [--project <existing>] [--github owner/name] [--required-check <name>]... [--merge-policy never_auto|human_approval] [--merge-method merge|squash|rebase] [--setup <cmd>] | job create --title <t> [--project <p>] [--repo <r>] [--merge-policy <stricter>]|list|show|cancel | job replan <job> --feedback <text> | logs | activity
                    #   | plan show <job> [--raw] | plan edit <job> --file <plan.json>
                    #   | plan request-changes <job> --feedback <text> | inbox [--all] | inbox show|defer|undefer <id> | inbox decide <id> <option> --expect-version <n>
                    #   | inbox answer <id> --answer [<q>=]<text>... | --file <answers.json> [--expect-version <n>]

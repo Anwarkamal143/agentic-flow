@@ -6,6 +6,7 @@ import type {
   Evidence,
   Finding,
   Job,
+  JobRepository,
   PullRequestRecord,
   Review,
   Task,
@@ -41,6 +42,19 @@ export function Field({ label, children }: { label: string; children: ReactNode 
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="text-sm break-words">{children}</dd>
     </div>
+  );
+}
+
+/** A Job's Repositories by name, each titled with its id. */
+export function Repositories({ repositories }: { repositories: JobRepository[] }) {
+  return (
+    <span className="flex flex-wrap gap-x-2">
+      {repositories.map((r) => (
+        <code key={r.id} title={r.id} className="font-mono text-xs">
+          {r.name}
+        </code>
+      ))}
+    </span>
   );
 }
 
@@ -82,8 +96,8 @@ export function JobOverview({ job }: { job: Job }) {
         <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Field label="Current stage">{job.currentStage}</Field>
           <Field label="Type">{job.type}</Field>
-          <Field label="Repository">
-            <code className="font-mono text-xs">{job.repositoryId}</code>
+          <Field label="Repositories">
+            <Repositories repositories={job.repositories} />
           </Field>
           <Field label="Created">
             {formatTime(job.createdAt)} by {job.createdBy}

@@ -15,6 +15,7 @@ import { init } from './commands/init.js';
 import { jobCancel, jobCreate, jobList, jobReplan, jobShow } from './commands/job.js';
 import { logs } from './commands/logs.js';
 import { planEdit, planRaw, planRequestChanges } from './commands/plan.js';
+import { projectConfigSet, projectCreate, projectList, projectShow } from './commands/project.js';
 import { repoAdd } from './commands/repo.js';
 import { start, status, stop } from './commands/lifecycle.js';
 
@@ -26,17 +27,29 @@ Commands:
   status [--json]                 Report whether the runtime is running
   stop                            Stop the runtime cleanly
   doctor [--json]                 Check tools and credential presence (via the runtime)
+  project create <name> [--json] Create a Project (the only way one comes to exist)
+  project list [--json]           List Projects with their Repositories and active Jobs
+  project show <project> [--json] Show a Project: the config set on it, its Repositories
+                                  and active Jobs
+  project config set <project> <key> <value>
+                                  Set one Project config key (dotted when nested, for
+                                  example concurrency.perJob); new Jobs use it, Jobs
+                                  already created keep their frozen configuration
   repo add <path> [--project <name>] [--test-command <cmd>]
            [--typecheck-command <cmd>] [--github <owner/name>]
            [--required-check <name>]... [--merge-policy never_auto|human_approval]
            [--merge-method merge|squash|rebase] [--setup <cmd>] [--yes]
-                                  Register a Repository: make its Factory Clone and save
-                                  its confirmed commands (your checkout is never modified);
+                                  Register a Repository in an existing Project (unset:
+                                  the only Project; an unknown one is refused): make its
+                                  Factory Clone and save its confirmed commands (your
+                                  checkout is never modified);
                                   --setup runs in each Worktree before the Harness and
                                   verification (for example "npm ci")
-  job create --repo <id|name> --title <text> [--description <text>]
-             [--per-repository <n>] [--per-job <n>] [--merge-policy <policy>]
-                                  Create a Job for a registered Repository; the
+  job create --title <text> [--project <id|name>] [--repo <id|name>]
+             [--description <text>] [--per-repository <n>] [--per-job <n>]
+             [--merge-policy <policy>]
+                                  Create a Job (unset --project: the only Project;
+                                  unset --repo: the Project's only Repository); the
                                   concurrency flags override its Task limits, and
                                   --merge-policy may only make the Repository's stricter
   job list [--json]               List Jobs, newest first
@@ -140,6 +153,8 @@ async function main(argv: string[]): Promise<number> {
         yes: values.yes === true,
       });
     }
+    case 'project':
+      return project(rest);
     case 'job':
       return job(rest);
     case 'inbox':
@@ -183,6 +198,50 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
+function project(argv: string[]): Promise<number> | number {
+  const [sub, ...args] = argv;
+  if (sub === 'config') {
+    const [action, ...setArgs] = args;
+    const { positionals } = parseArgs({ args: setArgs, allowPositionals: true, options: {} });
+    const [ref, key, value, ...extra] = positionals;
+    if (action !== 'set' || ref === undefined || key === undefined || value === undefined) {
+      process.stderr.write(`factory: project config set takes <project> <key> <value>\n\n${USAGE}`);
+      return 2;
+    }
+    if (extra.length > 0) {
+      process.stderr.write(`factory: project config set takes one value; quote it\n`);
+      return 2;
+    }
+    return projectConfigSet(ref, key, value);
+  }
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: { json: { type: 'boolean' } },
+  });
+  const json = values.json === true;
+  switch (sub) {
+    case 'create':
+    case 'show': {
+      const [ref, ...extra] = positionals;
+      if (ref === undefined || extra.length > 0) {
+        process.stderr.write(`factory: project ${sub} takes exactly one Project\n\n${USAGE}`);
+        return 2;
+      }
+      return sub === 'create' ? projectCreate(ref, { json }) : projectShow(ref, { json });
+    }
+    case 'list':
+      if (positionals.length > 0) {
+        process.stderr.write(`factory: project list takes no arguments\n\n${USAGE}`);
+        return 2;
+      }
+      return projectList({ json });
+    default:
+      process.stderr.write(`factory: unknown project command '${sub ?? ''}'\n\n${USAGE}`);
+      return 2;
+  }
+}
+
 function job(argv: string[]): Promise<number> | number {
   const [sub, ...args] = argv;
   switch (sub) {
@@ -190,6 +249,7 @@ function job(argv: string[]): Promise<number> | number {
       const { values } = parseArgs({
         args,
         options: {
+          project: { type: 'string' },
           repo: { type: 'string' },
           title: { type: 'string' },
           description: { type: 'string' },
@@ -198,8 +258,8 @@ function job(argv: string[]): Promise<number> | number {
           'merge-policy': { type: 'string' },
         },
       });
-      if (values.repo === undefined || values.title === undefined) {
-        process.stderr.write(`factory: job create needs --repo and --title\n\n${USAGE}`);
+      if (values.title === undefined) {
+        process.stderr.write(`factory: job create needs --title\n\n${USAGE}`);
         return 2;
       }
       const perRepository = limitFlag('--per-repository', values['per-repository']);
@@ -217,6 +277,7 @@ function job(argv: string[]): Promise<number> | number {
       }
       return jobCreate({
         ...(mergePolicy === undefined ? {} : { mergePolicy: mergePolicy.data }),
+        project: values.project,
         repo: values.repo,
         title: values.title,
         description: values.description,

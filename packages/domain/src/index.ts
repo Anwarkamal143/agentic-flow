@@ -61,6 +61,7 @@ export * from './merge-gate.js';
 export * from './pr-feedback.js';
 export * from './base-change.js';
 export * from './setup.js';
+export * from './projects.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -148,6 +149,35 @@ export const ProjectSchema = z.object({
 });
 export type Project = z.infer<typeof ProjectSchema>;
 
+/** `POST /v1/projects` (`project create`). Names are unique. */
+export const CreateProjectInputSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(100)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'must be letters, digits, ".", "_" or "-"'),
+});
+export type CreateProjectInput = z.infer<typeof CreateProjectInputSchema>;
+
+/** `POST /v1/projects/:ref/config/set` (`project config set`): one key, dotted when nested. */
+export const SetProjectConfigInputSchema = z.object({
+  key: z.string().min(1).max(200),
+  value: z.unknown(),
+});
+export type SetProjectConfigInput = z.infer<typeof SetProjectConfigInputSchema>;
+
+/** A Job of a Project that has not reached a terminal status. */
+export const ProjectJobSchema = z.object({ id: z.string(), title: z.string(), status: z.string() });
+export type ProjectJob = z.infer<typeof ProjectJobSchema>;
+
+/** `GET /v1/projects`: each Project with its Repositories and active Jobs. */
+export const ProjectSummarySchema = ProjectSchema.extend({
+  repositories: z.array(z.object({ id: z.string(), name: z.string() })),
+  activeJobs: z.array(ProjectJobSchema),
+});
+export type ProjectSummary = z.infer<typeof ProjectSummarySchema>;
+
 export const RepositorySchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -172,6 +202,13 @@ export const RepositorySchema = z.object({
   createdAt: z.string(),
 });
 export type Repository = z.infer<typeof RepositorySchema>;
+
+/** `GET /v1/projects/:ref` (`project show`): the Project, its Repositories in full and its active Jobs. */
+export const ProjectDetailSchema = ProjectSchema.extend({
+  repositories: z.array(RepositorySchema),
+  activeJobs: z.array(ProjectJobSchema),
+});
+export type ProjectDetail = z.infer<typeof ProjectDetailSchema>;
 
 const absolutePath = z
   .string()
@@ -198,6 +235,7 @@ export type RepositoryInspection = z.infer<typeof RepositoryInspectionSchema>;
 /** `POST /v1/repositories`. `commands` are the human-confirmed ones. */
 export const RegisterRepositoryInputSchema = z.object({
   path: absolutePath,
+  /** An existing Project's name or id; an unknown one is refused, never created (ADR-0055). */
   project: z.string().trim().min(1).max(100),
   commands: RepositoryCommandsSchema,
   /** The Merge Gate's `requiredChecks`, from `repo add --required-check` (repeatable). */
@@ -632,10 +670,18 @@ export const StageRunSchema = z.object({
 });
 export type StageRun = z.infer<typeof StageRunSchema>;
 
+/** A Repository a Job touches, as the Job API shows it. */
+export const JobRepositorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+});
+export type JobRepository = z.infer<typeof JobRepositorySchema>;
+
 export const JobSummarySchema = z.object({
   id: z.string(),
   projectId: z.string(),
-  repositoryId: z.string(),
+  /** The Repositories the Job touches, by name. One today; a list so multi-repo Jobs fit (Phase D). */
+  repositories: z.array(JobRepositorySchema).min(1),
   title: z.string(),
   type: JobTypeSchema,
   status: JobStatusSchema,
@@ -671,7 +717,13 @@ export type RequestReplanInput = z.infer<typeof RequestReplanInputSchema>;
 
 /** `POST /v1/jobs`. */
 export const CreateJobInputSchema = z.object({
-  repositoryId: z.string().min(1),
+  /**
+   * The Project, by id or name. Unset: the Repository's Project, or else the only
+   * Project; with several, the request is refused (PRODUCT_SPEC §5, ADR-0055).
+   */
+  project: z.string().min(1).optional(),
+  /** Unset: the Project's only Repository; with several, the request is refused. */
+  repositoryId: z.string().min(1).optional(),
   title: z.string().trim().min(1).max(200),
   description: z.string().max(20_000).default(''),
   /** Overrides of the Effective Configuration's concurrency limits, up or down (ARCHITECTURE §12). */

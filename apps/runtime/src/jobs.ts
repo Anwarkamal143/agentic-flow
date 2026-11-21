@@ -5,6 +5,7 @@
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   AttemptSchema,
+  chooseProject,
   BlockerSchema,
   evidenceSource,
   ReviewSchema,
@@ -39,6 +40,7 @@ import {
   type CreateJobInput,
   type RequestReplanInput,
   type Job,
+  type JobRepository,
   type JobSummary,
   type StageRun,
   type Task,
@@ -120,20 +122,7 @@ export class JobService {
   create(input: CreateJobInput): Job {
     const id = this.db.transaction(
       (tx) => {
-        const repo = tx
-          .select()
-          .from(schema.repositories)
-          .where(eq(schema.repositories.id, input.repositoryId))
-          .get();
-        if (repo === undefined) {
-          throw new ApiFailure(404, 'repository_not_found', `no Repository ${input.repositoryId}`);
-        }
-        const project = tx
-          .select()
-          .from(schema.projects)
-          .where(eq(schema.projects.id, repo.projectId))
-          .get();
-        if (project === undefined) throw new Error(`Repository ${repo.id} has no Project`);
+        const { project, repo } = jobTarget(tx, input);
 
         // Copies, never references: later edits to the Recipe or config can't reach the Job.
         const snapshot: WorkflowSnapshot = WorkflowSnapshotSchema.parse(
@@ -220,7 +209,7 @@ export class JobService {
 
   get(id: string): Job {
     const state = readJobState(this.db, id);
-    return toJob(state, this.repositoryOf(id));
+    return toJob(state, this.repositoriesOf([id]).get(id) ?? []);
   }
 
   list(): JobSummary[] {
@@ -233,19 +222,13 @@ export class JobService {
       .where(inArray(schema.stageRuns.jobId, ids))
       .orderBy(asc(schema.stageRuns.position), asc(schema.stageRuns.attempt))
       .all();
-    const repos = this.db
-      .select()
-      .from(schema.jobRepositories)
-      .where(inArray(schema.jobRepositories.jobId, ids))
-      .all();
-    return rows.map((job) => {
-      const link = repos.find((r) => r.jobId === job.id);
-      if (link === undefined) throw new Error(`Job ${job.id} has no Repository`);
-      return toSummary(
+    const repos = this.repositoriesOf(ids);
+    return rows.map((job) =>
+      toSummary(
         { job, stageRuns: runs.filter((r) => r.jobId === job.id) },
-        link.repositoryId,
-      );
-    });
+        repos.get(job.id) ?? [],
+      ),
+    );
   }
 
   /**
@@ -495,14 +478,27 @@ export class JobService {
       );
   }
 
-  private repositoryOf(jobId: string): string {
-    const row = this.db
-      .select()
+  /** Each Job's Repositories, ordered by name. */
+  private repositoriesOf(jobIds: string[]): Map<string, JobRepository[]> {
+    const rows = this.db
+      .select({
+        jobId: schema.jobRepositories.jobId,
+        id: schema.repositories.id,
+        name: schema.repositories.name,
+      })
       .from(schema.jobRepositories)
-      .where(eq(schema.jobRepositories.jobId, jobId))
-      .get();
-    if (row === undefined) throw new Error(`Job ${jobId} has no Repository`);
-    return row.repositoryId;
+      .innerJoin(
+        schema.repositories,
+        eq(schema.repositories.id, schema.jobRepositories.repositoryId),
+      )
+      .where(inArray(schema.jobRepositories.jobId, jobIds))
+      .orderBy(asc(schema.repositories.name), asc(schema.repositories.id))
+      .all();
+    const byJob = new Map<string, JobRepository[]>();
+    for (const { jobId, id, name } of rows) {
+      byJob.set(jobId, [...(byJob.get(jobId) ?? []), { id, name }]);
+    }
+    return byJob;
   }
 }
 
@@ -563,12 +559,13 @@ function toStageRun(row: JobState['stageRuns'][number]): StageRun {
   };
 }
 
-function toSummary(state: JobState, repositoryId: string): JobSummary {
+function toSummary(state: JobState, repositories: JobRepository[]): JobSummary {
   const { job } = state;
+  if (repositories.length === 0) throw new Error(`Job ${job.id} has no Repository`);
   return {
     id: job.id,
     projectId: job.projectId,
-    repositoryId,
+    repositories,
     title: job.title,
     type: JobTypeSchema.parse(job.type),
     status: JobStatusSchema.parse(job.status),
@@ -579,10 +576,10 @@ function toSummary(state: JobState, repositoryId: string): JobSummary {
   };
 }
 
-function toJob(state: JobState, repositoryId: string): Job {
+function toJob(state: JobState, repositories: JobRepository[]): Job {
   const effectiveConfig = EffectiveConfigSchema.parse(JSON.parse(state.job.configSnapshotJson));
   return {
-    ...toSummary(state, repositoryId),
+    ...toSummary(state, repositories),
     description: state.job.description,
     workflowSnapshot: WorkflowSnapshotSchema.parse(JSON.parse(state.job.workflowSnapshotJson)),
     effectiveConfig,
@@ -590,4 +587,74 @@ function toJob(state: JobState, repositoryId: string): Job {
     replanRequested: state.job.replanRequested,
     replans: { used: state.job.replansUsed, max: effectiveConfig.maxReplans.value },
   };
+}
+
+/**
+ * The Project and Repository a new Job is for (PRODUCT_SPEC §5, ADR-0055). A named
+ * Repository gives its Project; otherwise the named Project, or the only one. The
+ * Repository is then the Project's only one, until triage may propose a set.
+ */
+function jobTarget(
+  tx: Tx,
+  input: CreateJobInput,
+): {
+  project: typeof schema.projects.$inferSelect;
+  repo: typeof schema.repositories.$inferSelect;
+} {
+  const projects = tx.select().from(schema.projects).all();
+  if (input.repositoryId !== undefined) {
+    const repo = tx
+      .select()
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, input.repositoryId))
+      .get();
+    if (repo === undefined) {
+      throw new ApiFailure(404, 'repository_not_found', `no Repository ${input.repositoryId}`);
+    }
+    const project = projects.find((p) => p.id === repo.projectId);
+    if (project === undefined) throw new Error(`Repository ${repo.id} has no Project`);
+    if (
+      input.project !== undefined &&
+      input.project !== project.id &&
+      input.project !== project.name
+    ) {
+      throw new ApiFailure(
+        409,
+        'repository_not_in_project',
+        `Repository ${repo.name} (${repo.id}) belongs to Project '${project.name}', not '${input.project}'`,
+      );
+    }
+    return { project, repo };
+  }
+  const choice = chooseProject(projects, input.project);
+  if (!choice.ok) {
+    throw new ApiFailure(
+      choice.code === 'project_not_found' ? 404 : 409,
+      choice.code,
+      choice.message,
+    );
+  }
+  const project = choice.project;
+  const repos = tx
+    .select()
+    .from(schema.repositories)
+    .where(eq(schema.repositories.projectId, project.id))
+    .orderBy(asc(schema.repositories.name))
+    .all();
+  const [only, ...others] = repos;
+  if (only === undefined) {
+    throw new ApiFailure(
+      409,
+      'no_repositories',
+      `Project '${project.name}' has no Repositories. Register one with: factory repo add <path> --project ${project.name}`,
+    );
+  }
+  if (others.length > 0) {
+    throw new ApiFailure(
+      409,
+      'repository_required',
+      `Project '${project.name}' has several Repositories (${repos.map((r) => r.name).join(', ')}); name one with --repo`,
+    );
+  }
+  return { project, repo: only };
 }

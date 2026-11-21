@@ -22,6 +22,7 @@ import {
   type EventBody,
   type JobBody,
   skipPlanApproval,
+  createProject,
 } from '../support/api.js';
 import { scriptWith, SUM_SOURCE, validTaskResponse, VALID_SCRIPT } from '../support/scripts.js';
 
@@ -129,6 +130,7 @@ async function executionRuntime(script: string, env?: NodeJS.ProcessEnv) {
   useFakeHarness(home, script);
   const rt = await startRuntime(home, env === undefined ? undefined : { env });
   const source = tinyTsRepo();
+  await createProject(rt, 'demo');
   const res = await rt.home.cli(['repo', 'add', source, '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(

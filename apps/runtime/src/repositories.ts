@@ -9,16 +9,15 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
+  chooseProject,
   coordinatesFromRemoteUrl,
   formatCoordinates,
   MergeMethodSchema,
   MergePolicySchema,
   parseCoordinates,
-  ProjectConfigSchema,
   RepositoryProfileSchema,
   type PackageManager,
   type Project,
-  type ProjectConfig,
   type RegisterRepositoryInput,
   type RegisterRepositoryResult,
   type Repository,
@@ -37,6 +36,7 @@ import {
 import { and, eq, or } from 'drizzle-orm';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
+import { toProject } from './projects.js';
 
 const ACTOR = 'user:local';
 
@@ -87,6 +87,9 @@ export class RepositoryService {
       );
     }
 
+    // Checked again inside the transaction; refused before the clone, so nothing is made.
+    findProject(this.db, input.project);
+
     const id = newId('repo');
     const clonesDir = join(this.workspaceRoot, 'clones');
     const clonePath = join(clonesDir, id);
@@ -118,7 +121,7 @@ export class RepositoryService {
         confirmedAt: now,
       });
       const project = this.db.transaction((tx) => {
-        const proj = findOrCreateProject(tx, input.project, now);
+        const proj = findProject(tx, input.project);
         const clash = tx
           .select({ id: schema.repositories.id })
           .from(schema.repositories)
@@ -201,71 +204,12 @@ export class RepositoryService {
     }
   }
 
-  listProjects(): Project[] {
-    return this.db.select().from(schema.projects).all().map(toProject);
-  }
-
-  /**
-   * Replaces a Project's config. Jobs already created keep the Effective
-   * Configuration they froze at creation; only new Jobs see the change.
-   */
-  updateProjectConfig(id: string, config: ProjectConfig): Project {
-    const updated = this.db.transaction(
-      (tx) => {
-        const row = tx.select().from(schema.projects).where(eq(schema.projects.id, id)).get();
-        if (row === undefined) throw new ApiFailure(404, 'project_not_found', `no Project ${id}`);
-        const before = toProject(row).config;
-        tx.update(schema.projects)
-          .set({ configJson: JSON.stringify(config) })
-          .where(eq(schema.projects.id, id))
-          .run();
-        appendEvent(tx, {
-          entityKind: 'project',
-          entityId: id,
-          type: 'project.config_updated',
-          actor: ACTOR,
-          payload: { before, after: config },
-        });
-        return { ...toProject(row), config };
-      },
-      { behavior: 'immediate' },
-    );
-    this.onCommit();
-    return updated;
-  }
-
   listRepositories(): Repository[] {
     return this.db.select().from(schema.repositories).all().map(toRepository);
   }
 }
 
-function findOrCreateProject(tx: Tx, name: string, now: string): Project {
-  const existing = tx.select().from(schema.projects).where(eq(schema.projects.name, name)).get();
-  if (existing !== undefined) return toProject(existing);
-  const project: Project = { id: newId('prj'), name, config: {}, createdAt: now };
-  tx.insert(schema.projects)
-    .values({ id: project.id, name, configJson: '{}', createdAt: now })
-    .run();
-  appendEvent(tx, {
-    entityKind: 'project',
-    entityId: project.id,
-    type: 'project.created',
-    actor: ACTOR,
-    payload: { name },
-  });
-  return project;
-}
-
-function toProject(row: typeof schema.projects.$inferSelect): Project {
-  return {
-    id: row.id,
-    name: row.name,
-    config: ProjectConfigSchema.parse(JSON.parse(row.configJson)),
-    createdAt: row.createdAt,
-  };
-}
-
-function toRepository(row: typeof schema.repositories.$inferSelect): Repository {
+export function toRepository(row: typeof schema.repositories.$inferSelect): Repository {
   return {
     id: row.id,
     projectId: row.projectId,
@@ -283,6 +227,13 @@ function toRepository(row: typeof schema.repositories.$inferSelect): Repository 
     mergeMethod: MergeMethodSchema.parse(row.mergeMethod),
     createdAt: row.createdAt,
   };
+}
+
+/** The named Project; an unknown one is refused, never created (ADR-0055). */
+function findProject(db: FactoryDb | Tx, ref: string): Project {
+  const choice = chooseProject(db.select().from(schema.projects).all(), ref);
+  if (!choice.ok) throw new ApiFailure(404, choice.code, choice.message);
+  return toProject(choice.project);
 }
 
 /** `--github owner/name`; the API schema has checked it already. */
