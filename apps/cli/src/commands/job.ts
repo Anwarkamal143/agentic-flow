@@ -36,8 +36,10 @@ export function client(): RuntimeClient | undefined {
 }
 
 export interface JobCreateOptions {
-  /** A Repository id or name. */
-  repo: string;
+  /** A Project id or name; unset: the Repository's Project, or the only Project. */
+  project: string | undefined;
+  /** A Repository id or name; unset: the Project's only Repository. */
+  repo: string | undefined;
   title: string;
   description: string | undefined;
   /** Overrides of the Job's concurrency limits (the runtime checks the range). */
@@ -46,23 +48,30 @@ export interface JobCreateOptions {
   mergePolicy?: CreateJobInput['mergePolicy'];
 }
 
-/** `factory job create`: records a Job for a registered Repository. */
+/**
+ * `factory job create`: records a Job. The runtime infers the Project only when
+ * exactly one exists, and the Repository only when the Project has one (ADR-0055).
+ */
 export async function jobCreate(opts: JobCreateOptions): Promise<number> {
   const api = client();
   if (api === undefined) return EXIT_NOT_RUNNING;
-  const repos = await api.json<Repository[]>('GET', '/v1/repositories');
-  const matches = repos.filter((r) => r.id === opts.repo || r.name === opts.repo);
-  if (matches.length !== 1) {
-    process.stderr.write(
-      matches.length === 0
-        ? `factory: no Repository '${opts.repo}'. Registered: ${repos.map((r) => `${r.name} (${r.id})`).join(', ') || 'none'}\n`
-        : `factory: '${opts.repo}' names several Repositories; use its id: ${matches.map((r) => r.id).join(', ')}\n`,
-    );
-    return 1;
+  let repo: Repository | undefined;
+  if (opts.repo !== undefined) {
+    const repos = await api.json<Repository[]>('GET', '/v1/repositories');
+    const matches = repos.filter((r) => r.id === opts.repo || r.name === opts.repo);
+    if (matches.length !== 1) {
+      process.stderr.write(
+        matches.length === 0
+          ? `factory: no Repository '${opts.repo}'. Registered: ${repos.map((r) => `${r.name} (${r.id})`).join(', ') || 'none'}\n`
+          : `factory: '${opts.repo}' names several Repositories; use its id: ${matches.map((r) => r.id).join(', ')}\n`,
+      );
+      return 1;
+    }
+    repo = matches[0];
   }
-  const [repo] = matches as [Repository];
   const input: CreateJobInput = {
-    repositoryId: repo.id,
+    ...(opts.project === undefined ? {} : { project: opts.project }),
+    ...(repo === undefined ? {} : { repositoryId: repo.id }),
     title: opts.title,
     description: opts.description ?? '',
     ...(opts.concurrency === undefined || Object.keys(opts.concurrency).length === 0
@@ -71,7 +80,9 @@ export async function jobCreate(opts: JobCreateOptions): Promise<number> {
     ...(opts.mergePolicy === undefined ? {} : { mergePolicy: opts.mergePolicy }),
   };
   const job = await api.json<Job>('POST', '/v1/jobs', { body: input });
-  process.stdout.write(`Created Job ${job.id} for ${repo.name}\n`);
+  process.stdout.write(
+    `Created Job ${job.id} for ${job.repositories.map((r) => r.name).join(', ')}\n`,
+  );
   writeJob(job);
   return 0;
 }

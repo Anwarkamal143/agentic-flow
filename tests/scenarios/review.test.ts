@@ -17,6 +17,7 @@ import {
   type EventBody,
   type JobBody,
   skipPlanApproval,
+  createProject,
 } from '../support/api.js';
 import {
   scriptWith,
@@ -80,6 +81,7 @@ async function runWith(script: string, opts: { maxAttempts?: number } = {}) {
   const home = await initializedHome();
   useFakeHarness(home, script);
   const rt = await startRuntime(home);
+  await createProject(rt, 'demo');
   const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(

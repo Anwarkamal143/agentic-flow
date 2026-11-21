@@ -25,6 +25,7 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
+  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput } from '../support/scripts.js';
 
@@ -134,6 +135,7 @@ async function runtimeWith(script: string, config: Record<string, unknown> = {})
   useFakeHarness(home, script);
   const rt = await startRuntime(home);
   const source = tinyTsRepo();
+  await createProject(rt, 'demo');
   const res = await rt.home.cli(['repo', 'add', source, '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(

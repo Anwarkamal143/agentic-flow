@@ -5,6 +5,7 @@
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   AttemptSchema,
+  chooseProject,
   BlockerSchema,
   evidenceSource,
   ReviewSchema,
@@ -121,20 +122,7 @@ export class JobService {
   create(input: CreateJobInput): Job {
     const id = this.db.transaction(
       (tx) => {
-        const repo = tx
-          .select()
-          .from(schema.repositories)
-          .where(eq(schema.repositories.id, input.repositoryId))
-          .get();
-        if (repo === undefined) {
-          throw new ApiFailure(404, 'repository_not_found', `no Repository ${input.repositoryId}`);
-        }
-        const project = tx
-          .select()
-          .from(schema.projects)
-          .where(eq(schema.projects.id, repo.projectId))
-          .get();
-        if (project === undefined) throw new Error(`Repository ${repo.id} has no Project`);
+        const { project, repo } = jobTarget(tx, input);
 
         // Copies, never references: later edits to the Recipe or config can't reach the Job.
         const snapshot: WorkflowSnapshot = WorkflowSnapshotSchema.parse(
@@ -599,4 +587,74 @@ function toJob(state: JobState, repositories: JobRepository[]): Job {
     replanRequested: state.job.replanRequested,
     replans: { used: state.job.replansUsed, max: effectiveConfig.maxReplans.value },
   };
+}
+
+/**
+ * The Project and Repository a new Job is for (PRODUCT_SPEC §5, ADR-0055). A named
+ * Repository gives its Project; otherwise the named Project, or the only one. The
+ * Repository is then the Project's only one, until triage may propose a set.
+ */
+function jobTarget(
+  tx: Tx,
+  input: CreateJobInput,
+): {
+  project: typeof schema.projects.$inferSelect;
+  repo: typeof schema.repositories.$inferSelect;
+} {
+  const projects = tx.select().from(schema.projects).all();
+  if (input.repositoryId !== undefined) {
+    const repo = tx
+      .select()
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, input.repositoryId))
+      .get();
+    if (repo === undefined) {
+      throw new ApiFailure(404, 'repository_not_found', `no Repository ${input.repositoryId}`);
+    }
+    const project = projects.find((p) => p.id === repo.projectId);
+    if (project === undefined) throw new Error(`Repository ${repo.id} has no Project`);
+    if (
+      input.project !== undefined &&
+      input.project !== project.id &&
+      input.project !== project.name
+    ) {
+      throw new ApiFailure(
+        409,
+        'repository_not_in_project',
+        `Repository ${repo.name} (${repo.id}) belongs to Project '${project.name}', not '${input.project}'`,
+      );
+    }
+    return { project, repo };
+  }
+  const choice = chooseProject(projects, input.project);
+  if (!choice.ok) {
+    throw new ApiFailure(
+      choice.code === 'project_not_found' ? 404 : 409,
+      choice.code,
+      choice.message,
+    );
+  }
+  const project = choice.project;
+  const repos = tx
+    .select()
+    .from(schema.repositories)
+    .where(eq(schema.repositories.projectId, project.id))
+    .orderBy(asc(schema.repositories.name))
+    .all();
+  const [only, ...others] = repos;
+  if (only === undefined) {
+    throw new ApiFailure(
+      409,
+      'no_repositories',
+      `Project '${project.name}' has no Repositories. Register one with: factory repo add <path> --project ${project.name}`,
+    );
+  }
+  if (others.length > 0) {
+    throw new ApiFailure(
+      409,
+      'repository_required',
+      `Project '${project.name}' has several Repositories (${repos.map((r) => r.name).join(', ')}); name one with --repo`,
+    );
+  }
+  return { project, repo: only };
 }

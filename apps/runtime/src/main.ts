@@ -48,6 +48,7 @@ import { JobService } from './jobs.js';
 import { jobLogs } from './logs.js';
 import { ActivityService } from './activity.js';
 import { Outbox } from './outbox.js';
+import { ProjectService } from './projects.js';
 import { RepositoryService } from './repositories.js';
 import { StageScheduler } from './scheduler.js';
 import { CRASH_POINTS, TaskScheduler } from './execution.js';
@@ -369,6 +370,7 @@ const app = createApp({
       config.harness?.id === 'claude-code' ? config.harness.command : 'claude',
       config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
     ),
+  projects: new ProjectService(database.db, notify),
   repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
   jobs,
   inbox: new InboxService(

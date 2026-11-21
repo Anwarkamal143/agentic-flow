@@ -71,6 +71,7 @@ export async function registeredRepo(
   rt: RunningRuntime,
   opts: { planApproval?: 'required' | 'skip' } = {},
 ): Promise<{ id: string; projectId: string }> {
+  await createProject(rt, 'demo');
   const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
   const [repo] = (await (await rt.request('/v1/repositories')).json()) as [
@@ -78,6 +79,12 @@ export async function registeredRepo(
   ];
   if ((opts.planApproval ?? 'skip') === 'skip') await skipPlanApproval(rt, repo.projectId);
   return repo;
+}
+
+/** Creates a Project (`factory project create`); `repo add --project` needs an existing one. */
+export async function createProject(rt: RunningRuntime, name = 'demo'): Promise<void> {
+  const res = await rt.home.cli(['project', 'create', name]);
+  if (res.code !== 0) throw new Error(`project create failed: ${res.stderr}`);
 }
 
 /** Sets the Project's config to {@link phaseAConfig}. Call before creating the Job. */

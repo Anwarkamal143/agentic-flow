@@ -23,6 +23,7 @@ import {
   type EventBody,
   type JobBody,
   skipPlanApproval,
+  createProject,
 } from '../support/api.js';
 import { filesUnder } from '../support/files.js';
 import { openStream } from '../support/sse.js';
@@ -78,6 +79,7 @@ describe('redaction', () => {
       ),
     );
     const rt = await startRuntime(home, { env: { GH_TOKEN: secret } });
+    await createProject(rt, 'demo');
     const added = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
     expect(added.code, added.stderr).toBe(0);
     const [repo] = await json<[{ id: string; projectId: string }]>(rt.request('/v1/repositories'));
@@ -188,6 +190,7 @@ describe('redaction', () => {
       const doctor = await rt.home.cli(['doctor']);
       expect(doctor.stdout).toMatch(new RegExp(`resolves +token reference ${reference}`));
 
+      await createProject(rt, 'demo');
       const added = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
       expect(added.code, added.stderr).toBe(0);
       const [repo] = await json<[{ id: string; projectId: string }]>(
