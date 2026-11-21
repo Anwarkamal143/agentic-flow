@@ -90,7 +90,8 @@ export async function jobList(opts: { json: boolean }): Promise<number> {
   }
   for (const job of jobs) {
     process.stdout.write(
-      `${job.id}  ${job.status.padEnd(13)} ${job.currentStage.padEnd(13)} ${job.title}\n`,
+      `${job.id}  ${job.status.padEnd(13)} ${job.currentStage.padEnd(13)} ${job.title}` +
+        `  [${job.repositories.map((r) => r.name).join(', ')}]\n`,
     );
   }
   return 0;
@@ -285,14 +286,14 @@ function writeJob(job: Job): void {
     .join(', ');
   const lines = [
     `Job ${job.id}: ${job.title}`,
-    `  status:     ${job.status}`,
-    `  stage:      ${job.currentStage}`,
-    `  repository: ${job.repositoryId}`,
-    `  recipe:     ${job.workflowSnapshot.recipeId} v${String(job.workflowSnapshot.recipeVersion)}`,
-    `  config:     ${config}`,
-    `  replans:    ${String(job.replans.used)} of ${String(job.replans.max)} used${job.replanRequested ? '; replan requested, waiting for the Attempts in flight' : ''}`,
-    `  version:    ${String(job.version)}`,
-    `  created:    ${job.createdAt} by ${job.createdBy}`,
+    `  status:       ${job.status}`,
+    `  stage:        ${job.currentStage}`,
+    `  repositories: ${job.repositories.map((r) => `${r.name} (${r.id})`).join(', ')}`,
+    `  recipe:       ${job.workflowSnapshot.recipeId} v${String(job.workflowSnapshot.recipeVersion)}`,
+    `  config:       ${config}`,
+    `  replans:      ${String(job.replans.used)} of ${String(job.replans.max)} used${job.replanRequested ? '; replan requested, waiting for the Attempts in flight' : ''}`,
+    `  version:      ${String(job.version)}`,
+    `  created:      ${job.createdAt} by ${job.createdBy}`,
     'Stages:',
     ...job.stageRuns.map(
       (s) =>

@@ -86,6 +86,7 @@ describe("the dashboard's read views", () => {
     expect(page).toContain('Add sum() to math');
     expect(page).toContain(job.id);
     expect(page).toContain('completed');
+    expect(page).toContain('Repositories tiny-ts');
     // Its Task and Attempt.
     expect(page).toContain(task.title);
     expect(page).toContain(`Attempt ${String(attempt.n)}`);
@@ -129,6 +130,8 @@ describe("the dashboard's read views", () => {
     const html = await dash.html('/');
     expect(html).toContain(`href="/jobs/${job.id}"`);
     expect(text(html)).toContain('Add sum() to math');
+    expect(text(html)).toContain('Repositories');
+    expect(text(html)).toContain('tiny-ts');
   });
 
   // Narrowed by #37 (ADR-0022): the Inbox is the dashboard's only write path,

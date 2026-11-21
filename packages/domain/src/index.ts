@@ -632,10 +632,18 @@ export const StageRunSchema = z.object({
 });
 export type StageRun = z.infer<typeof StageRunSchema>;
 
+/** A Repository a Job touches, as the Job API shows it. */
+export const JobRepositorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+});
+export type JobRepository = z.infer<typeof JobRepositorySchema>;
+
 export const JobSummarySchema = z.object({
   id: z.string(),
   projectId: z.string(),
-  repositoryId: z.string(),
+  /** The Repositories the Job touches, by name. One today; a list so multi-repo Jobs fit (Phase D). */
+  repositories: z.array(JobRepositorySchema).min(1),
   title: z.string(),
   type: JobTypeSchema,
   status: JobStatusSchema,
