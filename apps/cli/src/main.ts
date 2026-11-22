@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import { MergePolicySchema } from '@factory/domain';
 import { activity, DEFAULT_TAIL_LINES } from './commands/activity.js';
+import { configSet, configShow } from './commands/config.js';
 import { doctor } from './commands/doctor.js';
 import {
   inboxAnswer,
@@ -27,6 +28,11 @@ Commands:
   status [--json]                 Report whether the runtime is running
   stop                            Stop the runtime cleanly
   doctor [--json]                 Check tools and credential presence (via the runtime)
+  config show [--json]            Show the Factory Level (factory-wide configuration):
+                                  its version, each key's value and source
+  config set <key> <value> [--expect-version <n>]
+                                  Set one Factory Level key (for example
+                                  concurrency.global); a stale version is refused
   project create <name> [--json] Create a Project (the only way one comes to exist)
   project list [--json]           List Projects with their Repositories and active Jobs
   project show <project> [--json] Show a Project: the config set on it, its Repositories
@@ -153,6 +159,8 @@ async function main(argv: string[]): Promise<number> {
         yes: values.yes === true,
       });
     }
+    case 'config':
+      return config(rest);
     case 'project':
       return project(rest);
     case 'job':
@@ -194,6 +202,40 @@ async function main(argv: string[]): Promise<number> {
       return command === undefined ? 2 : 0;
     default:
       process.stderr.write(`factory: unknown command '${command}'\n\n${USAGE}`);
+      return 2;
+  }
+}
+
+function config(argv: string[]): Promise<number> | number {
+  const [sub, ...args] = argv;
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: { json: { type: 'boolean' }, 'expect-version': { type: 'string' } },
+  });
+  switch (sub) {
+    case 'show':
+      if (positionals.length > 0 || values['expect-version'] !== undefined) {
+        process.stderr.write(`factory: config show takes no arguments\n\n${USAGE}`);
+        return 2;
+      }
+      return configShow({ json: values.json === true });
+    case 'set': {
+      const [key, value, ...extra] = positionals;
+      if (key === undefined || value === undefined || extra.length > 0) {
+        process.stderr.write(`factory: config set takes <key> <value>\n\n${USAGE}`);
+        return 2;
+      }
+      const raw = values['expect-version'];
+      const expectVersion = raw === undefined ? undefined : Number(raw);
+      if (expectVersion !== undefined && (!Number.isInteger(expectVersion) || expectVersion < 1)) {
+        process.stderr.write(`factory: --expect-version takes a version number\n\n${USAGE}`);
+        return 2;
+      }
+      return configSet(key, value, expectVersion === undefined ? {} : { expectVersion });
+    }
+    default:
+      process.stderr.write(`factory: unknown config command '${sub ?? ''}'\n\n${USAGE}`);
       return 2;
   }
 }

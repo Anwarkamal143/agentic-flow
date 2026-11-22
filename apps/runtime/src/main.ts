@@ -14,7 +14,6 @@ import {
   RUNTIME_HOST,
   ensureHomeDirs,
   githubSettings,
-  globalConcurrency,
   isProcessAlive,
   readConfig,
   readRuntimeRecord,
@@ -43,7 +42,8 @@ import { GitHubPort, TokenSource } from '@factory/github';
 import { createApp, type RuntimeStatus } from './app.js';
 import { InboxService } from './inbox.js';
 import { ArtifactStore } from './artifacts.js';
-import { runDoctor } from './doctor.js';
+import { runDoctor, staleConfigKeys } from './doctor.js';
+import { FactoryLevelService } from './factory-level.js';
 import { JobService } from './jobs.js';
 import { jobLogs } from './logs.js';
 import { ActivityService } from './activity.js';
@@ -200,6 +200,11 @@ if (harness !== undefined && detection !== undefined) {
 }
 
 const database = openDatabase(home.dbPath, { redact });
+// The Factory Level (ADR-0056): created on the first start, `config.json`'s concurrency.global copied in once.
+const factoryLevel = new FactoryLevelService(database.db, () => {
+  notify();
+});
+factoryLevel.ensure(config);
 const startedAt = new Date();
 let state: RuntimeStatus['state'] = 'running';
 let port = 0;
@@ -279,7 +284,7 @@ const tasks = new TaskScheduler({
   db: database.db,
   harness,
   harnessVersion: detection?.version ?? null,
-  globalConcurrency: globalConcurrency(config),
+  globalConcurrency: () => factoryLevel.globalConcurrency(),
   artifacts,
   workspaceRoot: config.workspaceRoot,
   runtimeEnv: process.env,
@@ -369,7 +374,9 @@ const app = createApp({
       { token: githubToken, apiBaseUrl: github.apiBaseUrl },
       config.harness?.id === 'claude-code' ? config.harness.command : 'claude',
       config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
+      staleConfigKeys(home, factoryLevel.show()),
     ),
+  factoryLevel,
   projects: new ProjectService(database.db, notify),
   repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
   jobs,

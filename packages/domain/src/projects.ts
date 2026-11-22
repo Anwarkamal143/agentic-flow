@@ -51,19 +51,24 @@ export function chooseProject<P extends { id: string; name: string }>(
 
 /** The settable Project config keys, dotted for nested ones (`concurrency.perJob`). */
 export function projectConfigKeys(): string[] {
-  return leafKeys(ProjectConfigSchema, '');
+  return configLeafKeys(ProjectConfigSchema);
 }
 
-function leafKeys(schema: z.ZodObject, prefix: string): string[] {
+/** The leaf keys of a config schema, dotted for nested ones. */
+export function configLeafKeys(schema: z.ZodObject, prefix = ''): string[] {
   return Object.entries(schema.shape).flatMap(([key, field]) => {
     const inner: unknown = field instanceof z.ZodOptional ? field.unwrap() : field;
-    return inner instanceof z.ZodObject ? leafKeys(inner, `${prefix}${key}.`) : [`${prefix}${key}`];
+    return inner instanceof z.ZodObject
+      ? configLeafKeys(inner, `${prefix}${key}.`)
+      : [`${prefix}${key}`];
   });
 }
 
-export type ProjectConfigChange =
-  | { ok: true; config: ProjectConfig }
+export type ConfigKeyChange<C> =
+  | { ok: true; config: C }
   | { ok: false; code: 'unknown_config_key' | 'invalid_config_value'; message: string };
+
+export type ProjectConfigChange = ConfigKeyChange<ProjectConfig>;
 
 /**
  * `config` with one key set (`project config set`). The key must be a leaf of the
@@ -74,12 +79,26 @@ export function setProjectConfigKey(
   key: string,
   value: unknown,
 ): ProjectConfigChange {
-  const known = projectConfigKeys();
+  return setConfigKey(ProjectConfigSchema, 'Project', config, key, value);
+}
+
+/**
+ * `config` with one dotted leaf `key` of `schema` set to `value`, validated by
+ * `schema`; `config` is not changed. `level` names the level in messages.
+ */
+export function setConfigKey<S extends z.ZodObject>(
+  schema: S,
+  level: string,
+  config: z.infer<S>,
+  key: string,
+  value: unknown,
+): ConfigKeyChange<z.infer<S>> {
+  const known = configLeafKeys(schema);
   if (!known.includes(key)) {
     return {
       ok: false,
       code: 'unknown_config_key',
-      message: `unknown Project config key '${key}'. Known keys: ${known.join(', ')}`,
+      message: `unknown ${level} config key '${key}'. Known keys: ${known.join(', ')}`,
     };
   }
   const next = structuredClone(config) as Record<string, unknown>;
@@ -94,7 +113,7 @@ export function setProjectConfigKey(
     node = object;
   }
   node[leaf] = value;
-  const parsed = ProjectConfigSchema.safeParse(next);
+  const parsed = schema.safeParse(next);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     return {

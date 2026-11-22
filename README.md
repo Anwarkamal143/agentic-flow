@@ -446,7 +446,7 @@ Each job freezes its **effective configuration** when it is created (`maxAttempt
 
 | Concurrency limit | Default | Set by |
 |---|---|---|
-| global | 3 | `config.json` `concurrency.global` |
+| global | 3 | the Factory Level: `factory config set concurrency.global <n>` (a `config.json` value is copied in once, on the first start, then ignored) |
 | per repository | 2 | effective config, or `job create --per-repository` |
 | per job | 2 | effective config, or `job create --per-job` |
 
@@ -486,6 +486,7 @@ Run commands with `pnpm factory <cmd>` (or `node apps/cli/dist/main.js <cmd>`). 
 | `init [--workspace-root <dir>]` | Create the factory home, the API token and the config |
 | `start` / `stop` / `status` | Start the runtime in the background, stop it cleanly, or report whether it is running |
 | `doctor` | Check the tools and whether credentials are present (it never reads their values) |
+| `config show` / `config set <key> <value> [--expect-version <n>]` | Show or change the Factory Level, the factory-wide configuration in the database (today `concurrency.global`). Each change bumps its version and is audited |
 | `project create <name>` / `project list` / `project show <project>` | Create a project (the only way one comes to exist), list projects with their repositories and active jobs, or show one with the config set on it |
 | `project config set <project> <key> <value>` | Set one project config key, dotted when nested (`concurrency.perJob`). New jobs use it; jobs already created keep their frozen configuration |
 | `repo add <path> [options]` | Register a repository in an existing project (`--project`; unset: the only project; an unknown one is refused): make its factory clone and save its confirmed commands. Options: `--project`, `--test-command`, `--typecheck-command`, `--setup`, `--github owner/name`, `--required-check <name>`…, `--merge-policy never_auto\|human_approval`, `--merge-method merge\|squash\|rebase`, `--yes` |

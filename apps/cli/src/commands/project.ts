@@ -99,11 +99,11 @@ export async function projectConfigSet(ref: string, key: string, raw: string): P
   return 0;
 }
 
-function shown(value: unknown): string {
+export function shown(value: unknown): string {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
-function parseValue(raw: string): unknown {
+export function parseValue(raw: string): unknown {
   try {
     return JSON.parse(raw) as unknown;
   } catch {
@@ -111,7 +111,7 @@ function parseValue(raw: string): unknown {
   }
 }
 
-function configEntries(config: object, prefix = ''): [string, unknown][] {
+export function configEntries(config: object, prefix = ''): [string, unknown][] {
   return Object.entries(config).flatMap(([key, value]: [string, unknown]): [string, unknown][] =>
     typeof value === 'object' && value !== null && !Array.isArray(value)
       ? configEntries(value, `${prefix}${key}.`)

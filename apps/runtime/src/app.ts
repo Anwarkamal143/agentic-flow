@@ -12,6 +12,7 @@ import {
   InspectRepositoryInputSchema,
   CreateProjectInputSchema,
   ProjectConfigSchema,
+  SetFactoryConfigInputSchema,
   SetProjectConfigInputSchema,
   RegisterRepositoryInputSchema,
   type ApiError,
@@ -32,6 +33,7 @@ import { ApiFailure } from './errors.js';
 import type { InboxService } from './inbox.js';
 import type { JobService } from './jobs.js';
 import type { ProjectService } from './projects.js';
+import type { FactoryLevelService } from './factory-level.js';
 import type { RepositoryService } from './repositories.js';
 
 export interface RuntimeStatus {
@@ -65,6 +67,8 @@ export interface AppDeps {
   github(): GitHubState;
   /** Runs the environment checks (tools, credential presence). */
   doctor(): Promise<DoctorReport>;
+  /** The Factory Level: factory-wide configuration (ADR-0056). */
+  factoryLevel: FactoryLevelService;
   projects: ProjectService;
   repositories: RepositoryService;
   jobs: JobService;
@@ -99,6 +103,13 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/v1/github', (c) => c.json(deps.github()));
 
   app.get('/v1/doctor', async (c) => c.json(await deps.doctor()));
+
+  app.get('/v1/factory/config', (c) => c.json(deps.factoryLevel.show()));
+  app.post('/v1/factory/config/set', async (c) => {
+    const input = await parseBody(c, SetFactoryConfigInputSchema);
+    return c.json(deps.factoryLevel.setKey(input, OPERATOR));
+  });
+  app.get('/v1/factory/config/audit', (c) => c.json(deps.factoryLevel.audit()));
 
   app.get('/v1/projects', (c) => c.json(deps.projects.list()));
   app.post('/v1/projects', async (c) => {

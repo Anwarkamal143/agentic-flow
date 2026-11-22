@@ -30,6 +30,18 @@ export const events = sqliteTable(
   (t) => [index('events_job_seq').on(t.jobId, t.seq)],
 );
 
+/**
+ * The Factory Level (ADR-0049, ADR-0056): factory-wide configuration, a single
+ * row (`id` is always `factory`) created on the runtime's first start. `version`
+ * starts at 1 and each change adds one (optimistic concurrency).
+ */
+export const factoryLevel = sqliteTable('factory_level', {
+  id: text('id').primaryKey(),
+  configJson: text('config_json').notNull(),
+  version: integer('version').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 /** A product or initiative that owns Repositories and Jobs. ARCHITECTURE §5. */
 export const projects = sqliteTable(
   'projects',
