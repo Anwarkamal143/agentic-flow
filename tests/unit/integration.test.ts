@@ -75,7 +75,7 @@ function definition(over: Partial<TaskDefinition>): TaskDefinition {
     scope: { writable: ['src/**'], forbidden: [], readHints: [] },
     dependsOn: [],
     acceptance: [],
-    verification: [{ key: 'test', command: 'pnpm test', required: true, criteria: [] }],
+    verification: [{ key: 'test', command: 'test', required: true, criteria: [] }],
     ...over,
   };
 }
@@ -113,24 +113,22 @@ describe('integrationDefinition', () => {
       {
         key: 'a',
         definition: definition({
-          verification: [
-            { key: 'test', command: 'pnpm test', required: false, criteria: ['AC-01'] },
-          ],
+          verification: [{ key: 'test', command: 'test', required: false, criteria: ['AC-01'] }],
         }),
       },
       {
         key: 'b',
         definition: definition({
           verification: [
-            { key: 'unit', command: 'pnpm test', required: true, criteria: ['AC-02', 'AC-01'] },
-            { key: 'lint', command: 'pnpm lint', required: true, criteria: [] },
+            { key: 'unit', command: 'test', required: true, criteria: ['AC-02', 'AC-01'] },
+            { key: 'lint', command: 'lint', required: true, criteria: [] },
           ],
         }),
       },
     ]);
     expect(d.verification).toEqual([
-      { key: 'test', command: 'pnpm test', required: true, criteria: ['AC-01', 'AC-02'] },
-      { key: 'lint', command: 'pnpm lint', required: true, criteria: [] },
+      { key: 'test', command: 'test', required: true, criteria: ['AC-01', 'AC-02'] },
+      { key: 'lint', command: 'lint', required: true, criteria: [] },
     ]);
   });
 
@@ -140,13 +138,13 @@ describe('integrationDefinition', () => {
       {
         key: 'b',
         definition: definition({
-          verification: [{ key: 'test', command: 'pnpm vitest b', required: true, criteria: [] }],
+          verification: [{ key: 'test', command: 'vitest', required: true, criteria: [] }],
         }),
       },
     ]);
     expect(d.verification.map((v) => [v.key, v.command])).toEqual([
-      ['test', 'pnpm test'],
-      ['test-2', 'pnpm vitest b'],
+      ['test', 'test'],
+      ['test-2', 'vitest'],
     ]);
   });
 

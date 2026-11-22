@@ -21,6 +21,7 @@ import {
 import {
   createJob,
   createProject,
+  declareCommands,
   jobSettled,
   json,
   onlyAttempt,
@@ -28,7 +29,7 @@ import {
   skipPlanApproval,
   waitForJob,
 } from '../support/api.js';
-import { scriptWith, validOutput } from '../support/scripts.js';
+import { FIXTURE_COMMANDS, scriptWith, validOutput } from '../support/scripts.js';
 import { claudeStub, useClaudeCode } from '../support/claude.js';
 import { killGroupsOnFinish } from '../support/processes.js';
 
@@ -180,6 +181,10 @@ describe('the Repository Profile as agent context', () => {
     expect(added.code, added.stderr).toBe(0);
     const [repo] = await json<[{ id: string; projectId: string }]>(rt.request('/v1/repositories'));
     await skipPlanApproval(rt, repo.projectId);
+    // The two fixture commands the stub's Plan verifies with (ADR-0063).
+    const { 'has-sum': hasSum, 'math-exists': mathExists } = FIXTURE_COMMANDS;
+    if (hasSum === undefined || mathExists === undefined) throw new Error('no fixture commands');
+    await declareCommands(rt, repo.id, { 'has-sum': hasSum, 'math-exists': mathExists });
     await profileSet(rt, 'commands.test.acceptsArgs', 'true');
 
     const created = await createJob(rt, repo.id);
@@ -196,7 +201,9 @@ describe('the Repository Profile as agent context', () => {
     const planner = stub.invocations().find((r) => r.role === 'planner')?.prompt ?? '';
     expect(planner).toContain(
       'Repository tiny-ts:\n' +
-        '  profile commands: test (npm test; accepts arguments), typecheck (npm run typecheck)\n' +
+        "  profile commands: has-sum (grep -q 'export function sum' src/math.ts), " +
+        'math-exists (test -f src/math.ts && echo typecheck ok), ' +
+        'test (npm test; accepts arguments), typecheck (npm run typecheck)\n' +
         '  Sensitive Paths (forbidden for every Task): .env*, **/.env*, .github/workflows/**, infra/**, **/*.pem, **/*.key, CLAUDE.md, docs/AGENTS.md',
     );
     // Only the planner is told the profile.

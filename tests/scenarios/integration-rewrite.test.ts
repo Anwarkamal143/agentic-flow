@@ -23,13 +23,14 @@ import {
 } from '../support/factory.js';
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput } from '../support/scripts.js';
 
@@ -135,7 +136,9 @@ function task(key: string) {
     scope: { writable: [`src/${key}.ts`], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: `test-${key}`, command: `test -f src/${key}.ts`, criteria: ['AC-01'] }],
+    verification: [
+      { key: `test-${key}`, command: 'exists', args: [`src/${key}.ts`], criteria: ['AC-01'] },
+    ],
   };
 }
 
@@ -177,6 +180,7 @@ async function start(reviews: Record<string, unknown>[]) {
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId, {});
   const res = await post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add the files' });
   expect(res.status, 'create Job').toBe(201);

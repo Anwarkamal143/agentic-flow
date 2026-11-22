@@ -17,15 +17,16 @@ import {
 } from '../support/factory.js';
 import {
   capAttempts,
+  createProject,
+  declareCommands,
   expectStoppedAtCap,
   json,
   onlyAttempt,
   post,
+  skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  skipPlanApproval,
-  createProject,
 } from '../support/api.js';
 import { scriptWith, SUM_SOURCE, validTaskResponse } from '../support/scripts.js';
 
@@ -63,6 +64,7 @@ async function runtimeWith(script: string) {
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   return { rt, repo };
 }

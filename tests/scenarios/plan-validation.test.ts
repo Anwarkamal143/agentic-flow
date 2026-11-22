@@ -55,7 +55,7 @@ describe('Plan validation in the planning Stage', () => {
           title: 'Tidy every source file',
           scope: { writable: ['src/**'], forbidden: [] },
           acceptance: [],
-          verification: [{ key: 'ls', command: 'ls src' }],
+          verification: [{ key: 'ls', command: 'dir-exists', args: ['src'] }],
         },
       ],
     };
@@ -108,7 +108,9 @@ describe('Plan validation in the planning Stage', () => {
       priority,
       scope: { writable: [`docs/${key}.md`], forbidden: [] },
       acceptance: ['AC-01'],
-      verification: [{ key: 'test', command: `test -f docs/${key}.md`, criteria: ['AC-01'] }],
+      verification: [
+        { key: 'test', command: 'exists', args: [`docs/${key}.md`], criteria: ['AC-01'] },
+      ],
       ...extra,
     });
     const taskRun = (key: string) => [

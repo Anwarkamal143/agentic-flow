@@ -66,7 +66,9 @@ function docTask(key: string, dependsOn: string[] = [], title = `Write docs/${ke
     scope: { writable: [`docs/${key}.md`], forbidden: [] },
     dependsOn,
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: `test -f docs/${key}.md`, criteria: ['AC-01'] }],
+    verification: [
+      { key: 'test', command: 'exists', args: [`docs/${key}.md`], criteria: ['AC-01'] },
+    ],
   };
 }
 

@@ -9,15 +9,16 @@ import {
 } from '../support/factory.js';
 import {
   capAttempts,
+  createProject,
+  declareCommands,
   expectStoppedAtCap,
   json,
   onlyAttempt,
   post,
+  skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  skipPlanApproval,
-  createProject,
 } from '../support/api.js';
 import {
   scriptWith,
@@ -87,6 +88,7 @@ async function runWith(script: string, opts: { maxAttempts?: number } = {}) {
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   if (opts.maxAttempts !== undefined) await capAttempts(rt, repo.projectId, opts.maxAttempts);
   const created = await post(rt, '/v1/jobs', {

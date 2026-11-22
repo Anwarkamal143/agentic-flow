@@ -31,13 +31,14 @@ import {
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
 import { emptyDeliveryNote } from '@factory/domain';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput } from '../support/scripts.js';
 
@@ -103,7 +104,9 @@ function fileTask(key: string) {
     scope: { writable: [`src/${key}.ts`], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: `test -f src/${key}.ts`, criteria: ['AC-01'] }],
+    verification: [
+      { key: 'test', command: 'exists', args: [`src/${key}.ts`], criteria: ['AC-01'] },
+    ],
   };
 }
 
@@ -170,7 +173,7 @@ function emptyScript() {
     scope: { writable: ['src/math.ts'], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: 'test -f src/math.ts', criteria: ['AC-01'] }],
+    verification: [{ key: 'test', command: 'exists', args: ['src/math.ts'], criteria: ['AC-01'] }],
   };
   return scriptWith(
     { planning: [{ output: { tasks: [task] } }] },
@@ -217,6 +220,7 @@ async function register(rt: RunningRuntime, src: string): Promise<RepoBody> {
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   return repo;
 }
@@ -287,7 +291,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
     expect(body).toMatch(/\*\*AC-01\*\* \(mandatory\): \*\*pass\*\*/);
     expect(body).toContain('## Commands run on the integration head');
     expect(body).toContain(String(approval?.headSha));
-    expect(body).toContain('test -f src/a.ts');
+    expect(body).toContain("test -f 'src/a.ts'");
     expect(body).toContain('## Risks');
     expect(body).toContain('The constant could use a clearer name.');
     expect(body).toContain('## Rollback');

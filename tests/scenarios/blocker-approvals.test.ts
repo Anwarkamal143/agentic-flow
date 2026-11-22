@@ -20,6 +20,8 @@ import {
 } from '../support/factory.js';
 import {
   createJob,
+  createProject,
+  declareCommands,
   json,
   phaseAConfig,
   post,
@@ -28,7 +30,6 @@ import {
   waitForJob,
   type EventBody,
   type JobBody,
-  createProject,
 } from '../support/api.js';
 import { startDashboard } from '../support/dashboard.js';
 import { factoryGroups, groupAlive, killGroupsOnFinish, waitFor } from '../support/processes.js';
@@ -133,6 +134,7 @@ async function runtimeWith(tasks: unknown[], config: Record<string, unknown>) {
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId, config);
   return { rt, repo };
 }

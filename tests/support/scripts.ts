@@ -3,10 +3,31 @@
  * fixture to one Task, `add-sum`; its execution response adds `sum()` and
  * commits it, and its reviewer approves it with one non-blocking Finding. A Job
  * with more than one Task gets one approving Integration Review (key
- * `integration`, ADR-0035); a single-Task Job on an unchanged base skips it. Verification commands are plain shell checks, so no dependency
- * install is needed in the Worktree.
+ * `integration`, ADR-0035); a single-Task Job on an unchanged base skips it.
+ * Verification names commands of the fixture's Repository Profile
+ * ({@link FIXTURE_COMMANDS}, ADR-0063); each is a plain shell check, so no
+ * dependency install is needed in the Worktree.
  */
 import { parse, stringify } from 'yaml';
+
+/** A named Repository Profile command, as `repo profile set` stores it. */
+export interface ProfileCommand {
+  run: string;
+  acceptsArgs?: boolean;
+}
+
+/**
+ * The named commands every scenario's fixture profile declares (ADR-0063), so
+ * a Fake Harness plan verifies by name, never by free shell. A scenario that
+ * needs another check declares it next to the test.
+ */
+export const FIXTURE_COMMANDS: Record<string, ProfileCommand> = {
+  'has-sum': { run: "grep -q 'export function sum' src/math.ts" },
+  'math-exists': { run: 'test -f src/math.ts && echo typecheck ok' },
+  exists: { run: 'test -f', acceptsArgs: true },
+  'dir-exists': { run: 'test -d', acceptsArgs: true },
+  pass: { run: 'true' },
+};
 
 export const SUM_SOURCE =
   'export function add(a: number, b: number): number {\n  return a + b;\n}\n\n' +
@@ -66,11 +87,11 @@ stages:
             acceptance: [AC-01]
             verification:
               - key: test
-                command: grep -q 'export function sum' src/math.ts
+                command: has-sum
                 required: true
                 criteria: [AC-01]
               - key: typecheck
-                command: test -f src/math.ts && echo typecheck ok
+                command: math-exists
                 required: true
 tasks:
   add-sum:
