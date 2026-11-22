@@ -5,8 +5,10 @@
  * so the one re-prompt can carry it back to the planner.
  */
 import {
+  checkPathScope,
   PlanProposalSchema,
   validatePlan,
+  withSensitivePaths,
   type PlanContext,
   type PlanProposal,
 } from '@factory/domain';
@@ -56,6 +58,7 @@ const ctx = (over: Partial<PlanContext> = {}): PlanContext => ({
     ['repo_app', TRACKED],
     ['repo_web', TRACKED],
   ]),
+  sensitivePaths: new Map(),
   ...over,
 });
 
@@ -229,5 +232,81 @@ describe('PlanProposalSchema: priority', () => {
   it('rejects a priority outside low, normal and high', () => {
     const task = { ...plan({ key: 'one', writable: ['a'] }).tasks[0], priority: 'urgent' };
     expect(PlanProposalSchema.safeParse({ tasks: [task] }).success).toBe(false);
+  });
+});
+
+const onlyTask = (p: PlanProposal) => {
+  const [task] = p.tasks;
+  if (task === undefined) throw new Error('the Plan has no Task');
+  return task;
+};
+
+describe('Sensitive Paths (ADR-0051)', () => {
+  const SENSITIVE = ['.env*', '**/.env*', '.github/workflows/**', 'infra/**', 'CLAUDE.md'];
+  const withSensitive = ctx({
+    sensitivePaths: new Map([
+      ['repo_app', SENSITIVE],
+      ['repo_web', ['secrets/**']],
+    ]),
+  });
+
+  it('rejects a writable entry that is literally a Sensitive Path of the Task’s Repository', () => {
+    const found = issues(plan({ key: 'one', writable: ['src/**', 'infra/**'] }), withSensitive);
+    expect(found).toEqual([
+      {
+        rule: 'plan.sensitive_writable',
+        message:
+          "Task one: writable 'infra/**' is a Sensitive Path of Repository app; Sensitive Paths are forbidden for every Task (a human removes one from the Repository Profile to allow it)",
+      },
+    ]);
+  });
+
+  it('judges each Task against its own Repository’s Sensitive Paths, and only literal entries', () => {
+    expect(
+      rules(
+        plan(
+          // Another Repository's Sensitive Path, and a glob that only overlaps one.
+          { key: 'one', writable: ['secrets/**', 'infra/main.tf'] },
+          { key: 'two', writable: ['infra/**'], repository: 'web' },
+        ),
+        withSensitive,
+      ),
+    ).toEqual([]);
+  });
+
+  it('merges the Sensitive Paths into a Task’s forbidden list, after its own and without duplicates', () => {
+    const task = onlyTask(plan({ key: 'one', writable: ['src/**'] }));
+    const merged = withSensitivePaths(
+      { ...task, scope: { ...task.scope, forbidden: ['package.json', 'infra/**'] } },
+      SENSITIVE,
+    );
+    expect(merged.scope).toEqual({
+      writable: ['src/**'],
+      forbidden: [
+        'package.json',
+        'infra/**',
+        '.env*',
+        '**/.env*',
+        '.github/workflows/**',
+        'CLAUDE.md',
+      ],
+      readHints: [],
+    });
+  });
+
+  it('forbidden beats writable: a Sensitive Path inside a writable glob fails the path gate', () => {
+    const task = onlyTask(plan({ key: 'one', writable: ['src/**', 'infra/main.tf'] }));
+    const { scope } = withSensitivePaths(task, SENSITIVE);
+    const violations = checkPathScope(
+      [
+        { path: 'src/.env.local', kind: 'added' },
+        { path: 'infra/main.tf', kind: 'modified' },
+        { path: 'src/ok.ts', kind: 'modified' },
+      ],
+      scope,
+    );
+    expect(violations.map((v) => [v.rule, v.paths])).toEqual([
+      ['scope.forbidden', ['infra/main.tf', 'src/.env.local']],
+    ]);
   });
 });

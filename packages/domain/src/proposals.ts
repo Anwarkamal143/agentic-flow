@@ -170,14 +170,20 @@ export interface PlanContext {
    * decide whether globs overlap.
    */
   trackedFiles: ReadonlyMap<string, readonly string[]>;
+  /**
+   * The Sensitive Paths of each Repository (by id), from the Job's frozen
+   * per-Repository section (ADR-0051). A Task's `writable` may not list one.
+   */
+  sensitivePaths: ReadonlyMap<string, readonly string[]>;
 }
 
 /**
  * The Plan's DAG checks (ARCHITECTURE §3, §7): unique keys, a Repository of
  * the Job on every Task, valid scope globs, existing dependencies, no cycles,
  * Acceptance Criteria that exist and are all covered when mandatory, a
- * `maxAttempts` that only narrows, and no overlapping writable paths between
- * Tasks that no dependency path orders.
+ * `maxAttempts` that only narrows, no `writable` entry that is literally a
+ * Sensitive Path of the Task's Repository, and no overlapping writable paths
+ * between Tasks that no dependency path orders.
  */
 export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] {
   const issues: RuleIssue[] = [];
@@ -192,11 +198,22 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
   }
   for (const task of plan.tasks) {
     const at = `Task ${task.key}`;
-    if (!ctx.repositories.some((r) => r.id === task.repository || r.name === task.repository)) {
+    const repository = ctx.repositories.find(
+      (r) => r.id === task.repository || r.name === task.repository,
+    );
+    if (repository === undefined) {
       issues.push({
         rule: 'plan.task_repository',
         message: `${at}: repository '${task.repository}' is not a Repository of this Job (${ctx.repositories.map((r) => r.name).join(', ')})`,
       });
+    } else {
+      const sensitive = ctx.sensitivePaths.get(repository.id) ?? [];
+      for (const glob of task.scope.writable.filter((g) => sensitive.includes(g))) {
+        issues.push({
+          rule: 'plan.sensitive_writable',
+          message: `${at}: writable '${glob}' is a Sensitive Path of Repository ${repository.name}; Sensitive Paths are forbidden for every Task (a human removes one from the Repository Profile to allow it)`,
+        });
+      }
     }
     for (const [list, globs] of [
       ['writable', task.scope.writable],
@@ -265,6 +282,27 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
     }
   }
   return issues;
+}
+
+/**
+ * The Task with its Repository's Sensitive Paths added to its `forbidden`
+ * list, after its own globs and without duplicates (ADR-0051). The path-scope
+ * Gate reports a path that is both writable and forbidden as forbidden, so a
+ * Sensitive Path inside a writable glob still fails it. The stored Plan stays
+ * as proposed; the Task's definition carries the merged list.
+ */
+export function withSensitivePaths<T extends { scope: TaskScope }>(
+  task: T,
+  sensitivePaths: readonly string[],
+): T {
+  const own = task.scope.forbidden;
+  return {
+    ...task,
+    scope: {
+      ...task.scope,
+      forbidden: [...own, ...[...new Set(sensitivePaths)].filter((g) => !own.includes(g))],
+    },
+  };
 }
 
 /**

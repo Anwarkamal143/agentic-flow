@@ -298,7 +298,7 @@ TaskResult = {
 **The factory trusts none of it.** After the agent exits:
 1. Check that the worktree is clean apart from the result file. If not, commit the leftovers as a `wip` commit on the task branch and flag them for review (never discard them).
 2. Read the actual `head_sha` from git. Commits that are listed but missing are a protocol violation.
-3. **Path gate:** `git diff --name-only base_sha..head_sha` must be inside `writable` and outside `forbidden`. A violation fails the gate, with the offending paths attached.
+3. **Path gate:** `git diff --name-only base_sha..head_sha` must be inside `writable` and outside `forbidden`. A violation fails the gate, with the offending paths attached A Task's `forbidden` includes its Repository's Sensitive Paths, frozen in the Job's per-Repository section; forbidden beats writable (ADR-0051, ADR-0061).
 4. Run every `verification` command in the worktree. [Phase D] Each entry names a Repository Profile command (with validated arguments when the command accepts them), resolved from the Job's frozen Effective Configuration, never a planner-written shell command (ADR-0051). Store the exit code and the redacted output as evidence tied to `head_sha`.
 5. Missing or invalid result → the attempt is `failed` with `invalid_output`. The commits are preserved.
 

@@ -20,6 +20,7 @@ import {
   type PlanProposal,
   type PlanTaskProposal,
   type TaskDefinition,
+  withSensitivePaths,
 } from '@factory/domain';
 import { git, resolveCommit } from '@factory/git';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
@@ -27,6 +28,7 @@ import { currentCriteria } from './criteria.js';
 import { stepTask } from './engine.js';
 import { cancelIntegrationTasks } from './integration.js';
 import { newId } from './ids.js';
+import { frozenRepositoryConfig } from './repositories.js';
 
 export interface JobRepository {
   id: string;
@@ -50,9 +52,29 @@ export function repositoriesOf(db: FactoryDb | Tx, jobId: string): JobRepository
 }
 
 /**
+ * The Sensitive Paths of each of the Job's Repositories (by id), from the
+ * Job's frozen per-Repository section (ADR-0051, ADR-0060): a profile change
+ * after the Job was created never changes them.
+ */
+export function sensitivePathsOf(
+  db: FactoryDb | Tx,
+  job: { configSnapshotJson: string },
+  repositories: readonly { id: string }[],
+): Map<string, readonly string[]> {
+  const result = new Map<string, readonly string[]>();
+  for (const { id } of repositories) {
+    const row = db.select().from(schema.repositories).where(eq(schema.repositories.id, id)).get();
+    if (row === undefined) throw new Error(`no Repository ${id}`);
+    result.set(id, frozenRepositoryConfig(job.configSnapshotJson, row).sensitivePaths.value);
+  }
+  return result;
+}
+
+/**
  * What a Plan is validated against: the current Specification's criteria, the
- * Effective Configuration's `maxAttempts`, and (unless `trackedFiles` is
- * false) the tracked files at the planning base of each Repository.
+ * Effective Configuration's `maxAttempts`, the Repositories' frozen Sensitive
+ * Paths, and (unless `trackedFiles` is false) the tracked files at the
+ * planning base of each Repository.
  */
 export async function planContextOf(
   db: FactoryDb,
@@ -72,6 +94,7 @@ export async function planContextOf(
     criteria: currentCriteria(db, jobId),
     maxAttempts: config.maxAttempts.value,
     trackedFiles,
+    sensitivePaths: sensitivePathsOf(db, job, repositories),
   };
 }
 
@@ -111,11 +134,16 @@ export function persistPlanTasks(
   const config = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson));
   const repositories = repositoriesOf(tx, ctx.jobId);
   const repoOf = (ref: string) => repositories.find((r) => r.id === ref || r.name === ref);
-  const normalized = (entry: PlanTaskProposal): PlanTaskProposal =>
-    PlanTaskProposalSchema.parse({
-      ...entry,
-      repository: repoOf(entry.repository)?.id ?? entry.repository,
-    });
+  const sensitivePaths = sensitivePathsOf(tx, job, repositories);
+  // Each entry as its Task runs it: its Repository by id, and that Repository's
+  // Sensitive Paths in its forbidden list (ADR-0051).
+  const normalized = (entry: PlanTaskProposal): PlanTaskProposal => {
+    const id = repoOf(entry.repository)?.id ?? entry.repository;
+    return withSensitivePaths(
+      PlanTaskProposalSchema.parse({ ...entry, repository: id }),
+      sensitivePaths.get(id) ?? [],
+    );
+  };
   const op = { jobId: ctx.jobId, actor: ctx.actor };
 
   // The Integration Task is not part of any Plan: never carried over, cancelled instead (ADR-0034).
@@ -195,7 +223,7 @@ export function persistPlanTasks(
   const created = new Map(decision.created.map((c) => [c.key, c] as const));
   for (const c of decision.created) ids.set(c.key, newId('tsk'));
 
-  for (const task of plan.tasks) {
+  for (const task of plan.tasks.map(normalized)) {
     const made = created.get(task.key);
     if (made === undefined) continue;
     const repo = repoOf(task.repository);

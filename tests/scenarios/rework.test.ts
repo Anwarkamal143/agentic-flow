@@ -245,15 +245,17 @@ describe('The path-scope Gate and Rework', () => {
     const first = await onlyAttempt<AttemptBody>(rt, job.id);
     expect(first).toMatchObject({ state: 'failed', exitReason: 'gates_failed' });
     expect(first.findings.map((f) => [f.rule, f.paths])).toEqual([
-      ['scope.forbidden', ['.github/workflows/ci.yml', 'package.json']],
-      ['scope.outside_writable', ['.env.local', 'lib/math.ts']],
+      // `.env.local` is a Sensitive Path (ADR-0061), so forbidden, not merely outside writable.
+      ['scope.forbidden', ['.env.local', '.github/workflows/ci.yml', 'package.json']],
+      ['scope.outside_writable', ['lib/math.ts']],
     ]);
     expect(first.exitDetail).toContain(
       '.github/workflows/ci.yml (added, matches forbidden .github/**)',
     );
     expect(first.exitDetail).toContain('package.json (deleted, matches forbidden package.json)');
+    expect(first.exitDetail).toContain('.env.local (added, matches forbidden .env*)');
     expect(first.exitDetail).toContain(
-      '[scope.outside_writable] the diff touches paths outside the writable scope (src/math.ts, test/**): .env.local (added), lib/math.ts (added)',
+      '[scope.outside_writable] the diff touches paths outside the writable scope (src/math.ts, test/**): lib/math.ts (added)',
     );
   });
 
