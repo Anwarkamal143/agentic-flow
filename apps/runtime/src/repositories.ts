@@ -1,16 +1,20 @@
 /**
  * Repository registration (PRODUCT_SPEC §13, ARCHITECTURE §10, ADR-0001).
  *
- * The source checkout is only ever read: its `origin` URL, and `package.json`
- * plus lockfile names for command detection. Every Worktree later comes from the
+ * The source checkout is only ever read: its `origin` URL, and for Profile
+ * Detection (ADR-0060) the paths and a few files of its HEAD commit, through
+ * git plumbing. Every Worktree later comes from the
  * Factory Clone made here, under `<workspace_root>/clones/<repo-id>`.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   chooseProject,
   coordinatesFromRemoteUrl,
+  detectProfile,
+  type FileSnapshot,
+  profileDetectionReads,
   EffectiveConfigSchema,
   type EffectiveConfigPreview,
   repositoryConfigOf,
@@ -20,17 +24,27 @@ import {
   MergePolicySchema,
   parseCoordinates,
   RepositoryProfileSchema,
-  type PackageManager,
   type Project,
   type RegisterRepositoryInput,
   type RegisterRepositoryResult,
   type Repository,
-  type RepositoryCommands,
   type RepositoryInspection,
   type GitHubCoordinates,
+  applyDetection,
+  profileChanges,
+  profileDiff,
+  setProfileField,
+  type ApplyProfileDetectionInput,
+  type ProfileChange,
+  type ProfileDetection,
+  type ProfileUpdate,
+  type RepositoryProfile,
+  type SetProfileFieldInput,
 } from '@factory/domain';
 import {
   clone,
+  committedFile,
+  committedPaths,
   currentBranch,
   GitError,
   hasEmbeddedCredentials,
@@ -71,7 +85,8 @@ export class RepositoryService {
     // A relative origin (e.g. `../upstream.git`) is relative to the source repository.
     const remoteUrl = origin === undefined ? null : resolveRemote(source, origin);
     const github = remoteUrl === null ? null : coordinatesFromRemoteUrl(remoteUrl);
-    return { source, name: basename(source), remoteUrl, github, ...detectCommands(source) };
+    const detected = detectProfile(await snapshotOf(source, 'HEAD'));
+    return { source, name: basename(source), remoteUrl, github, detected };
   }
 
   async register(input: RegisterRepositoryInput): Promise<RegisterRepositoryResult> {
@@ -116,9 +131,9 @@ export class RepositoryService {
       const now = new Date().toISOString();
       const mergeMethod = input.mergeMethod ?? 'merge';
       const profile = RepositoryProfileSchema.parse({
-        version: 1,
-        packageManager: inspection.packageManager,
-        commands: input.commands,
+        version: 2,
+        detection: 'detected',
+        ...input.profile,
         ...(input.requiredChecks === undefined || input.requiredChecks.length === 0
           ? {}
           : { requiredChecks: input.requiredChecks }),
@@ -229,6 +244,118 @@ export class RepositoryService {
     return previewOf(this.db, project, id);
   }
 
+  /**
+   * `repo profile detect` (ADR-0060): Profile Detection over the source's HEAD
+   * again, as at registration, and the diff against the saved profile.
+   * Read-only; nothing is saved until `applyDetection`.
+   */
+  async detectProfile(ref: string): Promise<ProfileDetection> {
+    const repository = toRepository(findRepository(this.db, ref));
+    if ((await workTreeRoot(repository.source)) === undefined) {
+      throw new ApiFailure(
+        422,
+        'source_unreadable',
+        `the source checkout ${repository.source} is not a git working tree any more, so there is nothing to detect from`,
+      );
+    }
+    const detected = detectProfile(await snapshotOf(repository.source, 'HEAD'));
+    return {
+      repository: { id: repository.id, name: repository.name },
+      current: repository.profile,
+      detected,
+      changes: profileChanges(repository.profile, detected),
+    };
+  }
+
+  /** Saves the detected fields the human confirmed; refused when the profile changed since it was shown. */
+  applyDetection(ref: string, input: ApplyProfileDetectionInput): ProfileUpdate {
+    return this.changeProfile(ref, 'repository_profile.detected', (current) => {
+      if (current.confirmedAt !== input.basis) {
+        throw new ApiFailure(
+          409,
+          'profile_changed',
+          'the profile changed since the detection was shown; run factory repo profile detect again',
+        );
+      }
+      return applyDetection(current, input.detected, ACTOR, new Date().toISOString());
+    });
+  }
+
+  /** `repo profile set`: one field, validated by the profile schema. */
+  setProfileField(ref: string, input: SetProfileFieldInput): ProfileUpdate {
+    return this.changeProfile(ref, 'repository_profile.set', (current) => {
+      const result = setProfileField(current, input.key, input.value);
+      if (!result.ok) throw new ApiFailure(400, result.code, result.message);
+      return { ...result.profile, confirmedBy: ACTOR, confirmedAt: new Date().toISOString() };
+    });
+  }
+
+  /**
+   * Saves a human's profile change with its audit entry and event, in one
+   * transaction. Jobs already created keep their frozen sections (ADR-0049).
+   */
+  private changeProfile(
+    ref: string,
+    action: 'repository_profile.detected' | 'repository_profile.set',
+    change: (current: RepositoryProfile) => RepositoryProfile,
+  ): ProfileUpdate {
+    const result = this.db.transaction((tx) => {
+      const row = findRepository(tx, ref);
+      const before = toRepository(row).profile;
+      const after = RepositoryProfileSchema.parse(change(before));
+      const changes: ProfileChange[] = profileDiff(before, after);
+      tx.update(schema.repositories)
+        .set({ profileJson: JSON.stringify(after) })
+        .where(eq(schema.repositories.id, row.id))
+        .run();
+      tx.insert(schema.auditLog)
+        .values({
+          id: newId('aud'),
+          ts: after.confirmedAt,
+          actor: ACTOR,
+          action,
+          target: `repository:${row.id}`,
+          jobId: null,
+          beforeJson: JSON.stringify(before),
+          afterJson: JSON.stringify(after),
+          policyRef: null,
+          correlationId: null,
+        })
+        .run();
+      appendEvent(tx, {
+        entityKind: 'repository',
+        entityId: row.id,
+        type: 'repository.profile_updated',
+        actor: ACTOR,
+        payload: {
+          via: action === 'repository_profile.detected' ? 'detect' : 'set',
+          changes,
+        },
+      });
+      return { repository: { id: row.id, name: row.name }, profile: after, changes };
+    });
+    this.onCommit();
+    return result;
+  }
+
+  /** Repositories whose profile was never detected (upgraded from v1), for `factory doctor`. */
+  undetectedProfiles(): { repositoryId: string; name: string; message: string }[] {
+    const all = this.listRepositories();
+    return all
+      .filter((r) => r.profile.detection === 'not_detected')
+      .map((r) => {
+        const ref = all.filter((o) => o.name === r.name).length > 1 ? r.id : r.name;
+        return {
+          repositoryId: r.id,
+          name: r.name,
+          message:
+            `Repository ${r.name} (${r.id}) has a profile from before Profile Detection: its ` +
+            `CI files and instruction files are not detected, and only the default Sensitive Paths ` +
+            `apply. Re-detect it with \`factory repo profile detect ${ref}\`.`,
+        };
+      });
+  }
+
   listRepositories(): Repository[] {
     return this.db.select().from(schema.repositories).all().map(toRepository);
   }
@@ -276,6 +403,27 @@ function findProject(db: FactoryDb | Tx, ref: string): Project {
   return toProject(choice.project);
 }
 
+/** The Repository `ref` names: an id, or a name unique across Projects. */
+function findRepository(db: FactoryDb | Tx, ref: string): typeof schema.repositories.$inferSelect {
+  const rows = db
+    .select()
+    .from(schema.repositories)
+    .where(or(eq(schema.repositories.id, ref), eq(schema.repositories.name, ref)))
+    .all();
+  const byId = rows.find((r) => r.id === ref);
+  if (byId !== undefined) return byId;
+  const [only, ...others] = rows;
+  if (only === undefined) throw new ApiFailure(404, 'repository_not_found', `no Repository ${ref}`);
+  if (others.length > 0) {
+    throw new ApiFailure(
+      409,
+      'repository_ambiguous',
+      `several Repositories are named ${ref} (${rows.map((r) => r.id).join(', ')}); name one by id`,
+    );
+  }
+  return only;
+}
+
 /** `--github owner/name`; the API schema has checked it already. */
 function parsedCoordinates(text: string): GitHubCoordinates {
   const parsed = parseCoordinates(text);
@@ -288,57 +436,20 @@ function resolveRemote(source: string, url: string): string {
   return isUrl || isAbsolute(url) ? url : resolve(source, url);
 }
 
+/** Files detection reads larger than this are left out of the snapshot (nothing detected from them). */
+const MAX_SNAPSHOT_FILE_BYTES = 1024 * 1024;
+
 /**
- * Proposes test and typecheck commands from `package.json`. The result is a
- * proposal only: the operator confirms or replaces it before it is saved.
- * Repository content is untrusted, so a malformed file just means "nothing detected".
+ * The snapshot Profile Detection reads (ADR-0060): every path tracked at
+ * `rev`, and the contents of the few files `profileDetectionReads` names.
+ * Plumbing reads only: nothing is written to `repo`, its index or its tree.
  */
-function detectCommands(
-  source: string,
-): Pick<RepositoryInspection, 'packageManager' | 'detectedCommands'> {
-  const none = { packageManager: null, detectedCommands: { test: null, typecheck: null } };
-  let pkg: unknown;
-  try {
-    pkg = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8'));
-  } catch {
-    return none;
+export async function snapshotOf(repo: string, rev: string): Promise<FileSnapshot> {
+  const paths = await committedPaths(repo, rev);
+  const files: Record<string, string> = {};
+  for (const path of profileDetectionReads(paths)) {
+    const text = await committedFile(repo, rev, path, MAX_SNAPSHOT_FILE_BYTES);
+    if (text !== undefined) files[path] = text;
   }
-  if (typeof pkg !== 'object' || pkg === null) return none;
-  const manifest = pkg as { scripts?: unknown; packageManager?: unknown };
-  const scripts =
-    typeof manifest.scripts === 'object' && manifest.scripts !== null
-      ? (manifest.scripts as Record<string, unknown>)
-      : {};
-  const pm = packageManagerOf(source, manifest.packageManager);
-  const run = (script: string) => (pm === 'npm' ? `npm run ${script}` : `${pm} run ${script}`);
-
-  const testScript = scripts['test'];
-  const isNpmPlaceholder =
-    typeof testScript === 'string' && testScript.includes('no test specified');
-  const test =
-    typeof testScript === 'string' && !isNpmPlaceholder
-      ? pm === 'bun'
-        ? run('test')
-        : `${pm} test`
-      : null;
-
-  const typecheckScript = ['typecheck', 'type-check', 'tsc'].find(
-    (s) => typeof scripts[s] === 'string',
-  );
-  const commands: RepositoryCommands = {
-    test,
-    typecheck: typecheckScript === undefined ? null : run(typecheckScript),
-  };
-  return { packageManager: pm, detectedCommands: commands };
-}
-
-function packageManagerOf(source: string, declared: unknown): PackageManager {
-  if (typeof declared === 'string') {
-    const name = declared.split('@', 1)[0];
-    if (name === 'pnpm' || name === 'yarn' || name === 'bun' || name === 'npm') return name;
-  }
-  if (existsSync(join(source, 'pnpm-lock.yaml'))) return 'pnpm';
-  if (existsSync(join(source, 'yarn.lock'))) return 'yarn';
-  if (existsSync(join(source, 'bun.lock')) || existsSync(join(source, 'bun.lockb'))) return 'bun';
-  return 'npm';
+  return { paths, files };
 }

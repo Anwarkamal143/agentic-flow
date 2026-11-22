@@ -108,7 +108,13 @@ describe('factory project', () => {
     const direct = await post(rt, '/v1/repositories', {
       path: tinyTsRepo(),
       project: 'shpo',
-      commands: { test: null, typecheck: null },
+      profile: {
+        packageManager: null,
+        commands: {},
+        ciFiles: [],
+        instructionFiles: [],
+        sensitivePaths: [],
+      },
     });
     expect(direct.status).toBe(404);
     expect(await direct.json()).toMatchObject({ error: 'project_not_found' });

@@ -167,7 +167,7 @@ A **Replan** (GLOSSARY) is started by a human (`requestReplan`, or "request chan
 ```text
 projects(id, name, config_json, created_at)
 repositories(id, project_id, name, source /*path or URL given at registration*/,
-             remote_url?, clone_path /*factory clone*/, default_branch, profile_json,
+             remote_url?, clone_path /*factory clone*/, default_branch, profile_json /*Repository Profile v2, ADR-0060*/,
              github_owner?, github_name? /*Phase C, ADR-0033*/,
              merge_policy /*never_auto|human_approval*/, merge_method /*merge|squash|rebase; Phase C, ADR-0038*/)
 jobs(id, project_id, title, description, type, priority, status, workflow_snapshot_json,

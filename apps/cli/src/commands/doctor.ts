@@ -8,6 +8,7 @@ const DOCTOR_TIMEOUT_MS = 30_000;
 interface DoctorBody {
   checkedAt: string;
   staleConfigKeys: { key: string; message: string }[];
+  undetectedProfiles: { repositoryId: string; name: string; message: string }[];
   tools: {
     name: string;
     command: string;
@@ -99,6 +100,10 @@ export async function doctor(opts: { json: boolean }): Promise<number> {
   if (body.staleConfigKeys.length > 0) {
     lines.push('', 'Config (stale config.json keys; the runtime ignores them):');
     for (const stale of body.staleConfigKeys) lines.push(`  warning  ${stale.message}`);
+  }
+  if (body.undetectedProfiles.length > 0) {
+    lines.push('', 'Repository Profiles (never detected; re-detection recommended):');
+    for (const p of body.undetectedProfiles) lines.push(`  warning  ${p.message}`);
   }
   process.stdout.write(lines.join('\n') + '\n');
   return 0;

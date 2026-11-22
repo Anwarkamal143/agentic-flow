@@ -12,6 +12,7 @@ import {
   taskMaxAttempts,
   type EffectiveConfig,
   type EffectiveConfigLevels,
+  DEFAULT_SENSITIVE_PATHS,
 } from '@factory/domain';
 import { describe, expect, it } from 'vitest';
 
@@ -21,7 +22,8 @@ const api = {
   mergePolicy: 'never_auto' as const,
   mergeMethod: 'squash' as const,
   profile: {
-    commands: { test: 'npm test', typecheck: null },
+    commands: { test: { run: 'npm test', acceptsArgs: false } },
+    sensitivePaths: ['infra/**'],
     requiredChecks: ['build'],
     setup: 'npm ci',
   },
@@ -31,7 +33,7 @@ const web = {
   name: 'web',
   mergePolicy: 'human_approval' as const,
   mergeMethod: 'merge' as const,
-  profile: { commands: { test: null, typecheck: null } },
+  profile: { commands: {}, sensitivePaths: [] },
 };
 
 function resolved(levels: EffectiveConfigLevels): EffectiveConfig {
@@ -96,7 +98,8 @@ describe('resolveEffectiveConfig: levels and sources', () => {
       },
       mergeMethod: { value: 'squash', source: 'repository' },
       setup: { value: 'npm ci', source: 'repository' },
-      commands: { value: { test: 'npm test', typecheck: null }, source: 'repository' },
+      commands: { value: { test: { run: 'npm test', acceptsArgs: false } }, source: 'repository' },
+      sensitivePaths: { value: ['infra/**'], source: 'repository' },
       requiredChecks: { value: ['build'], source: 'repository' },
     });
     expect(config.repositories[1]?.setup).toEqual({ value: null, source: 'repository' });
@@ -241,12 +244,37 @@ describe('snapshots of Jobs created before Phase D', () => {
       mergePolicy: { value: 'human_approval', source: 'repository' },
       mergeMethod: { value: 'squash', source: 'repository' },
       setup: { value: 'npm ci', source: 'repository' },
-      commands: { value: { test: 'npm test', typecheck: null }, source: 'repository' },
+      commands: { value: { test: { run: 'npm test', acceptsArgs: false } }, source: 'repository' },
+      sensitivePaths: { value: ['infra/**'], source: 'repository' },
       requiredChecks: { value: ['build'], source: 'repository' },
     });
     const older = EffectiveConfigSchema.parse({ maxAttempts: { value: 3, source: 'recipe' } });
     expect(repositoryConfigOf(older, api).mergePolicy).toEqual({
       value: 'never_auto',
+      source: 'repository',
+    });
+  });
+
+  it('read a section frozen before #100: v1 commands named, the default Sensitive Paths', () => {
+    const config = EffectiveConfigSchema.parse({
+      ...old,
+      repositories: [
+        {
+          repositoryId: 'repo_api',
+          name: 'api',
+          mergePolicy: { value: 'never_auto', source: 'repository' },
+          mergeMethod: { value: 'merge', source: 'repository' },
+          setup: { value: null, source: 'repository' },
+          commands: { value: { test: 'npm test', typecheck: null }, source: 'repository' },
+          requiredChecks: { value: [], source: 'repository' },
+        },
+      ],
+    });
+    expect(config.repositories[0]?.commands.value).toEqual({
+      test: { run: 'npm test', acceptsArgs: false },
+    });
+    expect(config.repositories[0]?.sensitivePaths).toEqual({
+      value: [...DEFAULT_SENSITIVE_PATHS],
       source: 'repository',
     });
   });
