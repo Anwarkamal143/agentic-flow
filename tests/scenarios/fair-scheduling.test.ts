@@ -7,7 +7,15 @@
  * Asserted through the CLI and the runtime API (the event log) only.
  */
 import { describe, expect, it } from 'vitest';
-import { createProject, json, jobSettled, post, waitForJob, type JobBody } from '../support/api.js';
+import {
+  createProject,
+  declareCommands,
+  jobSettled,
+  json,
+  post,
+  waitForJob,
+  type JobBody,
+} from '../support/api.js';
 import {
   initializedHome,
   startRuntime,
@@ -46,6 +54,7 @@ async function projectWithRepo(rt: RunningRuntime, name: string): Promise<string
   const projectId = projects.find((p) => p.name === name)?.id;
   const repo = repos.find((r) => r.projectId === projectId);
   if (repo === undefined) throw new Error(`no Repository in ${name}`);
+  await declareCommands(rt, repo.id);
   return repo.id;
 }
 

@@ -20,13 +20,14 @@ import {
 } from '../support/factory.js';
 import {
   capAttempts,
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput, validTaskResponse } from '../support/scripts.js';
 
@@ -95,7 +96,9 @@ function fileTask(key: string) {
     scope: { writable: [`src/${key}.ts`], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: `test -f src/${key}.ts`, criteria: ['AC-01'] }],
+    verification: [
+      { key: 'test', command: 'exists', args: [`src/${key}.ts`], criteria: ['AC-01'] },
+    ],
   };
 }
 
@@ -163,6 +166,7 @@ async function runtimeOn(
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   if (opts.maxAttempts === undefined) await skipPlanApproval(rt, repo.projectId);
   else await capAttempts(rt, repo.projectId, opts.maxAttempts);
   return { rt, src, repo };

@@ -20,6 +20,7 @@ import {
   json,
   jobSettled,
   post,
+  declareCommands,
   registeredRepo,
   waitForJob,
   type EventBody,
@@ -49,7 +50,11 @@ interface WorktreeBody {
 type Span = { id: string; claimed: number; approved: number };
 
 /** A Plan Task writing one file, `docs/<key>.md`. */
-function docTask(key: string, dependsOn: string[] = [], verify = `test -f docs/${key}.md`) {
+function docTask(
+  key: string,
+  dependsOn: string[] = [],
+  verify: { command: string; args?: string[] } = { command: 'exists', args: [`docs/${key}.md`] },
+) {
   const [base] = (validOutput('planning') as { tasks: Record<string, unknown>[] }).tasks;
   return {
     ...structuredClone(base),
@@ -58,7 +63,7 @@ function docTask(key: string, dependsOn: string[] = [], verify = `test -f docs/$
     scope: { writable: [`docs/${key}.md`], forbidden: [] },
     dependsOn,
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: verify, criteria: ['AC-01'] }],
+    verification: [{ key: 'test', ...verify, criteria: ['AC-01'] }],
   };
 }
 
@@ -111,6 +116,11 @@ async function runtimeWith(script: string, config: Record<string, unknown> = {})
   patchFactoryConfig(home, config);
   const rt = await startRuntime(home);
   const repo = await registeredRepo(rt);
+  await declareCommands(rt, repo.id, {
+    'all-docs': {
+      run: 'test -f docs/a.md && test -f docs/b.md && test -f docs/c.md && test -f docs/d.md',
+    },
+  });
   return { rt, repo };
 }
 
@@ -159,11 +169,7 @@ describe('B1: an A → {B, C} → D DAG', { timeout: 60_000 }, () => {
                   docTask('a'),
                   docTask('b', ['a']),
                   docTask('c', ['a']),
-                  docTask(
-                    'd',
-                    ['b', 'c'],
-                    'test -f docs/a.md && test -f docs/b.md && test -f docs/c.md && test -f docs/d.md',
-                  ),
+                  docTask('d', ['b', 'c'], { command: 'all-docs' }),
                 ],
               },
             },

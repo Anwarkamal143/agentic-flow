@@ -115,8 +115,8 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       dependsOn: [],
       acceptance: ['AC-01'],
       verification: [
-        { key: 'test', command: "grep -q 'export function sum' src/math.ts", criteria: ['AC-01'] },
-        { key: 'typecheck', command: 'test -f src/math.ts && echo typecheck ok', criteria: [] },
+        { key: 'test', command: 'has-sum', criteria: ['AC-01'] },
+        { key: 'typecheck', command: 'math-exists', criteria: [] },
       ],
       maxAttempts: 3,
     });

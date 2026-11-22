@@ -23,13 +23,14 @@ import {
 } from '../support/factory.js';
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput } from '../support/scripts.js';
 
@@ -61,7 +62,7 @@ function oneTaskScript() {
     scope: { writable: ['src/a.ts'], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: 'test -f src/a.ts', criteria: ['AC-01'] }],
+    verification: [{ key: 'test', command: 'exists', args: ['src/a.ts'], criteria: ['AC-01'] }],
   };
   return scriptWith(
     { planning: [{ output: { tasks: [task] } }] },
@@ -123,6 +124,7 @@ async function waitingJob() {
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   const res = await post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add a' });
   expect(res.status, 'create Job').toBe(201);

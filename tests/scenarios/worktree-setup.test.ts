@@ -24,13 +24,14 @@ import {
   type RunningRuntime,
 } from '../support/factory.js';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput } from '../support/scripts.js';
 
@@ -85,7 +86,7 @@ type Step = Record<string, unknown>;
 /** One Plan Task `a` writing `writable`, verified by `verify`, with its developer responses. */
 function script(opts: {
   writable: string[];
-  verify: { key: string; command: string }[];
+  verify: { key: string; command: string; args?: string[] }[];
   runs: Step[][];
   reviews?: number;
 }) {
@@ -139,6 +140,7 @@ async function setupRuntime(scriptText: string, setup: string) {
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<{ id: string; projectId: string }[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   return { rt, repo, added, home };
 }
@@ -160,7 +162,7 @@ describe('the Worktree setup step', { timeout: 120_000 }, () => {
     const { rt, repo, added, home } = await setupRuntime(
       script({
         writable: ['src/a.ts'],
-        verify: [{ key: 'setup-seen', command: 'test -f node_modules/.setup' }],
+        verify: [{ key: 'setup-seen', command: 'exists', args: ['node_modules/.setup'] }],
         runs: [
           [
             // The setup ran first, with the factory home's npm cache and lifecycle scripts off.
@@ -251,7 +253,7 @@ describe('the Worktree setup step', { timeout: 120_000 }, () => {
     const { rt, repo } = await setupRuntime(
       script({
         writable: ['src/a.ts'],
-        verify: [{ key: 'test', command: 'test -f src/a.ts' }],
+        verify: [{ key: 'test', command: 'exists', args: ['src/a.ts'] }],
         runs: [
           [
             { write: { path: 'src/a.ts', content: 'export const a = 1;\n' } },
@@ -316,7 +318,7 @@ describe('the Worktree setup step', { timeout: 120_000 }, () => {
     const { rt, repo } = await setupRuntime(
       script({
         writable: ['src/a.ts', 'src/b.ts', 'package-lock.json'],
-        verify: [{ key: 'b', command: 'test -f src/b.ts' }],
+        verify: [{ key: 'b', command: 'exists', args: ['src/b.ts'] }],
         runs: [
           // Attempt 1 changes the lockfile and fails its Gate (no src/b.ts): Rework.
           [
@@ -357,7 +359,7 @@ describe('the Worktree setup step', { timeout: 120_000 }, () => {
     const { rt, repo, home } = await setupRuntime(
       script({
         writable: ['src/a.ts'],
-        verify: [{ key: 'setup-seen', command: 'test -f node_modules/.setup' }],
+        verify: [{ key: 'setup-seen', command: 'exists', args: ['node_modules/.setup'] }],
         runs: [
           [
             { run: 'test -f node_modules/.setup' },
@@ -390,7 +392,7 @@ describe('the Worktree setup step', { timeout: 120_000 }, () => {
     const { rt, repo } = await setupRuntime(
       script({
         writable: ['src/a.ts'],
-        verify: [{ key: 'test', command: 'test -f src/a.ts' }],
+        verify: [{ key: 'test', command: 'exists', args: ['src/a.ts'] }],
         runs: [
           [
             { write: { path: 'src/a.ts', content: 'export const a = 1;\n' } },

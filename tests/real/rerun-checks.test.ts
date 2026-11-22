@@ -32,6 +32,7 @@ import {
   type EventBody,
   type JobBody,
   createProject,
+  declareCommands,
 } from '../support/api.js';
 import {
   initializedHome,
@@ -118,7 +119,9 @@ function script(repository: string) {
     scope: { writable: [RERUN_PROBE_FILE], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'probe', command: `test -f ${RERUN_PROBE_FILE}`, criteria: ['AC-01'] }],
+    verification: [
+      { key: 'probe', command: 'exists', args: [RERUN_PROBE_FILE], criteria: ['AC-01'] },
+    ],
   };
   return scriptWith(
     { planning: [{ output: { tasks: [task] } }] },
@@ -243,6 +246,7 @@ describe('rerun_checks [real] on GitHub Actions', () => {
       if (repo === undefined) throw new Error('no Repository');
       // The scripted plan names the Repository by its checkout's directory.
       expect(repo.name, 'the Repository name the plan uses').toBe(basename(sandbox.checkout));
+      await declareCommands(rt, repo.id);
       await skipPlanApproval(rt, repo.projectId);
       const res = await post(rt, '/v1/jobs', {
         repositoryId: repo.id,

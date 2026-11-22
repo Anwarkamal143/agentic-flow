@@ -29,13 +29,14 @@ import {
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
 import {
   capAttempts,
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput } from '../support/scripts.js';
 
@@ -138,7 +139,7 @@ function script(reworks: number, gateFile?: string) {
     scope: { writable: ['src/a.ts'], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: 'test -f src/a.ts', criteria: ['AC-01'] }],
+    verification: [{ key: 'test', command: 'exists', args: ['src/a.ts'], criteria: ['AC-01'] }],
   };
   const integration = Array.from({ length: reworks }, (_, i) =>
     writes(
@@ -187,6 +188,7 @@ async function start(
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   if (opts.maxAttempts === undefined) await skipPlanApproval(rt, repo.projectId);
   else await capAttempts(rt, repo.projectId, opts.maxAttempts);
   const res = await post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add a' });

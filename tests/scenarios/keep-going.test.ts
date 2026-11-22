@@ -18,14 +18,15 @@ import {
   type RunningRuntime,
 } from '../support/factory.js';
 import {
-  json,
+  createProject,
+  declareCommands,
   jobSettled,
+  json,
   post,
   skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  createProject,
 } from '../support/api.js';
 import { scriptWith, validOutput } from '../support/scripts.js';
 
@@ -78,7 +79,7 @@ function docTask(key: string, dependsOn: string[] = [], writable = [`docs/${key}
     scope: { writable, forbidden: [] },
     dependsOn,
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: 'true', criteria: ['AC-01'] }],
+    verification: [{ key: 'test', command: 'pass', criteria: ['AC-01'] }],
   };
 }
 
@@ -141,6 +142,7 @@ async function runtimeWith(script: string, config: Record<string, unknown> = {})
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId, config);
   return { rt, repo, source };
 }
