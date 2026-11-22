@@ -12,7 +12,14 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import { API_KEY_EXPOSURE, type Billing } from '@factory/domain';
+import {
+  API_KEY_EXPOSURE,
+  factoryGlobalConcurrency,
+  staleBootstrapKeys,
+  type Billing,
+  type FactoryLevel,
+} from '@factory/domain';
+import { readConfig, type FactoryHome } from '@factory/home';
 import type { TokenSource } from '@factory/github';
 import { findExecutable, probeClaudeCode } from '@factory/harness';
 
@@ -73,8 +80,19 @@ export interface GitHubCheck {
   problem?: string;
 }
 
+/**
+ * A `config.json` key the runtime no longer reads (ADR-0056): the Factory Level
+ * in the database holds it. Edits to the file have no effect.
+ */
+export interface StaleConfigKey {
+  key: string;
+  message: string;
+}
+
 export interface DoctorReport {
   checkedAt: string;
+  /** `config.json` keys that are stale; empty when there are none. */
+  staleConfigKeys: StaleConfigKey[];
   tools: ToolCheck[];
   credentials: CredentialCheck[];
   /** `null` when the configured Harness isn't Claude Code. */
@@ -133,6 +151,7 @@ export async function runDoctor(
   github: { token: TokenSource; apiBaseUrl: string },
   claudeCommand = 'claude',
   billing?: Billing,
+  staleConfigKeys: StaleConfigKey[] = [],
 ): Promise<DoctorReport> {
   const tools = await Promise.all(
     TOOLS.map((spec) =>
@@ -176,6 +195,7 @@ export async function runDoctor(
   const token = await github.token.resolve();
   return {
     checkedAt: new Date().toISOString(),
+    staleConfigKeys,
     tools,
     credentials,
     billing: billing === undefined ? null : billingCheck(billing, env),
@@ -186,6 +206,27 @@ export async function runDoctor(
       ...(token.ok ? {} : { problem: token.problem }),
     },
   };
+}
+
+/**
+ * The stale keys `config.json` sets now (it is re-read, so an edit after the
+ * start is seen). An unreadable file reports nothing here: the runtime started
+ * from it, and the next start refuses it with the reason.
+ */
+export function staleConfigKeys(home: FactoryHome, level: FactoryLevel): StaleConfigKey[] {
+  let file;
+  try {
+    file = readConfig(home);
+  } catch {
+    return [];
+  }
+  return staleBootstrapKeys(file).map((key) => ({
+    key,
+    message:
+      `config.json sets ${key}, which the runtime ignores: the Factory Level holds it ` +
+      `(now ${String(factoryGlobalConcurrency(level.config))}). Change it with ` +
+      `\`factory config set ${key} <n>\` and remove the key from config.json.`,
+  }));
 }
 
 function billingCheck(billing: Billing, env: NodeJS.ProcessEnv): BillingCheck {

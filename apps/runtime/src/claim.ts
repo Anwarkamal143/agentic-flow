@@ -54,7 +54,7 @@ export function leaseExpiry(now = Date.now()): string {
 export interface ClaimOptions {
   /** The lease holder (`runtime:<pid>`). */
   holder: string;
-  /** `config.json` `concurrency.global`. */
+  /** The Factory Level's `concurrency.global`. */
   globalLimit: number;
   /** Recorded as the actor of `task.claimed`. */
   actor: string;

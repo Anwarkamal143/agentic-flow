@@ -193,8 +193,8 @@ export interface TaskSchedulerOptions {
   db: FactoryDb;
   /** `undefined`: no Harness is configured, so ready Tasks wait. */
   harness: AgentHarness | undefined;
-  /** `config.json` `concurrency.global`: Tasks in flight at once, over every Job. */
-  globalConcurrency: number;
+  /** The Factory Level's `concurrency.global`, read at each claim: Tasks in flight at once, over every Job. */
+  globalConcurrency: () => number;
   harnessVersion: string | null;
   artifacts: ArtifactStore;
   workspaceRoot: string;
@@ -529,7 +529,7 @@ export class TaskScheduler {
     for (;;) {
       const claimed = claimNextTask(this.opts.db, {
         holder: this.holder,
-        globalLimit: this.opts.globalConcurrency,
+        globalLimit: this.opts.globalConcurrency(),
         actor: ACTOR,
       });
       if (claimed === undefined) break;

@@ -62,6 +62,7 @@ export * from './pr-feedback.js';
 export * from './base-change.js';
 export * from './setup.js';
 export * from './projects.js';
+export * from './factory-level.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
