@@ -248,6 +248,7 @@ if (recipeEnv !== undefined && recipeVersion === undefined) {
 
 const scheduler = new StageScheduler({
   db: database.db,
+  holder,
   harness,
   artifacts,
   spoolRoot: home.spoolDir,

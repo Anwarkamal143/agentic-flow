@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import { DEFAULT_GLOBAL_CONCURRENCY } from './capacity.js';
 import { LEVEL_CONFIG_SHAPE } from './config-levels.js';
+import { ProjectJobLimitSchema, SchedulingConfigSchema } from './scheduling.js';
 import { configLeafKeys, setConfigKey, type ConfigKeyChange } from './projects.js';
 
 /**
@@ -25,9 +26,13 @@ export const FactoryLevelConfigSchema = z
         /** The default per-Repository and per-Job Task limits, below a Project's or a Job's. */
         perRepository: z.number().int().min(1).max(16).optional(),
         perJob: z.number().int().min(1).max(16).optional(),
+        /** Jobs of one Project with work in flight at once (ADR-0050); a Project may override it. Unset: unlimited. */
+        perProjectJobs: ProjectJobLimitSchema.optional(),
       })
       .strict()
       .optional(),
+    /** The fair-scheduling aging constants (ADR-0050), read at each claim. */
+    scheduling: SchedulingConfigSchema.optional(),
   })
   .strict();
 export type FactoryLevelConfig = z.infer<typeof FactoryLevelConfigSchema>;
