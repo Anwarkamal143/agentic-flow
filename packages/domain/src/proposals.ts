@@ -241,7 +241,8 @@ export interface PlanContext {
  * the Job on every Task, valid scope globs, existing dependencies, no cycles,
  * Acceptance Criteria that exist and are all covered when mandatory, a
  * `maxAttempts` that only narrows, no `writable` entry that is literally a
- * Sensitive Path of the Task's Repository, and no overlapping writable paths
+ * Sensitive Path of the Task's Repository, no cycle between Repositories (the
+ * Delivery Order, ADR-0052), and no overlapping writable paths
  * between Tasks that no dependency path orders.
  */
 export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] {

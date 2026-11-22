@@ -7,7 +7,8 @@
  * own Factory Clone; the web Task becomes ready only once the api Task is
  * approved, and gets that Task's result summary and diff as read-only context,
  * never its code. Each Repository gets its own Integration Task and Branch.
- * Asserted through the CLI, the API and git in the Factory Clones only.
+ * Asserted through the CLI, the API, the dashboard and git in the Factory
+ * Clones only.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -29,6 +30,7 @@ import {
   type EventBody,
   type JobBody,
 } from '../support/api.js';
+import { startDashboard } from '../support/dashboard.js';
 import { scriptWith, SUM_SOURCE, validOutput } from '../support/scripts.js';
 
 interface RepoBody {
@@ -194,6 +196,9 @@ describe('multi-repo Jobs (#105)', { timeout: 90_000 }, () => {
     expect(shown.code, shown.stderr).toBe(0);
     expect(shown.stdout).toContain(`repositories: api (${api.id}), web (${web.id})`);
     expect(shown.stdout).toContain('delivery order: api → web (web after api)');
+    const dash = await startDashboard(rt.home);
+    const page = (await dash.html(`/jobs/${jobId}`)).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    expect(page).toContain('Delivery order api → web');
 
     const tasks = await json<TaskBody[]>(rt.request(`/v1/jobs/${jobId}/tasks`));
     const taskOf = (key: string, repositoryId: string) => {

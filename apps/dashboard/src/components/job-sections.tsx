@@ -99,6 +99,9 @@ export function JobOverview({ job }: { job: Job }) {
           <Field label="Repositories">
             <Repositories repositories={job.repositories} />
           </Field>
+          {job.deliveryOrder !== null && job.deliveryOrder.length > 1 ? (
+            <Field label="Delivery order">{job.deliveryOrder.map((e) => e.name).join(' → ')}</Field>
+          ) : null}
           <Field label="Created">
             {formatTime(job.createdAt)} by {job.createdBy}
           </Field>
