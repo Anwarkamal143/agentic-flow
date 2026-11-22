@@ -98,7 +98,20 @@ describe('proposal Stages, driven by the Fake Harness', () => {
       title: 'Add sum() to math.ts',
       repositoryId: repo.id,
       state: 'approved',
-      scope: { writable: ['src/math.ts', 'test/**'], forbidden: ['package.json', '.github/**'] },
+      // The Plan's forbidden globs, then the Repository's Sensitive Paths (ADR-0061).
+      scope: {
+        writable: ['src/math.ts', 'test/**'],
+        forbidden: [
+          'package.json',
+          '.github/**',
+          '.env*',
+          '**/.env*',
+          '.github/workflows/**',
+          'infra/**',
+          '**/*.pem',
+          '**/*.key',
+        ],
+      },
       dependsOn: [],
       acceptance: ['AC-01'],
       verification: [
