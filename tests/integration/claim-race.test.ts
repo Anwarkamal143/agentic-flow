@@ -301,10 +301,12 @@ function seedReadyJob(
 ): { jobId: string; taskIds: string[] } {
   const jobId = `job_race_${String(round)}`;
   const now = new Date().toISOString();
-  const config = resolveEffectiveConfig({
+  const resolved = resolveEffectiveConfig({
     project: ProjectConfigSchema.parse({}),
     job: { concurrency },
   });
+  if (!resolved.ok) throw new Error(resolved.message);
+  const config = resolved.config;
   const executionAt = FEATURE_RECIPE.stages.findIndex((s) => s.id === 'execution');
   const stageState = (position: number): StageRunState =>
     position < executionAt ? 'succeeded' : position === executionAt ? 'queued' : 'pending';

@@ -143,7 +143,8 @@ export class FactoryLevelService {
   }
 }
 
-function read(db: FactoryDb | Tx): FactoryLevel | undefined {
+/** The Factory Level row, or undefined before the first start created it. */
+export function read(db: FactoryDb | Tx): FactoryLevel | undefined {
   const row = db.select().from(schema.factoryLevel).where(eq(schema.factoryLevel.id, ROW_ID)).get();
   if (row === undefined) return undefined;
   return {

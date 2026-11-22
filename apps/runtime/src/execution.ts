@@ -154,6 +154,7 @@ import {
   passedAttemptOf,
 } from './base-change.js';
 import { blockOnForeignRewrite } from './foreign-push.js';
+import { frozenRepositoryConfig } from './repositories.js';
 import { dependencyHashOf, diskUsageBytes, recordSetupRun, setupRunsOf } from './setup.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
 import {
@@ -2371,7 +2372,7 @@ export class TaskScheduler {
    * It fails when the command does not exit 0 or leaves the Worktree changed.
    */
   private async setup(ctx: AttemptContext): Promise<SetupStep> {
-    const command = EffectiveConfigSchema.parse(JSON.parse(ctx.job.configSnapshotJson)).setup.value;
+    const command = frozenRepositoryConfig(ctx.job.configSnapshotJson, ctx.repo).setup.value;
     if (command === null) return { kind: 'ready' };
     const dependencyHash = dependencyHashOf(ctx.path);
     const runs = setupRunsOf(this.opts.db, ctx.worktreeId);

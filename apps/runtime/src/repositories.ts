@@ -11,6 +11,9 @@ import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   chooseProject,
   coordinatesFromRemoteUrl,
+  EffectiveConfigSchema,
+  repositoryConfigOf,
+  type RepositoryEffectiveConfig,
   formatCoordinates,
   MergeMethodSchema,
   MergePolicySchema,
@@ -207,6 +210,21 @@ export class RepositoryService {
   listRepositories(): Repository[] {
     return this.db.select().from(schema.repositories).all().map(toRepository);
   }
+}
+
+/**
+ * A Repository's section of a Job's frozen Effective Configuration (ADR-0049,
+ * ADR-0057): what the Job uses for it, never the Repository as it is now
+ * (except, for a Job from before Phase D, what that Job never froze).
+ */
+export function frozenRepositoryConfig(
+  configSnapshotJson: string,
+  row: typeof schema.repositories.$inferSelect,
+): RepositoryEffectiveConfig {
+  return repositoryConfigOf(
+    EffectiveConfigSchema.parse(JSON.parse(configSnapshotJson)),
+    toRepository(row),
+  );
 }
 
 export function toRepository(row: typeof schema.repositories.$inferSelect): Repository {

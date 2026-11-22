@@ -43,6 +43,7 @@ import {
   type MergeApproval,
   type MergeMethod,
   type MergePolicy,
+  type RepositoryEffectiveConfig,
   type ObservedCheck,
   type PullRequestState,
 } from '@factory/domain';
@@ -53,6 +54,7 @@ import { openBlockerItem } from './blocker-approvals.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 import { latestStageRun } from './replan.js';
+import { frozenRepositoryConfig } from './repositories.js';
 
 /** The actor of everything the poller writes, and of a `merge` item closed by a merge on GitHub. */
 export const POLLER = 'system:github-poller';
@@ -146,7 +148,7 @@ export function openMergeApproval(tx: Tx, state: JobState, step: StageRunStepper
   }
   const queued = stepAndReread(tx, step, run, 'queued', { reason: 'the pull request is open' });
   const running = stepAndReread(tx, step, queued, 'running');
-  const policy = mergePolicyOf(state);
+  const policy = mergePolicyOf(tx, state);
   step(running, 'waiting_human', { blocker: awaitingMergeBlocker(tx, prs, first, policy) });
   for (const pr of prs) openMergeItem(tx, state.job.id, running.id, pr, policy, ACTOR_OPENING);
   return true;
@@ -180,13 +182,32 @@ function awaitingMergeBlocker(
   };
 }
 
-/** The Job's Merge Policy, frozen into its Effective Configuration at creation (ADR-0038). */
-export function mergePolicyOf(state: JobState): MergePolicy {
-  return policyOfConfig(state.job.configSnapshotJson);
+/**
+ * The Job's Merge Policy, frozen into its Effective Configuration at creation
+ * (ADR-0038): the strictest over the sections of the Job's Repositories (one
+ * today, so that one's).
+ */
+export function mergePolicyOf(tx: Tx | FactoryDb, state: JobState): MergePolicy {
+  const repos = tx
+    .select()
+    .from(schema.repositories)
+    .innerJoin(
+      schema.jobRepositories,
+      eq(schema.jobRepositories.repositoryId, schema.repositories.id),
+    )
+    .where(eq(schema.jobRepositories.jobId, state.job.id))
+    .all();
+  const policies = repos.map(
+    (r) => frozenRepositoryConfig(state.job.configSnapshotJson, r.repositories).mergePolicy.value,
+  );
+  return policies.includes('never_auto') || policies.length === 0 ? 'never_auto' : 'human_approval';
 }
 
-function policyOfConfig(configSnapshotJson: string): MergePolicy {
-  return EffectiveConfigSchema.parse(JSON.parse(configSnapshotJson)).mergePolicy.value;
+/** The frozen section of the PR's Repository in its Job's Effective Configuration. */
+function frozenConfigOf(tx: Tx | FactoryDb, pr: PullRequestRow): RepositoryEffectiveConfig {
+  const job = tx.select().from(schema.jobs).where(eq(schema.jobs.id, pr.jobId)).get();
+  if (job === undefined) throw new Error(`no Job ${pr.jobId}`);
+  return frozenRepositoryConfig(job.configSnapshotJson, repositoryOf(tx, pr));
 }
 
 /** The gate the poller stored for the PR, when it was evaluated on the PR's current SHAs. */
@@ -330,7 +351,7 @@ function mergeItemOptionsStale(tx: Tx | FactoryDb, pr: PullRequestRow): boolean 
   const job = tx.select().from(schema.jobs).where(eq(schema.jobs.id, pr.jobId)).get();
   if (job === undefined) return false;
   const options = JSON.stringify(
-    mergeItemOptions(policyOfConfig(job.configSnapshotJson), storedGate(pr)),
+    mergeItemOptions(frozenConfigOf(tx, pr).mergePolicy.value, storedGate(pr)),
   );
   return openMergeItemsOf(tx, pr).some((item) => item.optionsJson !== options);
 }
@@ -468,10 +489,10 @@ export function gateOf(
     .where(eq(schema.repositories.id, pr.repositoryId))
     .get();
   if (repo === undefined) throw new Error(`no Repository ${pr.repositoryId}`);
-  const profile = RepositoryProfileSchema.parse(JSON.parse(repo.profileJson));
   const job = tx.select().from(schema.jobs).where(eq(schema.jobs.id, pr.jobId)).get();
   if (job === undefined) throw new Error(`no Job ${pr.jobId}`);
-  const policy = policyOfConfig(job.configSnapshotJson);
+  const frozen = frozenRepositoryConfig(job.configSnapshotJson, repo);
+  const policy = frozen.mergePolicy.value;
   const attempt = approvedAttemptOf(tx, pr.taskId);
   const blocking = tx
     .select({ n: sql<number>`count(*)` })
@@ -506,7 +527,7 @@ export function gateOf(
     },
     reviewedHeadSha: attempt.headSha,
     checks,
-    requiredChecks: profile.requiredChecks ?? [],
+    requiredChecks: frozen.requiredChecks.value,
     graceMs: opts.graceMs,
     now: opts.now,
     blockingFindings: blocking?.n ?? 0,
@@ -664,7 +685,7 @@ export function recordPoll(
     .where(eq(schema.pullRequests.id, prId))
     .get();
   if (current === undefined) throw new Error(`no pull request ${prId}`);
-  const policy = mergePolicyOf(state);
+  const policy = mergePolicyOf(tx, state);
   if ((headMoved || baseMoved) && seen.state === 'open') {
     for (const item of openMergeItemsOf(tx, before)) {
       closeItem(
@@ -765,7 +786,7 @@ function awaitMergeAgain(tx: Tx, holder: StageRunRow, state: JobState, actor: st
   replaceStageBlocker(
     tx,
     holder,
-    awaitingMergeBlocker(tx, prs, first, mergePolicyOf(state)),
+    awaitingMergeBlocker(tx, prs, first, mergePolicyOf(tx, state)),
     actor,
   );
 }
@@ -1016,7 +1037,7 @@ function syncCiBlocker(tx: Tx, jobId: string, now: string): void {
     replaceStageBlocker(
       tx,
       next.holder,
-      awaitingMergeBlocker(tx, prs, first, mergePolicyOf(next.state)),
+      awaitingMergeBlocker(tx, prs, first, mergePolicyOf(tx, next.state)),
       POLLER,
     );
     return;
@@ -1050,11 +1071,9 @@ export function supersedeHeldBlockerItems(
   }
 }
 
-/** The Repository's `requiredChecks` for a PR (empty: every check counts). */
+/** The Repository's `requiredChecks` for a PR, frozen in its Job (empty: every check counts). */
 export function requiredChecksOf(tx: Tx | FactoryDb, pr: PullRequestRow): string[] {
-  return (
-    RepositoryProfileSchema.parse(JSON.parse(repositoryOf(tx, pr).profileJson)).requiredChecks ?? []
-  );
+  return frozenConfigOf(tx, pr).requiredChecks.value;
 }
 
 /** The `merge_approval` Stage Run a Blocker Approval holds, when it waits on `ci_failed` (#61). */
@@ -1206,7 +1225,7 @@ function completeMerge(
     const queued = stepAndReread(tx, step, merge, 'queued');
     const running = stepAndReread(tx, step, queued, 'running');
     step(running, 'succeeded', {
-      reason: `merged on GitHub by a human (${mergePolicyOf(state)})`,
+      reason: `merged on GitHub by a human (${mergePolicyOf(tx, state)})`,
       detail: { mergeSha: all.length === 1 ? pr.mergeSha : null, mergeShas },
     });
   }
@@ -1292,7 +1311,7 @@ export function approveMerge(
   state: JobState,
   step: StageRunStepper,
 ): void {
-  if (mergePolicyOf(state) !== 'human_approval') {
+  if (mergePolicyOf(tx, state) !== 'human_approval') {
     throw new ApiFailure(
       409,
       'merge_not_allowed',
@@ -1332,7 +1351,7 @@ export function approveMerge(
       conditions: approved.conditions,
     },
   });
-  const method = MergeMethodSchema.parse(repositoryOf(tx, pr).mergeMethod);
+  const method = frozenConfigOf(tx, pr).mergeMethod.value;
   const auditId = newId('aud');
   tx.insert(schema.auditLog)
     .values({
@@ -1397,7 +1416,7 @@ export function pendingMerges(db: FactoryDb, jobId: string) {
       // The SHAs the approved item names; null when the PR's head or base moved after its
       // approval (the poller polls the Job's other PRs until all are approved).
       approved: approvedShas(approvedMergeItem(db, pr)),
-      method: MergeMethodSchema.parse(repositoryOf(db, pr).mergeMethod),
+      method: frozenConfigOf(db, pr).mergeMethod.value,
     }));
 }
 

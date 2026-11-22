@@ -7,15 +7,24 @@
  */
 import { z } from 'zod';
 import { DEFAULT_GLOBAL_CONCURRENCY } from './capacity.js';
+import { LEVEL_CONFIG_SHAPE } from './config-levels.js';
 import { configLeafKeys, setConfigKey, type ConfigKeyChange } from './projects.js';
 
-/** Operator-set Factory Level configuration. Every field is optional: unset means the default. */
+/**
+ * Operator-set Factory Level configuration. Every field is optional: unset
+ * means the default. The Job-wide keys are the Project's (ADR-0057): a Project
+ * that sets one wins over the Factory Level.
+ */
 export const FactoryLevelConfigSchema = z
   .object({
+    ...LEVEL_CONFIG_SHAPE,
     concurrency: z
       .object({
         /** Tasks in flight at once, over every Job and Repository (ARCHITECTURE §12, ADR-0020). */
         global: z.number().int().min(1).max(64).optional(),
+        /** The default per-Repository and per-Job Task limits, below a Project's or a Job's. */
+        perRepository: z.number().int().min(1).max(16).optional(),
+        perJob: z.number().int().min(1).max(16).optional(),
       })
       .strict()
       .optional(),

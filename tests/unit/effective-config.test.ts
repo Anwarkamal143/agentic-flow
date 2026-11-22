@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { EffectiveConfigSchema, resolveEffectiveConfig } from '@factory/domain';
+import {
+  EffectiveConfigSchema,
+  resolveEffectiveConfig as resolve,
+  type EffectiveConfig,
+  type EffectiveConfigLevels,
+} from '@factory/domain';
+
+function resolveEffectiveConfig(levels: EffectiveConfigLevels): EffectiveConfig {
+  const result = resolve(levels);
+  if (!result.ok) throw new Error(result.message);
+  return result.config;
+}
 
 describe('resolveEffectiveConfig: Phase B caps and concurrency', () => {
   it('takes the recipe defaults when the Project sets nothing', () => {
