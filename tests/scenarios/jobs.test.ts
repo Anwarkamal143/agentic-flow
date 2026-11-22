@@ -115,6 +115,10 @@ describe('factory job create / job show', () => {
       setup: { value: null, source: 'repository' },
       commands: { value: expect.any(Object) as unknown, source: 'repository' },
       requiredChecks: { value: [], source: 'repository' },
+      sensitivePaths: {
+        value: ['.env*', '**/.env*', '.github/workflows/**', 'infra/**', '**/*.pem', '**/*.key'],
+        source: 'repository',
+      },
     };
     const first = await createJob(rt, repo.id, 'before any config edit');
     expect(first.workflowSnapshot).toEqual({

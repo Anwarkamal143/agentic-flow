@@ -101,15 +101,23 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
     body: { path },
   });
   const { detected } = inspection;
-  const commands = { ...detected.commands };
-  for (const [name, flag] of [
-    ['test', opts.testCommand],
-    ['typecheck', opts.typecheckCommand],
-  ] as const) {
-    if (flag === undefined) continue;
-    if (flag.trim() === '') delete commands[name];
-    else commands[name] = { run: flag.trim(), acceptsArgs: false };
-  }
+  // --test-command / --typecheck-command replace a detected command; an empty value removes it.
+  const flags: Record<string, string | undefined> = {
+    test: opts.testCommand?.trim(),
+    typecheck: opts.typecheckCommand?.trim(),
+  };
+  const commands = Object.fromEntries(
+    [...new Set([...Object.keys(detected.commands), 'test', 'typecheck'])].flatMap((name) => {
+      const flag = flags[name];
+      const command =
+        flag === undefined
+          ? detected.commands[name]
+          : flag === ''
+            ? undefined
+            : { run: flag, acceptsArgs: false };
+      return command === undefined ? [] : [[name, command] as const];
+    }),
+  );
   const profile: DetectedProfile = { ...detected, commands };
   process.stdout.write(
     `Repository: ${inspection.name} (${inspection.source})\n` +

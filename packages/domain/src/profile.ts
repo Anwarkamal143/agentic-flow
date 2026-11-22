@@ -124,15 +124,19 @@ const ProfileV1Schema = z.object({
 export const RepositoryProfileSchema = z.preprocess((value) => {
   const v1 = ProfileV1Schema.safeParse(value);
   if (!v1.success) return value;
-  const { version: _v, commands, ...rest } = v1.data;
+  const { requiredChecks, setup } = v1.data;
   return {
-    ...rest,
     version: 2,
     detection: 'not_detected',
-    commands: namedFromLegacy(commands),
+    packageManager: v1.data.packageManager,
+    commands: namedFromLegacy(v1.data.commands),
     ciFiles: [],
     instructionFiles: [],
     sensitivePaths: [...DEFAULT_SENSITIVE_PATHS],
+    ...(requiredChecks === undefined ? {} : { requiredChecks }),
+    ...(setup === undefined ? {} : { setup }),
+    confirmedBy: v1.data.confirmedBy,
+    confirmedAt: v1.data.confirmedAt,
   };
 }, ProfileV2Schema);
 export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
@@ -338,7 +342,10 @@ export function profileChanges(
   current: RepositoryProfile,
   detected: DetectedProfile,
 ): ProfileChange[] {
-  return profileDiff(current, applyDetection(current, detected, current.confirmedBy, current.confirmedAt));
+  return profileDiff(
+    current,
+    applyDetection(current, detected, current.confirmedBy, current.confirmedAt),
+  );
 }
 
 /** JSON with object keys sorted, so key order never reads as a change. */
@@ -407,15 +414,15 @@ export function setProfileField(
   if (command !== null) {
     const name = ProfileCommandNameSchema.safeParse(command[1]);
     if (!name.success) return invalid(name.error.issues.map((i) => i.message).join('; '));
-    const commands = { ...profile.commands };
-    const existing = commands[name.data];
+    const existing = profile.commands[name.data];
+    let commands = { ...profile.commands };
     if (command[2] !== undefined) {
       if (existing === undefined)
         return invalid(`no command '${name.data}'; set its command first`);
       if (value !== 'true' && value !== 'false') return invalid('takes true or false');
       commands[name.data] = { ...existing, acceptsArgs: value === 'true' };
     } else if (value === '') {
-      delete commands[name.data];
+      commands = Object.fromEntries(Object.entries(commands).filter(([n]) => n !== name.data));
     } else {
       commands[name.data] = { run: value, acceptsArgs: existing?.acceptsArgs ?? false };
     }
@@ -432,8 +439,9 @@ export function setProfileField(
     }
     case 'setup': {
       if (value !== '') return next({ setup: value });
-      const { setup: _s, ...rest } = profile;
-      const parsed = RepositoryProfileSchema.safeParse(rest);
+      const parsed = RepositoryProfileSchema.safeParse(
+        Object.fromEntries(Object.entries(profile).filter(([k]) => k !== 'setup')),
+      );
       return parsed.success ? { ok: true, profile: parsed.data } : invalid(parsed.error.message);
     }
     case 'instructionFiles':
