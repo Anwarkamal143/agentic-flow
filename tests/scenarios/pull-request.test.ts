@@ -349,6 +349,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
         mergeSha,
         adopted: false,
         ci: report.pullRequests[0]?.ci ?? null,
+        mergedBefore: [],
       },
     ]);
     expect(report.pullRequests[0]?.ci).not.toBeNull();
