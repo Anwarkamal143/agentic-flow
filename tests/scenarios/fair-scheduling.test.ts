@@ -55,7 +55,7 @@ function readyWaits(events: TimedEvent[]): number[] {
   const readySince = new Map<string, number>();
   for (const e of events) {
     const at = Date.parse(e.ts);
-    const stageId = String(e.payload['stageId'] ?? '');
+    const stageId = typeof e.payload['stageId'] === 'string' ? e.payload['stageId'] : '';
     if (e.entityKind === 'stage_run' && PROPOSAL_STAGES.includes(stageId)) {
       if (e.type === 'stage_run.queued') readySince.set(e.entityId, at);
       if (e.type === 'stage_run.running') {
