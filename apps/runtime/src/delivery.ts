@@ -23,8 +23,10 @@ import {
   TaskDefinitionSchema,
   TaskStateSchema,
   DeliveredSetupSchema,
+  NOT_ATOMIC,
   type DeliveryReport,
   type PullRequestRecord,
+  type RepositoryDeliveryStatus,
 } from '@factory/domain';
 import { changedPaths, commitsBetween } from '@factory/git';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
@@ -36,6 +38,7 @@ import { latestArtifact } from './plan-approval.js';
 import { integrationSources } from './integration.js';
 import { pullRequestsOf } from './pull-request.js';
 import { foreignCommitsOf } from './foreign-push.js';
+import { storedDeliveryOrder } from './multi-repo.js';
 
 /** A POSIX shell single-quoted word. */
 export function shellQuote(word: string): string {
@@ -49,8 +52,8 @@ export function fetchCommand(clonePath: string, branch: string): string {
 
 export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise<DeliveryReport> {
   const job = db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).get();
-  // The Job's Repositories by name. This report version describes the first one's
-  // Integration Branch; a multi-repo Job's others are named in a known limitation.
+  // The Job's Repositories by name. `repository` and `integration` describe the first one;
+  // `repositories` describes each, in Delivery Order (v7, #106).
   const repositories = db
     .select({ repo: schema.repositories })
     .from(schema.jobRepositories)
@@ -59,7 +62,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     .orderBy(asc(schema.repositories.name), asc(schema.repositories.id))
     .all()
     .map((r) => r.repo);
-  const [repo, ...others] = repositories;
+  const [repo] = repositories;
   if (job === undefined || repo === undefined) throw new Error(`Job ${jobId} has no Repository`);
   /** The Factory Clone a Task's branches live in: its own Repository's. */
   const cloneOf = (repositoryId: string) =>
@@ -202,9 +205,23 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   }
   const skipped = skippedReason(db, jobId, 'pull_request');
   if (skipped !== undefined) notes.push(`No pull request was opened: ${skipped}.`);
-  if (pullRequests.length > 1) {
+  const perRepository = repositoryDeliveries(db, jobId, plan?.id, repositories, pullRequests);
+  if (repositories.length > 1) {
+    const order = perRepository.map((r) => r.name).join(' → ');
+    const afters = perRepository
+      .filter((r) => r.after.length > 0)
+      .map((r) => `${r.name} after ${r.after.join(', ')}`);
     notes.push(
-      `This Job has ${String(pullRequests.length)} pull requests, one per Repository. They are not atomic: each is merged on its own, in no order, and one can be merged while another is not.`,
+      `This Job spans ${String(repositories.length)} Repositories, delivered in the Delivery Order ${order}${afters.length === 0 ? '' : ` (${afters.join('; ')})`}, each with its own Integration Branch in its own Factory Clone${pullRequests.length === 0 ? '' : ' and its own pull request'}. ${
+        pullRequests.length === 0
+          ? 'The branches are not atomic: each is delivered on its own.'
+          : `${NOT_ATOMIC} A later Repository's Merge Gate waits until the pull requests it comes after have merged.`
+      }`,
+    );
+  }
+  for (const pr of pullRequests.filter((p) => p.mergedBefore.length > 0)) {
+    limitations.push(
+      `Merged out of order: ${pr.owner}/${pr.name}#${String(pr.number)} was merged on GitHub before ${pr.mergedBefore.join(', ')}, which comes before it in the Delivery Order. The factory never merges out of order; a human merging on GitHub can, and the factory flags it here.`,
     );
   }
 
@@ -366,18 +383,6 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       );
     }
   }
-  if (others.length > 0) {
-    limitations.push(
-      `This Job spans ${String(repositories.length)} Repositories (${repositories.map((r) => r.name).join(', ')}); this report shows the Integration Branch of ${repo.name} only. ${others
-        .map(
-          (r) =>
-            `${r.name}'s Integration Branch is ${integrationBranch(jobId)} in its own Factory Clone at ${r.clonePath}`,
-        )
-        .join(
-          '; ',
-        )}. The branches of several Repositories are not atomic: each is delivered on its own.`,
-    );
-  }
   for (const command of setupCommands) {
     limitations.push(
       `The Repository's setup command (\`${command}\`) ran in the Worktrees on this machine, with network access and lifecycle scripts off: the Tier 0 guardrail, not isolation.`,
@@ -395,7 +400,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     }
   }
   return DeliveryReportSchema.parse({
-    reportVersion: 6,
+    reportVersion: 7,
     outcome,
     statement,
     job: { id: job.id, title: job.title },
@@ -421,9 +426,65 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       mergeSha: pr.mergeSha,
       adopted: pr.adopted,
       ci: ciOf(pr),
+      mergedBefore: pr.mergedBefore,
     })),
+    repositories: perRepository,
     knownLimitations: limitations,
   } satisfies DeliveryReport);
+}
+
+/**
+ * Each Repository of the Job (#106, ADR-0066), in the stored Delivery Order
+ * (the Job's other Repositories after it, by name), with its status, its
+ * Integration Branch and its current PR.
+ */
+function repositoryDeliveries(
+  db: FactoryDb,
+  jobId: string,
+  planId: string | undefined,
+  repositories: readonly (typeof schema.repositories.$inferSelect)[],
+  pullRequests: readonly PullRequestRecord[],
+): DeliveryReport['repositories'] {
+  const order = storedDeliveryOrder(db, jobId) ?? [];
+  const rank = (id: string) => {
+    const i = order.findIndex((r) => r.repositoryId === id);
+    return i === -1 ? order.length : i;
+  };
+  const nameOf = (id: string) => repositories.find((r) => r.id === id)?.name ?? id;
+  return [...repositories]
+    .sort((a, b) => rank(a.id) - rank(b.id))
+    .map((r) => {
+      const integration = integrationOf(db, jobId, planId, r.id);
+      const pr = pullRequests.find((p) => p.repositoryId === r.id && p.replacedByNumber === null);
+      const approved = integration?.state === 'approved';
+      const status: RepositoryDeliveryStatus =
+        pr?.state === 'merged'
+          ? 'merged'
+          : pr?.state === 'open'
+            ? 'awaiting_merge'
+            : pr?.state === 'closed'
+              ? 'pr_closed'
+              : approved
+                ? 'delivered_locally'
+                : 'not_delivered';
+      return {
+        id: r.id,
+        name: r.name,
+        clonePath: r.clonePath,
+        after: (order.find((o) => o.repositoryId === r.id)?.after ?? []).map(nameOf),
+        status,
+        integration:
+          integration === null
+            ? null
+            : {
+                branch: integration.branch,
+                state: integration.state,
+                headSha: integration.headSha,
+                fetchCommand: approved ? fetchCommand(r.clonePath, integration.branch) : null,
+              },
+        pullRequest: pr === undefined ? null : `${pr.owner}/${pr.name}#${String(pr.number)}`,
+      };
+    });
 }
 
 /** The Merge Gate's checks condition of a PR as last polled, with its checks. */

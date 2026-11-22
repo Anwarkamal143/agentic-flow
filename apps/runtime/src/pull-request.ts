@@ -59,6 +59,7 @@ import { latestStageRun } from './replan.js';
 import { describeTriggers, ensureComment, triggersAnswered } from './pr-feedback.js';
 import { defaultBranchTip, startBaseMergeIn } from './base-change.js';
 import { foreignCommitsOf, foreignHeadsOf } from './foreign-push.js';
+import { multiRepositoryOf, storedDeliveryOrder } from './multi-repo.js';
 import { createHash } from 'node:crypto';
 
 /** The Task scheduler, which runs this Stage. */
@@ -619,7 +620,12 @@ export async function runPullRequest(
   if (job === undefined) throw new Error(`no Job ${jobId}`);
 
   try {
-    for (const { task, repo } of integrationTasksOf(db, jobId)) {
+    // In Delivery Order (ADR-0066): an earlier Repository's PR opens first, so a later
+    // one's body names it; the poller re-renders the earlier body once the later opens.
+    const order = (storedDeliveryOrder(db, jobId) ?? []).map((r) => r.repositoryId);
+    const rank = (id: string) => (order.includes(id) ? order.indexOf(id) : order.length);
+    const targets = integrationTasksOf(db, jobId).sort((a, b) => rank(a.repo.id) - rank(b.repo.id));
+    for (const { task, repo } of targets) {
       const coordinates = coordinatesOf(repo);
       if (coordinates === null) continue; // delivered locally (the report says so)
       const recorded = currentPullRequest(db, jobId, repo.id);
@@ -1370,6 +1376,7 @@ export function pullRequestBodyInput(
       author: c.author,
     })),
     changedFiles,
+    multiRepository: multiRepositoryOf(db, job.id, task.repositoryId),
   };
 }
 
@@ -1416,6 +1423,8 @@ export function toPullRequestRecord(
     ...row,
     replacedByNumber: replacedBy?.number ?? null,
     changesRequestedBy: JSON.parse(row.changesRequestedJson) as unknown,
+    mergedBefore:
+      row.mergedBeforeJson === null ? [] : (JSON.parse(row.mergedBeforeJson) as unknown),
     gate: row.gateJson === null ? null : (JSON.parse(row.gateJson) as unknown),
     checks,
   });

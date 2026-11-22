@@ -232,6 +232,13 @@
       "when": 1795346349835,
       "tag": "0032_mature_blue_marvel",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1795359011002,
+      "tag": "0033_volatile_major_mapleleaf",
+      "breakpoints": true
     }
   ]
 }

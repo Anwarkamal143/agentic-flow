@@ -46,6 +46,7 @@ import { criteriaCoveredBy, currentCriteria, currentSpec } from './criteria.js';
 import { changeJob, type JobState, type StageRunStepper } from './engine.js';
 import { gateFinding } from './findings.js';
 import { newId } from './ids.js';
+import { otherRepositoryChanges } from './upstream-context.js';
 
 export const REVIEW_TEMPLATE_ID = 'review-packet@1';
 
@@ -73,7 +74,7 @@ Reply with exactly one JSON object and nothing else. It must match this JSON Sch
 /** Hash of the template text, recorded with each review. */
 export const REVIEW_TEMPLATE_HASH = `sha256:${createHash('sha256').update(TEMPLATE).digest('hex')}`;
 
-export const INTEGRATION_REVIEW_TEMPLATE_ID = 'integration-review-packet@1';
+export const INTEGRATION_REVIEW_TEMPLATE_ID = 'integration-review-packet@2';
 
 /**
  * The Integration Review (ARCHITECTURE §9, ADR-0035): the whole combined change
@@ -86,6 +87,7 @@ You did not write any of it, and you have no access to how it was written.
 The current directory is the Integration Branch's git Worktree at the reviewed commit. Read it if you need to; change nothing (no edits, no commits). A change you make invalidates your review.
 
 Look for what no single Task's review could see: changes that are each correct but inconsistent together, duplicated helpers or behavior, conflicting conventions, and Acceptance Criteria that no single Task fully satisfies.
+When the Job spans several Repositories, the packet's otherRepositories holds the other Repositories' approved changes as read-only context. You review only this Repository's Integration Branch, but judge whether it is consistent with them (an interface one side provides and the other uses). Their pull requests are separate and not atomic. They are not in your Worktree; never ask for changes there.
 Review the combined change on two axes: (A) engineering standards, and (B) compliance with the whole Specification and every Acceptance Criterion.
 Give every Acceptance Criterion in the packet a verdict: pass, fail, blocked or not_tested. Say not_tested when nothing in the diff or the Evidence shows it.
 Each finding has a severity (critical, high, medium, low, info), a fault origin (implementation, plan, spec, infrastructure), a location (path, path:line, or general), the problem, why it matters, a recommendation, and whether it blocks. Critical and high findings always block.
@@ -150,6 +152,8 @@ export async function buildReviewPacket(input: {
   runs: readonly ReviewedRun[];
   /** Command-sourced criterion Evidence, by code. */
   commandVerdicts: readonly { code: string; verdict: EvidenceVerdict; detail: string }[];
+  /** `integration` only: the Job's other Repositories' changes (#106). */
+  otherRepositories?: ReviewPacket['otherRepositories'];
 }): Promise<ReviewPacket> {
   const { headSha, baseSha } = input.subject;
   const diff = await diffBetween(input.repo, baseSha, headSha, MAX_DIFF_BYTES);
@@ -169,6 +173,9 @@ export async function buildReviewPacket(input: {
       patch: diff.patch,
       truncated: diff.truncated,
     },
+    ...(input.otherRepositories === undefined
+      ? {}
+      : { otherRepositories: input.otherRepositories }),
     evidence: [
       ...input.runs.map((r) => ({
         kind: 'verification' as const,
@@ -374,6 +381,12 @@ export async function runReview(
   if (spec === undefined) throw new Error(`Job ${jobId} has no Specification to review against`);
   const criteria = reviewedCriteria(db, jobId, input.scope, input.definition);
   const template = templateOf(input.scope);
+  const reviewed = db
+    .select()
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, input.subject.taskId))
+    .get();
+  if (reviewed === undefined) throw new Error(`no Task ${input.subject.taskId}`);
   const packet = await buildReviewPacket({
     scope: input.scope,
     subject: { ...input.subject, ...input.at },
@@ -385,6 +398,9 @@ export async function runReview(
       code: c.code,
       ...criterionVerdict(runs.filter((r) => r.criteria.includes(c.code))),
     })),
+    ...(input.scope === 'integration'
+      ? { otherRepositories: await otherRepositoryChanges(db, reviewed) }
+      : {}),
   });
   let rejected: RuleIssue[] | undefined;
   for (let n = input.firstRun; n <= REVIEW_RUNS; n++) {

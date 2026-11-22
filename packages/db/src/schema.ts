@@ -678,6 +678,13 @@ export const pullRequests = sqliteTable(
     lastPolledAt: text('last_polled_at'),
     /** The merge commit, once the poller saw the PR merged (#58). */
     mergeSha: text('merge_sha'),
+    /**
+     * JSON array of the earlier PRs in Delivery Order (`owner/name#n`, or the
+     * Repository's name when it had none) that had not merged when this one
+     * was seen merged (#106, ADR-0066): an out-of-order merge, flagged in the
+     * Delivery Report. Null when it merged in order, or has not merged.
+     */
+    mergedBeforeJson: text('merged_before_json'),
     /** GitHub's `mergeable_state` as last read; null until the poller read it. */
     mergeableState: text('mergeable_state'),
     /** When the factory first saw `head_sha` as the head: the checks grace window starts here. */

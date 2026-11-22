@@ -8,6 +8,7 @@ import {
   evaluateMergeGate,
   failingChecks,
   observedChecks,
+  readyButForPolicy,
   rerunPlan,
   describeRerunnability,
   unresolvedChangeRequests,
@@ -193,6 +194,84 @@ describe('the Merge Gate', () => {
   it('fails the verdict when any condition fails, whatever is pending', () => {
     const gate = evaluateMergeGate(input({ checks: [{ name: 'test', outcome: 'failure' }] }));
     expect(gate.verdict).toBe('fail');
+  });
+});
+
+describe('the Merge Gate in Delivery Order (multi-repo, #106, ADR-0052)', () => {
+  const api = {
+    repository: 'api',
+    pullRequest: 'acme/api#12',
+    state: 'open',
+    mergeApproved: false,
+  } as const;
+
+  it('has no Delivery Order condition when the Repository comes after none (a single-repo Job, or the first)', () => {
+    expect(evaluateMergeGate(input()).conditions.map((c) => c.id)).not.toContain('delivery_order');
+    expect(evaluateMergeGate(input({ earlier: [] })).conditions.map((c) => c.id)).not.toContain(
+      'delivery_order',
+    );
+  });
+
+  it('waits, before the policy, until the earlier PR in Delivery Order has merged, naming it', () => {
+    const waiting = evaluateMergeGate(input({ earlier: [api] }));
+    expect(waiting.conditions.map((c) => c.id)).toEqual([
+      'target',
+      'reviewed_head',
+      'checks',
+      'reviews',
+      'mergeable',
+      'delivery_order',
+      'policy',
+    ]);
+    expect(waiting.conditions.find((c) => c.id === 'delivery_order')).toEqual({
+      id: 'delivery_order',
+      label: 'The earlier PR in Delivery Order has merged',
+      status: 'pending',
+      reason:
+        'waits for acme/api#12 (api) to merge: this Repository comes after api in the Delivery Order',
+    });
+    expect(readyButForPolicy(waiting)).toBe(false);
+  });
+
+  it('passes once every earlier PR has merged', () => {
+    const merged = input({ earlier: [{ ...api, state: 'merged' }], policy: 'human_approval' });
+    expect(condition(merged, 'delivery_order')).toMatchObject({
+      status: 'pass',
+      reason: 'acme/api#12 (api) has merged',
+    });
+    expect(readyButForPolicy(evaluateMergeGate(merged))).toBe(true);
+  });
+
+  it('under human_approval, passes when the earlier merge is approved: the factory merges it first', () => {
+    const approved = input({
+      earlier: [{ ...api, mergeApproved: true }],
+      policy: 'human_approval',
+    });
+    expect(condition(approved, 'delivery_order')).toMatchObject({
+      status: 'pass',
+      reason:
+        'acme/api#12 (api): its merge is approved, and the factory merges it first, in Delivery Order',
+    });
+    // Under never_auto a human merges on GitHub: an approval is no merge.
+    const neverAuto = input({ earlier: [{ ...api, mergeApproved: true }] });
+    expect(condition(neverAuto, 'delivery_order')?.status).toBe('pending');
+  });
+
+  it('names an earlier Repository with no pull request, or a closed one, and waits on every earlier one', () => {
+    const gate = evaluateMergeGate(
+      input({
+        earlier: [
+          { repository: 'lib', pullRequest: null, state: null, mergeApproved: false },
+          { ...api, state: 'closed' },
+          { repository: 'db', pullRequest: 'acme/db#3', state: 'merged', mergeApproved: false },
+        ],
+      }),
+    );
+    expect(gate.conditions.find((c) => c.id === 'delivery_order')).toMatchObject({
+      status: 'pending',
+      reason:
+        'waits for lib (no pull request opened yet) and acme/api#12 (api, closed without merging) to merge: this Repository comes after lib, api and db in the Delivery Order',
+    });
   });
 });
 
