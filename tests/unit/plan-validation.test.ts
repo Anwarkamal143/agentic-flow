@@ -7,6 +7,7 @@
 import {
   checkPathScope,
   PlanProposalSchema,
+  resolveVerification,
   validatePlan,
   withSensitivePaths,
   type PlanContext,
@@ -20,6 +21,7 @@ interface TaskOver {
   dependsOn?: string[];
   repository?: string;
   maxAttempts?: number;
+  verification?: { key: string; command: string; args?: string[]; criteria?: string[] }[];
 }
 
 const plan = (...tasks: TaskOver[]): PlanProposal =>
@@ -34,7 +36,7 @@ const plan = (...tasks: TaskOver[]): PlanProposal =>
       scope: { writable: t.writable },
       dependsOn: t.dependsOn ?? [],
       acceptance: ['AC-01'],
-      verification: [{ key: 'test', command: 'true', criteria: ['AC-01'] }],
+      verification: t.verification ?? [{ key: 'test', command: 'true', criteria: ['AC-01'] }],
       ...(t.maxAttempts === undefined ? {} : { maxAttempts: t.maxAttempts }),
     })),
   });
@@ -59,6 +61,7 @@ const ctx = (over: Partial<PlanContext> = {}): PlanContext => ({
     ['repo_web', TRACKED],
   ]),
   sensitivePaths: new Map(),
+  commands: new Map(),
   ...over,
 });
 
@@ -308,5 +311,94 @@ describe('Sensitive Paths (ADR-0051)', () => {
     expect(violations.map((v) => [v.rule, v.paths])).toEqual([
       ['scope.forbidden', ['infra/main.tf', 'src/.env.local']],
     ]);
+  });
+});
+
+describe('verification by profile command name (ADR-0051)', () => {
+  const COMMANDS = {
+    test: { run: 'pnpm vitest run', acceptsArgs: true },
+    lint: { run: 'pnpm lint', acceptsArgs: false },
+  };
+  const withCommands = ctx({ commands: new Map([['repo_app', COMMANDS]]) });
+  const verifying = (entry: { command: string; args?: string[] }) =>
+    plan({
+      key: 'one',
+      writable: ['src/**'],
+      verification: [{ key: 'v', criteria: ['AC-01'], ...entry }],
+    });
+
+  it('accepts a profile command, with arguments when it accepts them, and a free shell command', () => {
+    expect(rules(verifying({ command: 'lint' }), withCommands)).toEqual([]);
+    expect(
+      rules(
+        verifying({ command: 'test', args: ['tests/unit/a.test.ts', '--reporter=dot', 'a@1,b+c:d'] }),
+        withCommands,
+      ),
+    ).toEqual([]);
+    // The expand step (#102): free shell is still accepted; #104 refuses it.
+    expect(rules(verifying({ command: 'grep -q sum src/math.ts' }), withCommands)).toEqual([]);
+  });
+
+  it('refuses arguments on a profile command that does not accept them', () => {
+    expect(issues(verifying({ command: 'lint', args: ['src'] }), withCommands)).toEqual([
+      {
+        rule: 'plan.verification_args',
+        message:
+          "Task one: verification v: profile command 'lint' of Repository app does not accept arguments (a human marks it acceptsArgs in the Repository Profile)",
+      },
+    ]);
+  });
+
+  it('refuses an argument outside the allowlist, naming it and the pattern', () => {
+    for (const arg of ['a b', "x'y", '$(id)', 'a;b', '`x`', '', 'a|b', '~/x', 'a*', 'a\nb']) {
+      expect(issues(verifying({ command: 'test', args: [arg] }), withCommands)).toEqual([
+        {
+          rule: 'plan.verification_args',
+          message: `Task one: verification v: argument ${JSON.stringify(arg)} must match ^[A-Za-z0-9._/:=@+,-]+$`,
+        },
+      ]);
+    }
+  });
+
+  it('refuses arguments on a command that is not one of the Repository’s profile commands', () => {
+    expect(issues(verifying({ command: 'echo', args: ['hi'] }), withCommands)).toEqual([
+      {
+        rule: 'plan.verification_args',
+        message:
+          "Task one: verification v: 'echo' is not a profile command of Repository app (lint, test); arguments are allowed only on a profile command that accepts them",
+      },
+    ]);
+    // Each Task is judged against its own Repository's commands.
+    expect(
+      rules(
+        plan({
+          key: 'one',
+          writable: ['src/**'],
+          repository: 'web',
+          verification: [{ key: 'v', command: 'test', args: ['x'], criteria: ['AC-01'] }],
+        }),
+        withCommands,
+      ),
+    ).toEqual(['plan.verification_args']);
+  });
+
+  it('resolves a profile command to its run, each argument shell-quoted and appended', () => {
+    expect(
+      resolveVerification({ command: 'test', args: ['tests/a.test.ts', '-t'] }, COMMANDS),
+    ).toEqual({
+      run: "pnpm vitest run 'tests/a.test.ts' '-t'",
+      profileCommand: { name: 'test', args: ['tests/a.test.ts', '-t'] },
+    });
+    expect(resolveVerification({ command: 'lint' }, COMMANDS)).toEqual({
+      run: 'pnpm lint',
+      profileCommand: { name: 'lint', args: [] },
+    });
+  });
+
+  it('runs a command that names no profile command as free shell', () => {
+    expect(resolveVerification({ command: 'grep -q sum src/math.ts' }, COMMANDS)).toEqual({
+      run: 'grep -q sum src/math.ts',
+      profileCommand: null,
+    });
   });
 });
