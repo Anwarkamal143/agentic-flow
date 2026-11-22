@@ -268,7 +268,7 @@ The packet is what the factory **sends**. It is versioned (`packet_version`), st
 
 ```ts
 TaskPacket = {
-  packet_version: 3,                       // 2 since Phase D (#102); 3: verification is profile commands only (#104)
+  packet_version: 4,                       // 2 since Phase D (#102); 3: verification is profile commands only (#104); 4: context.upstream (#105)
   job: { id, title, objective },
   task: { id, key, title, objective, role, risk: "low"|"medium"|"high" },
   repository: { id, worktree_path, base_branch, base_sha },
@@ -277,7 +277,9 @@ TaskPacket = {
   verification: { key: string, command: string /* profile command name */, args?: string[],
                   run: string /* the shell it resolves to */, required: boolean }[],
   context: { artifacts: ArtifactRef[], files: string[], prior_findings?: Finding[],
-             instruction_files: string[] /* the frozen profile's; guidance only [Phase D] */ },
+             instruction_files: string[] /* the frozen profile's; guidance only [Phase D] */,
+             upstream: { task, repository, base_sha, head_sha, summary, diff }[]
+               /* approved Tasks of other Repositories it depends on; read-only context [Phase D, ADR-0065] */ },
   skills: SkillRef[],
   limits: { max_turns, wall_clock_s, max_output_tokens? },
   protocol: { result_file: ".factory/result.json", may_ask_questions: boolean }
@@ -357,7 +359,7 @@ Independence means:
   - In Phase A, delivery is a branch **inside the factory clone**. The Delivery Report gives the clone path, branch name and a ready-to-run `git fetch <clone_path> <branch>` command, so the user can pull the result into their own checkout.
   - In Phase C, the factory pushes from its clone to the remote.
 - One worktree per task: `<workspace_root>/<repo>/<job-id>/<task-key>` on branch `factory/<job-id>/<task-key>-<slug>`, created from a freshly fetched `base_sha`.
-- **Dependency Base [Phase B].** A Task with dependencies starts from the approved heads of the Tasks it depends on: one dependency's head directly, several merged in Plan order into a local commit in the Factory Clone. `base_sha` is that exact commit. This is **not** the Integration Branch (§14). A merge conflict is a human Blocker `base_merge_conflict` (§8.1), never an automatic replan.
+- **Dependency Base [Phase B].** A Task with dependencies starts from the approved heads of the Tasks it depends on: one dependency's head directly, several merged in Plan order into a local commit in the Factory Clone. `base_sha` is that exact commit. This is **not** the Integration Branch (§14). A merge conflict is a human Blocker `base_merge_conflict` (§8.1), never an automatic replan. Only dependencies in the Task's own Repository make the base [Phase D]: a dependency in another Repository only orders the Task (it is `ready` once that Task is approved) and gives it that Task's result summary and diff as `context.upstream` (ADR-0052, ADR-0065).
 - **Port allocation:** each worktree leases a block of 10 ports. The factory exports `FACTORY_PORT_BASE` and `PORT`, and records the lease.
 - **Test databases and services:** export `FACTORY_TASK_ID` and recommend repo commands use it in DB names and container names. The repo profile can declare `services` that need serializing (`lock: shared-db`).
 - **Dependency installs:** use the shared package-manager store (pnpm store, npm cache, uv cache). Record disk usage per worktree. A cleanup job removes worktrees in `removed`-eligible states only.
@@ -404,7 +406,7 @@ Loop (every 1–2 s, plus a wake-up after any relevant event):
 - **Transport:** one GitHub port, REST over `fetch` at a configurable API base URL. Authentication is a **token reference** (`gh` or `env:NAME`) resolved for each request, never stored, and taught to redaction. A Repository's coordinates (`owner/name`) come from a github.com remote or `repo add --github` (ADR-0033).
 - **Local-first:** GitHub is **polled** (conditional requests with ETag, 30–60 s while a PR is open). Webhooks or a tunnel are optional [Later].
 - **Rate limits and backoff:** a rate limit is capacity, not failure. It sets a GitHub-wide `paused_until` (the `github_state` row, GitHub's reset), with `github.paused` and `github.resumed` events. No GitHub API call is made until the reset, no Stage Run changes, and no Blocker is raised. Transient failures (5xx, network) back the poller off exponentially from the poll interval, capped at 5 minutes (ADR-0045).
-- **Multi-repo:** one integration branch and one PR per repository. Each job has a `delivery_order` (from the DAG). The default contract strategy is **expand → migrate consumers → contract**, with feature flags where a change can't be made additive. Reports must say that multiple PRs are *not* atomic. [Phase D] Every PR opens when its integration is ready; a later Repository's Merge Gate waits until the earlier PR in the Delivery Order has merged. The contract step (removing the old interface) is never in the same Job: the planner marks it deferred, and once every PR has merged an Approval offers a follow-up Job for it (ADR-0052).
+- **Multi-repo:** one integration branch and one PR per repository. Each job has a `delivery_order` (from the DAG; `jobs.delivery_order_json`, written with the Plan's Tasks, ADR-0065). The default contract strategy is **expand → migrate consumers → contract**, with feature flags where a change can't be made additive. Reports must say that multiple PRs are *not* atomic. [Phase D] Every PR opens when its integration is ready; a later Repository's Merge Gate waits until the earlier PR in the Delivery Order has merged. The contract step (removing the old interface) is never in the same Job: the planner marks it deferred, and once every PR has merged an Approval offers a follow-up Job for it (ADR-0052).
 
 ## 15. Configuration [MVP minimal; v1 full hierarchy]
 
