@@ -225,6 +225,13 @@
       "when": 1795339656099,
       "tag": "0031_nifty_diamondback",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1795346349835,
+      "tag": "0032_mature_blue_marvel",
+      "breakpoints": true
     }
   ]
 }

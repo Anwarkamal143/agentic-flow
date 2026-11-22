@@ -6,6 +6,7 @@
  */
 import picomatch from 'picomatch';
 import { z } from 'zod';
+import { deliveryOrder } from './delivery-order.js';
 import type { ProfileCommand } from './profile.js';
 
 const text = z.string().trim().min(1).max(10_000);
@@ -240,7 +241,8 @@ export interface PlanContext {
  * the Job on every Task, valid scope globs, existing dependencies, no cycles,
  * Acceptance Criteria that exist and are all covered when mandatory, a
  * `maxAttempts` that only narrows, no `writable` entry that is literally a
- * Sensitive Path of the Task's Repository, and no overlapping writable paths
+ * Sensitive Path of the Task's Repository, no cycle between Repositories (the
+ * Delivery Order, ADR-0052), and no overlapping writable paths
  * between Tasks that no dependency path orders.
  */
 export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] {
@@ -332,6 +334,17 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
   const cycle = findCycle(plan.tasks);
   if (cycle !== undefined) {
     issues.push({ rule: 'plan.no_cycles', message: `dependency cycle: ${cycle.join(' → ')}` });
+  } else {
+    const order = deliveryOrder(
+      plan.tasks.map((t) => ({ ...t, repository: repositoryIdOf(ctx, t.repository) ?? '' })),
+      ctx.repositories,
+    );
+    if (!order.ok) {
+      issues.push({
+        rule: 'plan.delivery_order_cycle',
+        message: `cross-repo dependency cycle: ${order.cycle.join(' → ')}; the Delivery Order must be defined, so no Repository may depend on a Repository that depends on it`,
+      });
+    }
   }
   issues.push(...overlapIssues(plan, ctx));
   for (const c of ctx.criteria) {
@@ -343,6 +356,14 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
     }
   }
   return issues;
+}
+
+/** The id of the Job's Repository a Plan Task names (by id or name), if it is one. */
+export function repositoryIdOf(
+  ctx: Pick<PlanContext, 'repositories'>,
+  ref: string,
+): string | undefined {
+  return ctx.repositories.find((r) => r.id === ref || r.name === ref)?.id;
 }
 
 /**

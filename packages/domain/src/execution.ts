@@ -227,6 +227,23 @@ export function addUsage(a: Usage, b: Usage): Usage {
 /** Where the Harness writes its Task Result, relative to the Worktree. Never committed. */
 export const RESULT_FILE = '.factory/result.json';
 
+/**
+ * A Task in another Repository that a dependent Task depends on (ADR-0052,
+ * ADR-0065): its approved result summary and diff, given read-only as context,
+ * never as code in the dependent Task's Worktree.
+ */
+export const UpstreamContextItemSchema = z.object({
+  task: z.object({ id: z.string(), key: z.string(), title: z.string() }),
+  repository: z.object({ id: z.string(), name: z.string() }),
+  /** The approved Attempt's `(base, head)`: the diff is `base..head` in that Repository. */
+  baseSha: z.string(),
+  headSha: z.string(),
+  /** The approved Attempt's Task Result summary (its developer's claim); `null` without one. */
+  summary: z.string().nullable(),
+  diff: z.object({ patch: z.string(), truncated: z.boolean() }),
+});
+export type UpstreamContextItem = z.infer<typeof UpstreamContextItemSchema>;
+
 /** What the factory sends a developer Harness Run. Versioned; stored on the Attempt. */
 export const TaskPacketSchema = z.object({
   /**
@@ -235,9 +252,10 @@ export const TaskPacketSchema = z.object({
    * Packets stored before parse as version 1. `3` (#104): free shell is
    * refused at plan validation, so every entry's `command` names a profile
    * command; only a Task of a Plan accepted before #104 may still carry free
-   * shell, its `run` then the same string.
+   * shell, its `run` then the same string. `4` (#105): `context.upstream`,
+   * the approved Tasks of other Repositories it depends on.
    */
-  packetVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  packetVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
   job: z.object({ id: z.string(), title: z.string(), objective: z.string() }),
   task: z.object({
     id: z.string(),
@@ -299,6 +317,12 @@ export const TaskPacketSchema = z.object({
      * request. Context only: it never changes the scope or a policy.
      */
     prFeedback: z.array(PrFeedbackEntrySchema).default([]),
+    /**
+     * The Tasks of other Repositories this Task depends on, each approved
+     * (ADR-0065): read-only context to code against their agreed contract.
+     * Packets before version 4 have none.
+     */
+    upstream: z.array(UpstreamContextItemSchema).default([]),
   }),
   limits: z.object({ maxTurns: z.number().int().positive(), wallClockS: z.number().positive() }),
   protocol: z.object({ resultFile: z.literal(RESULT_FILE), mayAskQuestions: z.boolean() }),

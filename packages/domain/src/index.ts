@@ -10,6 +10,7 @@ import { GitHubCoordinatesSchema, parseCoordinates } from './github.js';
 import { TaskKindSchema } from './integration.js';
 import { ReviewRerunOnBaseChangeSchema, type ReviewRerunOnBaseChange } from './base-change.js';
 import { SetupCommandSchema } from './setup.js';
+import { DeliveryOrderSchema } from './delivery-order.js';
 import {
   DEFAULT_SENSITIVE_PATHS,
   DetectedProfileSchema,
@@ -68,6 +69,7 @@ export * from './approvals.js';
 export * from './plan-view.js';
 export * from './capacity.js';
 export * from './dependency-base.js';
+export * from './delivery-order.js';
 export * from './questions.js';
 export * from './blocker-approvals.js';
 export * from './carry-over.js';
@@ -820,7 +822,7 @@ export type JobRepository = z.infer<typeof JobRepositorySchema>;
 export const JobSummarySchema = z.object({
   id: z.string(),
   projectId: z.string(),
-  /** The Repositories the Job touches, by name. One today; a list so multi-repo Jobs fit (Phase D). */
+  /** The Repositories the Job touches (one or more of its Project's, ADR-0052), by name. */
   repositories: z.array(JobRepositorySchema).min(1),
   title: z.string(),
   type: JobTypeSchema,
@@ -845,6 +847,11 @@ export const JobSchema = JobSummarySchema.extend({
   replanRequested: z.boolean(),
   /** Replans used, against `maxReplans`. */
   replans: z.object({ used: z.number().int(), max: z.number().int() }),
+  /**
+   * The Delivery Order of the newest persisted Plan (ADR-0052, ADR-0065): its
+   * Repositories upstream first. `null` before a Plan's Tasks exist.
+   */
+  deliveryOrder: DeliveryOrderSchema.nullable(),
 });
 export type Job = z.infer<typeof JobSchema>;
 
@@ -856,21 +863,48 @@ export const RequestReplanInputSchema = z.object({
 export type RequestReplanInput = z.infer<typeof RequestReplanInputSchema>;
 
 /** `POST /v1/jobs`. */
-export const CreateJobInputSchema = z.object({
-  /**
-   * The Project, by id or name. Unset: the Repository's Project, or else the only
-   * Project; with several, the request is refused (PRODUCT_SPEC §5, ADR-0055).
-   */
-  project: z.string().min(1).optional(),
-  /** Unset: the Project's only Repository; with several, the request is refused. */
-  repositoryId: z.string().min(1).optional(),
-  title: z.string().trim().min(1).max(200),
-  description: z.string().max(20_000).default(''),
-  /** Overrides of the Effective Configuration's concurrency limits, up or down (ARCHITECTURE §12). */
-  concurrency: ConcurrencyOverrideSchema.optional(),
-  /** A Merge Policy at least as strict as the Repository's (PRODUCT_SPEC §9); a looser one is refused. */
-  mergePolicy: MergePolicySchema.optional(),
-});
+export const CreateJobInputSchema = z
+  .object({
+    /**
+     * The Project, by id or name. Unset: the Repositories' Project, or else the only
+     * Project; with several, the request is refused (PRODUCT_SPEC §5, ADR-0055).
+     */
+    project: z.string().min(1).optional(),
+    /**
+     * One Repository: the same as `repositoryIds` with one entry. Neither: the
+     * Project's only Repository; with several, the request is refused.
+     */
+    repositoryId: z.string().min(1).optional(),
+    /**
+     * The Repositories of a multi-repo Job (ADR-0052, ADR-0065), all of one
+     * Project, each once. Triage can't change a named set.
+     */
+    repositoryIds: z.array(z.string().min(1)).min(1).max(20).optional(),
+    title: z.string().trim().min(1).max(200),
+    description: z.string().max(20_000).default(''),
+    /** Overrides of the Effective Configuration's concurrency limits, up or down (ARCHITECTURE §12). */
+    concurrency: ConcurrencyOverrideSchema.optional(),
+    /** A Merge Policy at least as strict as each Repository's (PRODUCT_SPEC §9); a looser one is refused. */
+    mergePolicy: MergePolicySchema.optional(),
+  })
+  .superRefine((input, ctx) => {
+    if (input.repositoryId !== undefined && input.repositoryIds !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['repositoryIds'],
+        message: 'name the Repositories with repositoryId or repositoryIds, not both',
+      });
+    }
+    const ids = input.repositoryIds ?? [];
+    const repeated = ids.filter((id, i) => ids.indexOf(id) !== i);
+    if (repeated.length > 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['repositoryIds'],
+        message: `each Repository is named once (${[...new Set(repeated)].join(', ')} more than once)`,
+      });
+    }
+  });
 export type CreateJobInput = z.infer<typeof CreateJobInputSchema>;
 
 /** `POST /v1/jobs/:id/cancel`. `expectedVersion` is the Job version the caller saw. */

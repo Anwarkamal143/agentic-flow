@@ -235,10 +235,12 @@ export function versionTool(output: string, otherwise = 'exit 1'): string {
 
 /**
  * A fresh `tiny-ts` fixture Repository, made by the fixture generator script
- * (never a committed nested repo). Returns the path of its checkout.
+ * (never a committed nested repo). Returns the path of its checkout. `name`
+ * is its directory, which `repo add` takes as the Repository's name (the
+ * `api` and `web` fixtures of the multi-repo scenarios).
  */
-export function tinyTsRepo(): string {
-  const dir = join(tempDir('factory-repo-'), 'tiny-ts');
+export function tinyTsRepo(name = 'tiny-ts'): string {
+  const dir = join(tempDir('factory-repo-'), name);
   execFileSync(process.execPath, [tinyTsScript, dir], { stdio: 'pipe' });
   return dir;
 }

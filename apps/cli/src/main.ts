@@ -61,13 +61,14 @@ Commands:
                                   commands.<name>.acceptsArgs true|false, packageManager,
                                   sensitivePaths, instructionFiles, requiredChecks (JSON
                                   arrays), setup (empty removes)
-  job create --title <text> [--project <id|name>] [--repo <id|name>]
+  job create --title <text> [--project <id|name>] [--repo <id|name>]...
              [--description <text>] [--per-repository <n>] [--per-job <n>]
              [--merge-policy <policy>]
                                   Create a Job (unset --project: the only Project;
-                                  unset --repo: the Project's only Repository); the
+                                  unset --repo: the Project's only Repository; repeat
+                                  --repo for a multi-repo Job, all of one Project); the
                                   concurrency flags override its Task limits, and
-                                  --merge-policy may only make the Repository's stricter
+                                  --merge-policy may only make each Repository's stricter
   job list [--json]               List Jobs, newest first
   job show <id> [--json]          Show a Job: status, Stages, Workflow Snapshot, config
   job cancel <id> [--reason <text>]
@@ -332,7 +333,7 @@ function job(argv: string[]): Promise<number> | number {
         args,
         options: {
           project: { type: 'string' },
-          repo: { type: 'string' },
+          repo: { type: 'string', multiple: true },
           title: { type: 'string' },
           description: { type: 'string' },
           'per-repository': { type: 'string' },
@@ -360,7 +361,7 @@ function job(argv: string[]): Promise<number> | number {
       return jobCreate({
         ...(mergePolicy === undefined ? {} : { mergePolicy: mergePolicy.data }),
         project: values.project,
-        repo: values.repo,
+        repos: values.repo ?? [],
         title: values.title,
         description: values.description,
         concurrency: {

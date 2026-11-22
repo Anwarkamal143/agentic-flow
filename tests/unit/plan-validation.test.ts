@@ -427,3 +427,44 @@ describe('verification by profile command name (ADR-0051)', () => {
     });
   });
 });
+
+describe('validatePlan: cross-repo dependency cycles (ADR-0052)', () => {
+  it('accepts a cross-repo edge: the Delivery Order is defined', () => {
+    expect(
+      rules(
+        plan(
+          { key: 'expand', writable: ['src/**'] },
+          { key: 'use', writable: ['src/**'], repository: 'web', dependsOn: ['expand'] },
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  it('rejects a cycle between Repositories that no Task cycle shows, naming the Repositories', () => {
+    const found = issues(
+      plan(
+        { key: 'a', writable: ['src/a/**'] },
+        { key: 'b', writable: ['src/**'], repository: 'web', dependsOn: ['a'] },
+        { key: 'c', writable: ['src/b/**'], dependsOn: ['b'] },
+      ),
+    );
+    expect(found).toEqual([
+      {
+        rule: 'plan.delivery_order_cycle',
+        message:
+          'cross-repo dependency cycle: app → web → app; the Delivery Order must be defined, so no Repository may depend on a Repository that depends on it',
+      },
+    ]);
+  });
+
+  it('reports a Task cycle once, as plan.no_cycles', () => {
+    expect(
+      rules(
+        plan(
+          { key: 'a', writable: ['src/**'], dependsOn: ['b'] },
+          { key: 'b', writable: ['src/**'], repository: 'web', dependsOn: ['a'] },
+        ),
+      ),
+    ).toEqual(['plan.no_cycles']);
+  });
+});

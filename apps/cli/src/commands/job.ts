@@ -38,8 +38,8 @@ export function client(): RuntimeClient | undefined {
 export interface JobCreateOptions {
   /** A Project id or name; unset: the Repository's Project, or the only Project. */
   project: string | undefined;
-  /** A Repository id or name; unset: the Project's only Repository. */
-  repo: string | undefined;
+  /** Repository ids or names (several: a multi-repo Job); none: the Project's only Repository. */
+  repos: readonly string[];
   title: string;
   description: string | undefined;
   /** Overrides of the Job's concurrency limits (the runtime checks the range). */
@@ -55,23 +55,30 @@ export interface JobCreateOptions {
 export async function jobCreate(opts: JobCreateOptions): Promise<number> {
   const api = client();
   if (api === undefined) return EXIT_NOT_RUNNING;
-  let repo: Repository | undefined;
-  if (opts.repo !== undefined) {
+  const chosen: Repository[] = [];
+  if (opts.repos.length > 0) {
     const repos = await api.json<Repository[]>('GET', '/v1/repositories');
-    const matches = repos.filter((r) => r.id === opts.repo || r.name === opts.repo);
-    if (matches.length !== 1) {
-      process.stderr.write(
-        matches.length === 0
-          ? `factory: no Repository '${opts.repo}'. Registered: ${repos.map((r) => `${r.name} (${r.id})`).join(', ') || 'none'}\n`
-          : `factory: '${opts.repo}' names several Repositories; use its id: ${matches.map((r) => r.id).join(', ')}\n`,
-      );
-      return 1;
+    for (const ref of opts.repos) {
+      const matches = repos.filter((r) => r.id === ref || r.name === ref);
+      const [only] = matches;
+      if (only === undefined || matches.length > 1) {
+        process.stderr.write(
+          matches.length === 0
+            ? `factory: no Repository '${ref}'. Registered: ${repos.map((r) => `${r.name} (${r.id})`).join(', ') || 'none'}\n`
+            : `factory: '${ref}' names several Repositories; use its id: ${matches.map((r) => r.id).join(', ')}\n`,
+        );
+        return 1;
+      }
+      if (chosen.some((r) => r.id === only.id)) {
+        process.stderr.write(`factory: Repository '${ref}' is named more than once\n`);
+        return 1;
+      }
+      chosen.push(only);
     }
-    repo = matches[0];
   }
   const input: CreateJobInput = {
     ...(opts.project === undefined ? {} : { project: opts.project }),
-    ...(repo === undefined ? {} : { repositoryId: repo.id }),
+    ...(chosen.length === 0 ? {} : { repositoryIds: chosen.map((r) => r.id) }),
     title: opts.title,
     description: opts.description ?? '',
     ...(opts.concurrency === undefined || Object.keys(opts.concurrency).length === 0
@@ -343,6 +350,7 @@ function writeJob(job: Job): void {
     `  status:       ${job.status}`,
     `  stage:        ${job.currentStage}`,
     `  repositories: ${job.repositories.map((r) => `${r.name} (${r.id})`).join(', ')}`,
+    ...deliveryOrderLines(job),
     `  recipe:       ${job.workflowSnapshot.recipeId} v${String(job.workflowSnapshot.recipeVersion)}`,
     `  replans:      ${String(job.replans.used)} of ${String(job.replans.max)} used${job.replanRequested ? '; replan requested, waiting for the Attempts in flight' : ''}`,
     `  version:      ${String(job.version)}`,
@@ -358,6 +366,22 @@ function writeJob(job: Job): void {
   ];
   if (job.description !== '') lines.splice(1, 0, `  ${job.description}`);
   process.stdout.write(lines.join('\n') + '\n');
+}
+
+/**
+ * The Delivery Order of a Plan over several Repositories (ADR-0052): upstream
+ * first, then which Repository waits for which. Nothing for one Repository.
+ */
+function deliveryOrderLines(job: Job): string[] {
+  const order = job.deliveryOrder;
+  if (order === null || order.length < 2) return [];
+  const name = (id: string) => order.find((e) => e.repositoryId === id)?.name ?? id;
+  const waits = order
+    .filter((e) => e.after.length > 0)
+    .map((e) => `${e.name} after ${e.after.map(name).join(', ')}`);
+  return [
+    `  delivery order: ${order.map((e) => e.name).join(' → ')}${waits.length === 0 ? '' : ` (${waits.join('; ')})`}`,
+  ];
 }
 
 function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
