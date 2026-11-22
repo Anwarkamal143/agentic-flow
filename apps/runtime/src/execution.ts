@@ -53,6 +53,7 @@ import {
   type RuleIssue,
   type TaskDefinition,
   type TaskPacket,
+  type UpstreamContextItem,
   type TaskResult,
   type Usage,
   toolPolicyOf,
@@ -157,6 +158,7 @@ import { blockOnForeignRewrite } from './foreign-push.js';
 import { frozenRepositoryConfig } from './repositories.js';
 import { dependencyHashOf, diskUsageBytes, recordSetupRun, setupRunsOf } from './setup.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
+import { upstreamContext } from './upstream-context.js';
 import {
   allocatePortBlock,
   commitLeftovers,
@@ -784,6 +786,8 @@ export class TaskScheduler {
     }
     const { path, branch, baseSha } = worktree;
     const worktreeId = worktree.id;
+    // The approved Tasks of other Repositories it depends on, as read-only context (ADR-0065).
+    const upstream = await upstreamContext(db, this.opts.artifacts, task);
     // Built before the Worktree is touched, so nothing between that and its row can fail.
     const packet = this.packet({
       job,
@@ -798,6 +802,7 @@ export class TaskScheduler {
       answers,
       guidance,
       prFeedback: feedback.entries,
+      upstream,
     });
     await this.withClone(clone, async () => {
       await excludeResultFile(clone);
@@ -1045,6 +1050,7 @@ export class TaskScheduler {
       answers: [],
       guidance: [],
       prFeedback: [],
+      upstream: [],
     });
     const portBase = changeJob(
       db,
@@ -1385,6 +1391,7 @@ export class TaskScheduler {
       answers: [],
       guidance: [],
       prFeedback: [],
+      upstream: [],
     });
     const portBase = changeJob(
       db,
@@ -2062,6 +2069,7 @@ export class TaskScheduler {
     answers: AnsweredQuestion[];
     guidance: GrantGuidance[];
     prFeedback: PrFeedbackEntry[];
+    upstream: UpstreamContextItem[];
   }): TaskPacket {
     const { job, task, definition, repo } = input;
     const artifacts = this.opts.artifacts.listForJob(job.id).filter((a) => a.stageRunId !== null);
@@ -2080,7 +2088,7 @@ export class TaskScheduler {
     const criteria = criteriaCoveredBy(this.opts.db, job.id, definition.acceptance);
     const section = frozenRepositoryConfig(job.configSnapshotJson, repo);
     return TaskPacketSchema.parse({
-      packetVersion: 3,
+      packetVersion: 4,
       job: { id: job.id, title: job.title, objective },
       task: {
         id: task.id,
@@ -2119,6 +2127,7 @@ export class TaskScheduler {
         answers: input.answers,
         guidance: input.guidance,
         prFeedback: input.prFeedback,
+        upstream: input.upstream,
       },
       limits: { maxTurns: MAX_TURNS, wallClockS: input.wallClockMs / 1000 },
       // The developer may ask (ARCHITECTURE §7 Question rules); the reviewer never can.

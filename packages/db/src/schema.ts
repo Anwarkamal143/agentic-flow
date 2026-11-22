@@ -115,11 +115,16 @@ export const jobs = sqliteTable(
      * State, not only an event, so the UI shows persisted state (spec #33 story 79).
      */
     replanRequested: integer('replan_requested', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * JSON `DeliveryOrder` (ADR-0052, ADR-0065): the Repositories of the newest
+     * persisted Plan, upstream first. `null` until a Plan's Tasks are written.
+     */
+    deliveryOrderJson: text('delivery_order_json'),
   },
   (t) => [index('jobs_project').on(t.projectId), index('jobs_status').on(t.status)],
 );
 
-/** The Repositories a Job may touch (one per Job in Phase A). */
+/** The Repositories a Job may touch: one or more of its Project's (ADR-0052). */
 export const jobRepositories = sqliteTable(
   'job_repositories',
   {

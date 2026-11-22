@@ -9,6 +9,7 @@ import {
   approvalStillHolds,
   BlockerSchema,
   decideCarryOver,
+  deliveryOrder,
   EffectiveConfigSchema,
   InboxDecisionSchema,
   PlanTaskProposalSchema,
@@ -292,12 +293,47 @@ export function persistPlanTasks(
         ...(made.replaces === null ? {} : { replaces: made.replaces }),
       },
     });
+  }
+  // Once every new Task row exists: a Plan may list a Task before one it depends on.
+  for (const task of plan.tasks) {
+    if (!created.has(task.key)) continue;
     for (const dep of task.dependsOn) {
       tx.insert(schema.taskDependencies)
-        .values({ taskId: id, dependsOnTaskId: taskId(ids, dep) })
+        .values({ taskId: taskId(ids, task.key), dependsOnTaskId: taskId(ids, dep) })
         .run();
     }
   }
+  recordDeliveryOrder(tx, plan.tasks.map(normalized), { ...ctx, repositories });
+}
+
+/**
+ * Stores the Delivery Order of the Plan just persisted on its Job (ADR-0052,
+ * ADR-0065), with a `job.delivery_order_set` event. A validated Plan has no
+ * cross-repo cycle, so the order is defined.
+ */
+function recordDeliveryOrder(
+  tx: Tx,
+  tasks: readonly PlanTaskProposal[],
+  ctx: { jobId: string; artifactId: string; actor: string; repositories: readonly JobRepository[] },
+): void {
+  const result = deliveryOrder(tasks, ctx.repositories);
+  if (!result.ok) {
+    throw new Error(
+      `validated Plan ${ctx.artifactId} has a cross-repo cycle: ${result.cycle.join(' → ')}`,
+    );
+  }
+  tx.update(schema.jobs)
+    .set({ deliveryOrderJson: JSON.stringify(result.order) })
+    .where(eq(schema.jobs.id, ctx.jobId))
+    .run();
+  appendEvent(tx, {
+    entityKind: 'job',
+    entityId: ctx.jobId,
+    jobId: ctx.jobId,
+    type: 'job.delivery_order_set',
+    actor: ctx.actor,
+    payload: { planArtifactId: ctx.artifactId, deliveryOrder: result.order },
+  });
 }
 
 type TaskRow = typeof schema.tasks.$inferSelect;

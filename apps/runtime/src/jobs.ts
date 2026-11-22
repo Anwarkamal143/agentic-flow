@@ -15,6 +15,7 @@ import {
   type Worktree,
   canTransitionStageRun,
   currentStageOf,
+  DeliveryOrderSchema,
   EffectiveConfigSchema,
   featureRecipe,
   FEATURE_RECIPE,
@@ -120,17 +121,20 @@ export class JobService {
   create(input: CreateJobInput): Job {
     const id = this.db.transaction(
       (tx) => {
-        const { project, repo } = jobTarget(tx, input);
+        const { project, repos } = jobTarget(tx, input);
 
         // Copies, never references: later edits to the Recipe or config can't reach the Job.
         const snapshot: WorkflowSnapshot = WorkflowSnapshotSchema.parse(
           structuredClone(featureRecipe(this.recipeVersion)),
         );
-        const mergePolicy = resolveMergePolicy(
-          MergePolicySchema.parse(repo.mergePolicy),
-          input.mergePolicy,
-        );
-        if (!mergePolicy.ok) throw new ApiFailure(409, mergePolicy.code, mergePolicy.message);
+        // The Job's Merge Policy override must be at least as strict as every Repository's.
+        for (const repo of repos) {
+          const mergePolicy = resolveMergePolicy(
+            MergePolicySchema.parse(repo.mergePolicy),
+            input.mergePolicy,
+          );
+          if (!mergePolicy.ok) throw new ApiFailure(409, mergePolicy.code, mergePolicy.message);
+        }
         // Every Repository of the Project gets a section, frozen like the rest: a later
         // config or profile change can't reach this Job (ADR-0047, ADR-0049).
         const resolution = resolveProjectConfig(tx, project, {
@@ -157,7 +161,9 @@ export class JobService {
             version: 0,
           })
           .run();
-        tx.insert(schema.jobRepositories).values({ jobId, repositoryId: repo.id }).run();
+        for (const repo of repos) {
+          tx.insert(schema.jobRepositories).values({ jobId, repositoryId: repo.id }).run();
+        }
         tx.insert(schema.stageRuns)
           .values(
             snapshot.stages.map((stage, position) => {
@@ -185,7 +191,9 @@ export class JobService {
           actor: OPERATOR,
           payload: {
             projectId: project.id,
-            repositoryId: repo.id,
+            // The first by name, as before multi-repo Jobs; `repositoryIds` lists them all.
+            repositoryId: repos[0]?.id,
+            repositoryIds: repos.map((r) => r.id),
             title: input.title,
             recipe: { id: snapshot.recipeId, version: snapshot.recipeVersion },
           },
@@ -589,45 +597,64 @@ function toJob(state: JobState, repositories: JobRepository[]): Job {
     stageRuns: state.stageRuns.map(toStageRun),
     replanRequested: state.job.replanRequested,
     replans: { used: state.job.replansUsed, max: effectiveConfig.maxReplans.value },
+    deliveryOrder:
+      state.job.deliveryOrderJson === null
+        ? null
+        : DeliveryOrderSchema.parse(JSON.parse(state.job.deliveryOrderJson)),
   };
 }
 
 /**
- * The Project and Repository a new Job is for (PRODUCT_SPEC §5, ADR-0055). A named
- * Repository gives its Project; otherwise the named Project, or the only one. The
- * Repository is then the Project's only one, until triage may propose a set.
+ * The Project and Repositories a new Job is for (PRODUCT_SPEC §5, ADR-0055,
+ * ADR-0065). Named Repositories give their Project and must all be of one
+ * Project (the named one, if any); otherwise the named Project, or the only
+ * one, and then its only Repository, until triage may propose a set (#107).
+ * The Repositories are ordered by name, then id.
  */
 function jobTarget(
   tx: Tx,
   input: CreateJobInput,
 ): {
   project: typeof schema.projects.$inferSelect;
-  repo: typeof schema.repositories.$inferSelect;
+  repos: (typeof schema.repositories.$inferSelect)[];
 } {
   const projects = tx.select().from(schema.projects).all();
-  if (input.repositoryId !== undefined) {
-    const repo = tx
-      .select()
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, input.repositoryId))
-      .get();
-    if (repo === undefined) {
-      throw new ApiFailure(404, 'repository_not_found', `no Repository ${input.repositoryId}`);
+  const named =
+    input.repositoryIds ?? (input.repositoryId === undefined ? [] : [input.repositoryId]);
+  if (named.length > 0) {
+    const repos = named.map((id) => {
+      const repo = tx
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, id))
+        .get();
+      if (repo === undefined) {
+        throw new ApiFailure(404, 'repository_not_found', `no Repository ${id}`);
+      }
+      return repo;
+    });
+    const projectOf = (repo: (typeof repos)[number]) => {
+      const own = projects.find((p) => p.id === repo.projectId);
+      if (own === undefined) throw new Error(`Repository ${repo.id} has no Project`);
+      return own;
+    };
+    const [first] = repos;
+    if (first === undefined) throw new Error('a named Repository set is not empty');
+    // The named Project, or else the first named Repository's.
+    const wanted = input.project ?? projectOf(first).id;
+    for (const repo of repos) {
+      const own = projectOf(repo);
+      if (wanted !== own.id && wanted !== own.name) {
+        const label = projects.find((p) => p.id === wanted)?.name ?? wanted;
+        throw new ApiFailure(
+          409,
+          'repository_not_in_project',
+          `Repository ${repo.name} (${repo.id}) belongs to Project '${own.name}', not '${label}'`,
+        );
+      }
     }
-    const project = projects.find((p) => p.id === repo.projectId);
-    if (project === undefined) throw new Error(`Repository ${repo.id} has no Project`);
-    if (
-      input.project !== undefined &&
-      input.project !== project.id &&
-      input.project !== project.name
-    ) {
-      throw new ApiFailure(
-        409,
-        'repository_not_in_project',
-        `Repository ${repo.name} (${repo.id}) belongs to Project '${project.name}', not '${input.project}'`,
-      );
-    }
-    return { project, repo };
+    repos.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+    return { project: projectOf(first), repos };
   }
   const choice = chooseProject(projects, input.project);
   if (!choice.ok) {
@@ -659,5 +686,5 @@ function jobTarget(
       `Project '${project.name}' has several Repositories (${repos.map((r) => r.name).join(', ')}); name one with --repo`,
     );
   }
-  return { project, repo: only };
+  return { project, repos: [only] };
 }

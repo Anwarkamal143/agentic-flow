@@ -253,8 +253,8 @@ describe('the Repository Profile as agent context', () => {
 
     expect(job.status, rt.output()).toBe('completed');
     const attempt = await onlyAttempt<AttemptBody>(rt, job.id);
-    expect(attempt.promptTemplate.id).toBe('task-packet@8');
-    expect(attempt.packet.packetVersion).toBe(3);
+    expect(attempt.promptTemplate.id).toBe('task-packet@9');
+    expect(attempt.packet.packetVersion).toBe(4);
     expect(attempt.packet.context.instructionFiles).toEqual(['CLAUDE.md', 'docs/AGENTS.md']);
     const developer = stub.invocations().find((r) => r.role === 'developer')?.prompt ?? '';
     expect(developer).toContain('context.instructionFiles');

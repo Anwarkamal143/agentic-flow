@@ -49,20 +49,21 @@ export function fetchCommand(clonePath: string, branch: string): string {
 
 export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise<DeliveryReport> {
   const job = db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).get();
-  const link = db
-    .select()
+  // The Job's Repositories by name. This report version describes the first one's
+  // Integration Branch; a multi-repo Job's others are named in a known limitation.
+  const repositories = db
+    .select({ repo: schema.repositories })
     .from(schema.jobRepositories)
+    .innerJoin(schema.repositories, eq(schema.repositories.id, schema.jobRepositories.repositoryId))
     .where(eq(schema.jobRepositories.jobId, jobId))
-    .get();
-  const repo =
-    link === undefined
-      ? undefined
-      : db
-          .select()
-          .from(schema.repositories)
-          .where(eq(schema.repositories.id, link.repositoryId))
-          .get();
+    .orderBy(asc(schema.repositories.name), asc(schema.repositories.id))
+    .all()
+    .map((r) => r.repo);
+  const [repo, ...others] = repositories;
   if (job === undefined || repo === undefined) throw new Error(`Job ${jobId} has no Repository`);
+  /** The Factory Clone a Task's branches live in: its own Repository's. */
+  const cloneOf = (repositoryId: string) =>
+    repositories.find((r) => r.id === repositoryId)?.clonePath ?? repo.clonePath;
 
   const pullRequests = pullRequestsOf(db, jobId);
   const mergePolicy = frozenRepositoryConfig(job.configSnapshotJson, repo).mergePolicy.value;
@@ -101,7 +102,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     .all()
     .filter((t) => t.kind === 'plan')
     .filter((t) => t.planArtifactId === plan?.id || worktrees.some((w) => w.taskId === t.id));
-  const integration = integrationOf(db, jobId, plan?.id);
+  const integration = integrationOf(db, jobId, plan?.id, repo.id);
   // Once the Integration Branch is verified, it is what to fetch: the Task Branches are in it.
   const integrated = integration?.state === 'approved';
   const edges = db
@@ -143,7 +144,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       branch,
       headSha: approvedHead ?? latestAttempt(t.id)?.headSha ?? null,
       leaf: mark?.leaf ?? true,
-      fetchCommand: offered ? fetchCommand(repo.clonePath, branch) : null,
+      fetchCommand: offered ? fetchCommand(cloneOf(t.repositoryId), branch) : null,
     };
   });
   const offered = branches.filter((b) => b.fetchCommand !== null);
@@ -309,7 +310,8 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     // What installed the dependencies its verification ran on (ADR-0047).
     const setup = latestSetupRun(db, worktree.id);
     if (setup !== undefined) setupCommands.add(setup.command);
-    const commits = await commitsBetween(repo.clonePath, attempt.baseSha, attempt.headSha);
+    const clone = cloneOf(task.repositoryId);
+    const commits = await commitsBetween(clone, attempt.baseSha, attempt.headSha);
     delivered.push({
       key: task.key,
       title: task.title,
@@ -318,7 +320,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       baseSha: attempt.baseSha,
       headSha: attempt.headSha,
       commits,
-      changedFiles: await changedPaths(repo.clonePath, attempt.baseSha, attempt.headSha),
+      changedFiles: await changedPaths(clone, attempt.baseSha, attempt.headSha),
       wipCommit: attempt.wipCommit,
       openQuestions,
       setup: setup === undefined ? null : DeliveredSetupSchema.parse(setup),
@@ -363,6 +365,18 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
         `Task ${task.key}: open ${f.severity} review finding at ${f.location}: ${f.problem}`,
       );
     }
+  }
+  if (others.length > 0) {
+    limitations.push(
+      `This Job spans ${String(repositories.length)} Repositories (${repositories.map((r) => r.name).join(', ')}); this report shows the Integration Branch of ${repo.name} only. ${others
+        .map(
+          (r) =>
+            `${r.name}'s Integration Branch is ${integrationBranch(jobId)} in its own Factory Clone at ${r.clonePath}`,
+        )
+        .join(
+          '; ',
+        )}. The branches of several Repositories are not atomic: each is delivered on its own.`,
+    );
   }
   for (const command of setupCommands) {
     limitations.push(
@@ -464,6 +478,7 @@ function integrationOf(
   db: FactoryDb,
   jobId: string,
   planId: string | undefined,
+  repositoryId: string,
 ): Omit<NonNullable<DeliveryReport['integration']>, 'fetchCommand'> | null {
   const task = db
     .select()
@@ -473,6 +488,7 @@ function integrationOf(
         eq(schema.tasks.jobId, jobId),
         eq(schema.tasks.kind, 'integration'),
         eq(schema.tasks.planArtifactId, planId ?? ''),
+        eq(schema.tasks.repositoryId, repositoryId),
       ),
     )
     .orderBy(desc(sql`rowid`))

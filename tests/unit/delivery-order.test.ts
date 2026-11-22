@@ -34,9 +34,10 @@ describe('deliveryOrder', () => {
   });
 
   it('gives a single-Repository Plan one entry, whatever its own dependencies', () => {
-    expect(
-      deliveryOrder([task('a', 'repo_api'), task('b', 'repo_api', ['a'])], [API]),
-    ).toEqual({ ok: true, order: [{ repositoryId: 'repo_api', name: 'api', after: [] }] });
+    expect(deliveryOrder([task('a', 'repo_api'), task('b', 'repo_api', ['a'])], [API])).toEqual({
+      ok: true,
+      order: [{ repositoryId: 'repo_api', name: 'api', after: [] }],
+    });
   });
 
   it('breaks ties between unordered Repositories by name, and leaves out one with no Task', () => {
