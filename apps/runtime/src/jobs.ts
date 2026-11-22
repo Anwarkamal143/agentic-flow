@@ -362,6 +362,10 @@ export class JobService {
           attemptId: r.attemptId,
           key: r.commandKey,
           command: r.command,
+          profileCommand:
+            r.commandName === null
+              ? null
+              : { name: r.commandName, args: JSON.parse(r.commandArgsJson ?? '[]') as string[] },
           required: r.required,
           exitCode: r.exitCode,
           timedOut: r.timedOut,

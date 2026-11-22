@@ -50,7 +50,10 @@ export type HarnessLogContent = z.infer<typeof HarnessLogContentSchema>;
 export const VerificationLogContentSchema = z.object({
   source: z.literal('verification'),
   key: z.string(),
+  /** The shell command that ran. */
   command: z.string(),
+  /** The profile command and arguments the entry named (ADR-0051); absent: free shell. */
+  profileCommand: z.object({ name: z.string(), args: z.array(z.string()) }).optional(),
   exitCode: z.number().int().nullable(),
   timedOut: z.boolean(),
   truncated: z.boolean(),

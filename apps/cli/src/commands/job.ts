@@ -271,6 +271,11 @@ async function getJob(api: RuntimeClient, id: string): Promise<Job | undefined> 
   }
 }
 
+/** The profile command a verification run named, with its arguments (ADR-0051); empty for free shell. */
+function profileCommandNote(named: { name: string; args: string[] } | null): string {
+  return named === null ? '' : `  profile command ${[named.name, ...named.args].join(' ')}`;
+}
+
 /**
  * Untrusted text (a foreign commit's subject or author, ADR-0042) as one
  * printable line: control characters, terminal escapes among them, become spaces.
@@ -374,7 +379,7 @@ function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
             : ''),
         `    writable:  ${t.scope.writable.join(', ')}`,
         `    forbidden: ${t.scope.forbidden.join(', ') || '(none)'}`,
-        `    verify:    ${t.verification.map((v) => `${v.key}: ${v.command}`).join('; ')}`,
+        `    verify:    ${t.verification.map((v) => `${v.key}: ${[v.command, ...(v.args ?? [])].join(' ')}`).join('; ')}`,
       );
       if (t.dependsOn.length > 0) lines.push(`    after:     ${t.dependsOn.join(', ')}`);
       if (t.blocker !== null) {
@@ -463,7 +468,8 @@ function writeAttempts(
       const run = a.verificationRuns.find((r) => r.id === e.verificationRunId);
       lines.push(
         e.kind === 'verification'
-          ? `    ${String(e.verificationKey).padEnd(12)} ${e.verdict.padEnd(10)} exit ${String(run?.exitCode ?? 'none')}`
+          ? `    ${String(e.verificationKey).padEnd(12)} ${e.verdict.padEnd(10)} exit ${String(run?.exitCode ?? 'none')}` +
+            profileCommandNote(run?.profileCommand ?? null)
           : `    ${String(e.criterionCode).padEnd(12)} ${e.verdict.padEnd(10)} ${e.source}: ${e.detail}`,
       );
     }

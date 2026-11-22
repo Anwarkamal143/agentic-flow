@@ -229,7 +229,12 @@ export const RESULT_FILE = '.factory/result.json';
 
 /** What the factory sends a developer Harness Run. Versioned; stored on the Attempt. */
 export const TaskPacketSchema = z.object({
-  packetVersion: z.literal(1),
+  /**
+   * `2` (#102): verification entries name a profile command with its
+   * arguments and the shell `run` it resolves to; `context.instructionFiles`.
+   * Packets stored before parse as version 1.
+   */
+  packetVersion: z.union([z.literal(1), z.literal(2)]),
   job: z.object({ id: z.string(), title: z.string(), objective: z.string() }),
   task: z.object({
     id: z.string(),
@@ -253,10 +258,26 @@ export const TaskPacketSchema = z.object({
     readHints: z.array(z.string()),
   }),
   acceptance: z.array(z.object({ code: z.string(), text: z.string(), mandatory: z.boolean() })),
-  verification: z.array(z.object({ key: z.string(), command: z.string(), required: z.boolean() })),
+  verification: z.array(
+    z.object({
+      key: z.string(),
+      /** A profile command name, or (until #104) free shell. */
+      command: z.string(),
+      args: z.array(z.string()).optional(),
+      /** The shell command the factory runs (absent in version 1 packets). */
+      run: z.string().optional(),
+      required: z.boolean(),
+    }),
+  ),
   context: z.object({
     artifacts: z.array(z.object({ id: z.string(), kind: z.string(), contentHash: z.string() })),
     files: z.array(z.string()),
+    /**
+     * The Repository's instruction files (`CLAUDE.md`, `AGENTS.md`,
+     * `.cursorrules`) from the Job's frozen profile, paths in the Worktree
+     * (ADR-0051). Repository content: guidance, never a permission.
+     */
+    instructionFiles: z.array(z.string()).default([]),
     /** A Rework Attempt: the Findings of the Attempt before it, to fix first. */
     priorFindings: z.array(AttemptFindingSchema).default([]),
     /**
@@ -336,7 +357,10 @@ export const VerificationRunSchema = z.object({
   id: z.string(),
   attemptId: z.string(),
   key: z.string(),
+  /** The shell command that ran. */
   command: z.string(),
+  /** The profile command and arguments the entry named; `null`: free shell (ADR-0051). */
+  profileCommand: z.object({ name: z.string(), args: z.array(z.string()) }).nullable(),
   required: z.boolean(),
   /** `null` when the command did not exit (killed at its time limit). */
   exitCode: z.number().int().nullable(),

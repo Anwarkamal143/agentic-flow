@@ -105,8 +105,9 @@ export function integrationOrder(
  * order (Phase C grilling Q24): writable paths are the union of their writable
  * globs (forbidden globs are not carried: one Task's forbidden path may be
  * another's to write); covered criteria the union of theirs; verification every
- * command they listed, a command shared by several run once (required if any
- * required it, verifying every criterion any named), keys kept unique; the
+ * command they listed, a command (with the same arguments) shared by several
+ * run once (required if any required it, verifying every criterion any named),
+ * keys kept unique; the
  * highest risk. It depends on nothing in the Plan. Pure.
  */
 export function integrationDefinition(
@@ -119,7 +120,9 @@ export function integrationDefinition(
   const verification: VerificationCommand[] = [];
   for (const { definition } of planTasks) {
     for (const v of definition.verification) {
-      const same = verification.find((o) => o.command === v.command);
+      const same = verification.find(
+        (o) => o.command === v.command && (o.args ?? []).join('\0') === (v.args ?? []).join('\0'),
+      );
       if (same !== undefined) {
         same.required ||= v.required;
         same.criteria = unique([...same.criteria, ...v.criteria]);
@@ -131,6 +134,7 @@ export function integrationDefinition(
           verification.map((o) => o.key),
         ),
         command: v.command,
+        ...(v.args === undefined ? {} : { args: [...v.args] }),
         required: v.required,
         criteria: unique(v.criteria),
       });

@@ -497,6 +497,14 @@ export const RepositoryEffectiveConfigSchema = z.object({
   }),
   /** The Merge Gate's `requiredChecks`; empty: every check counts. */
   requiredChecks: effectiveValue(z.array(z.string())),
+  /**
+   * The profile's instruction files, given to the developer as context
+   * (ADR-0051). Snapshots from before #102 froze none: they give none.
+   */
+  instructionFiles: effectiveValue(z.array(z.string())).default({
+    value: [],
+    source: 'repository',
+  }),
 });
 export type RepositoryEffectiveConfig = z.infer<typeof RepositoryEffectiveConfigSchema>;
 
@@ -596,6 +604,7 @@ export interface RepositoryConfigLevel {
   mergePolicy: MergePolicy;
   mergeMethod: MergeMethod;
   profile: Pick<RepositoryProfile, 'commands' | 'sensitivePaths'> & {
+    instructionFiles?: string[] | undefined;
     requiredChecks?: string[] | undefined;
     setup?: string | undefined;
   };
@@ -686,6 +695,7 @@ export function resolveEffectiveConfig(levels: EffectiveConfigLevels): Effective
       commands: { value: repo.profile.commands, source: 'repository' },
       sensitivePaths: { value: repo.profile.sensitivePaths, source: 'repository' },
       requiredChecks: { value: repo.profile.requiredChecks ?? [], source: 'repository' },
+      instructionFiles: { value: repo.profile.instructionFiles ?? [], source: 'repository' },
     });
   }
 
@@ -734,6 +744,7 @@ export function repositoryConfigOf(
     commands: { value: repository.profile.commands, source: 'repository' },
     sensitivePaths: { value: repository.profile.sensitivePaths, source: 'repository' },
     requiredChecks: { value: repository.profile.requiredChecks ?? [], source: 'repository' },
+    instructionFiles: { value: repository.profile.instructionFiles ?? [], source: 'repository' },
   };
 }
 

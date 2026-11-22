@@ -10,8 +10,10 @@ import {
   TriageProposalSchema,
   validatePlan,
   validateSpecification,
+  VERIFICATION_ARG_PATTERN,
   type ArtifactKind,
   type PlanContext,
+  type ProfileCommand,
   type RuleIssue,
   type StageId,
 } from '@factory/domain';
@@ -73,6 +75,11 @@ export const PROPOSAL_STAGE_IDS: readonly StageId[] = PROPOSAL_STAGES.map((s) =>
 export interface PromptInput {
   job: { id: string; title: string; description: string };
   repositories: readonly { id: string; name: string }[];
+  /**
+   * Each Repository's frozen profile commands and Sensitive Paths (ADR-0051),
+   * listed for the planner only.
+   */
+  profiles?: readonly RepositoryPromptProfile[];
   /** Earlier proposal Artifacts of the Job, by kind. */
   inputs: readonly { kind: ArtifactKind; content: unknown }[];
   /** Set on the re-prompt: why the previous output was rejected. */
@@ -83,11 +90,19 @@ export interface PromptInput {
   respec?: { specArtifactId: string; spec: unknown; feedback: string };
 }
 
+/** What the planner is told of one Repository's profile, from the Job's frozen section. */
+export interface RepositoryPromptProfile {
+  name: string;
+  commands: Readonly<Record<string, ProfileCommand>>;
+  sensitivePaths: readonly string[];
+}
+
 /**
  * `@2` added the Replan section (ADR-0019); `@3` says how carry-over keeps
- * unaffected work (ADR-0029); `@4` added the re-specification section (ADR-0031).
+ * unaffected work (ADR-0029); `@4` added the re-specification section
+ * (ADR-0031); `@5` lists the planner's profile commands and Sensitive Paths (#102).
  */
-export const PROMPT_TEMPLATE_ID = 'proposal-stage@4';
+export const PROMPT_TEMPLATE_ID = 'proposal-stage@5';
 
 const TEMPLATE = `You are the {{role}} for a software Job in an automated software factory.
 {{ask}}
@@ -96,7 +111,7 @@ Job {{jobId}}: {{title}}
 {{description}}
 
 Repositories: {{repositories}}
-
+{{profiles}}
 Earlier outputs of this Job (JSON, by kind):
 {{inputs}}
 {{replan}}{{respec}}{{rejected}}
@@ -133,10 +148,37 @@ export function renderPrompt(stage: ProposalStage, input: PromptInput): string {
       input.inputs.length === 0
         ? '(none)'
         : input.inputs.map((i) => `${i.kind}: ${JSON.stringify(i.content)}`).join('\n'),
+    profiles: stage.stageId === 'planning' ? profilesSection(input.profiles ?? []) : '',
     replan,
     respec,
     rejected,
     schema: JSON.stringify(z.toJSONSchema(stage.schema, { io: 'input' })),
   };
   return TEMPLATE.replace(/\{\{(\w+)\}\}/g, (_, key: string) => values[key] ?? '');
+}
+
+/**
+ * The planner's view of each Repository's profile: the commands a
+ * verification entry may name (with arguments only where accepted) and the
+ * Sensitive Paths no Task may write.
+ */
+function profilesSection(profiles: readonly RepositoryPromptProfile[]): string {
+  if (profiles.length === 0) return '';
+  const lines = profiles.map((p) => {
+    const names = Object.keys(p.commands).sort();
+    const commands =
+      names.length === 0
+        ? '(none)'
+        : names
+            .map((n) => {
+              const c = p.commands[n];
+              return c === undefined
+                ? n
+                : `${n} (${c.run}${c.acceptsArgs ? '; accepts arguments' : ''})`;
+            })
+            .join(', ');
+    const sensitive = p.sensitivePaths.length === 0 ? '(none)' : p.sensitivePaths.join(', ');
+    return `Repository ${p.name}:\n  profile commands: ${commands}\n  Sensitive Paths (forbidden for every Task): ${sensitive}`;
+  });
+  return `\nA verification entry's command names one of its Repository's profile commands. Give args only to a command that accepts arguments; each argument must match ${VERIFICATION_ARG_PATTERN.source}. Never list a Sensitive Path in writable.\n${lines.join('\n')}\n`;
 }
