@@ -13,6 +13,12 @@ import {
 } from '@factory/domain';
 import { describe, expect, it } from 'vitest';
 
+function resolvedConfig() {
+  const result = resolveEffectiveConfig({ project: { maxAttempts: 2 } });
+  if (!result.ok) throw new Error(result.message);
+  return result.config;
+}
+
 const WRITE_TOOLS = ['Edit', 'Write', 'NotebookEdit'];
 
 describe('the recipe tool policies', () => {
@@ -56,7 +62,7 @@ describe('the recipe tool policies', () => {
   });
 
   it('are frozen into the Effective Configuration at the recipe level', () => {
-    const config = resolveEffectiveConfig({ project: { maxAttempts: 2 } });
+    const config = resolvedConfig();
     expect(config.toolPolicies).toEqual({ value: DEFAULT_TOOL_POLICIES, source: 'recipe' });
   });
 
@@ -84,7 +90,7 @@ describe('toolPolicyOf', () => {
   });
 
   it('lists the `gh` denial once when the frozen policy has it', () => {
-    const snapshot = JSON.stringify(resolveEffectiveConfig({ project: { maxAttempts: 2 } }));
+    const snapshot = JSON.stringify(resolvedConfig());
     const { deny } = toolPolicyOf(snapshot, 'developer');
     expect(deny.filter((rule) => rule === 'Bash(gh:*)')).toHaveLength(1);
   });

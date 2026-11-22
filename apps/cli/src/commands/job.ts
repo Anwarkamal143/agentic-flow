@@ -280,31 +280,69 @@ function oneLine(text: string): string {
   return text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
 }
 
-function writeJob(job: Job): void {
-  type Config = Job['effectiveConfig'];
-  type Setting = Config[Exclude<keyof Config, 'concurrency'>] | Config['concurrency']['perJob'];
-  const { concurrency, ...settings } = job.effectiveConfig;
-  const entries: [string, Setting][] = [
+/** A frozen value as one line: `none`, a list, `key=value` pairs, or the value itself. */
+function shownValue(value: unknown): string {
+  if (value === null || value === undefined) return 'none';
+  if (Array.isArray(value)) return value.length === 0 ? 'every check' : value.join(', ');
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([k, x]) => (typeof x === 'object' && x !== null ? k : `${k}=${shownValue(x)}`))
+      .join(', ');
+  }
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+/** One effective value as `job show` prints it: the value, its source and any chain of narrowings. */
+function effective(
+  key: string,
+  v: { value: unknown; source: string; chain?: { source: string; value: string }[] | undefined },
+  width: number,
+): string {
+  const value = shownValue(v.value);
+  const chain =
+    v.chain === undefined || v.chain.length < 2
+      ? ''
+      : `; ${v.chain.map((c) => `${c.source}: ${c.value}`).join(' → ')}`;
+  return `${key.padEnd(width)}  ${value}  (${v.source}${chain})`;
+}
+
+/** The Job's frozen Effective Configuration, each value with its source (ADR-0057). */
+function configLines(config: Job['effectiveConfig']): string[] {
+  const { concurrency, repositories, mergePolicy, setup, ...settings } = config;
+  const jobWide: [string, Parameters<typeof effective>[1]][] = [
     ...Object.entries(settings),
-    ...Object.entries(concurrency).map(([key, v]): [string, Setting] => [`concurrency.${key}`, v]),
+    ...Object.entries(concurrency).map(([key, v]): [string, Parameters<typeof effective>[1]] => [
+      `concurrency.${key}`,
+      v,
+    ]),
   ];
-  const config = entries
-    .map(([key, v]) =>
-      typeof v.value === 'object'
-        ? `${key} (from ${v.source})`
-        : `${key}=${String(v.value)} (from ${v.source})`,
-    )
-    .join(', ');
+  // A Job from before Phase D froze its one Repository's values at the top level.
+  if (mergePolicy !== undefined) jobWide.push(['mergePolicy', mergePolicy]);
+  if (setup !== undefined) jobWide.push(['setup', setup]);
+  const width = Math.max(...jobWide.map(([key]) => key.length));
+  const lines = [
+    'Configuration (frozen at creation):',
+    ...jobWide.map(([key, v]) => `  ${effective(key, v, width)}`),
+  ];
+  for (const repo of repositories) {
+    const { repositoryId, name, ...values } = repo;
+    lines.push(`  Repository ${name} (${repositoryId}):`);
+    for (const [key, v] of Object.entries(values)) lines.push(`    ${effective(key, v, 14)}`);
+  }
+  return lines;
+}
+
+function writeJob(job: Job): void {
   const lines = [
     `Job ${job.id}: ${job.title}`,
     `  status:       ${job.status}`,
     `  stage:        ${job.currentStage}`,
     `  repositories: ${job.repositories.map((r) => `${r.name} (${r.id})`).join(', ')}`,
     `  recipe:       ${job.workflowSnapshot.recipeId} v${String(job.workflowSnapshot.recipeVersion)}`,
-    `  config:       ${config}`,
     `  replans:      ${String(job.replans.used)} of ${String(job.replans.max)} used${job.replanRequested ? '; replan requested, waiting for the Attempts in flight' : ''}`,
     `  version:      ${String(job.version)}`,
     `  created:      ${job.createdAt} by ${job.createdBy}`,
+    ...configLines(job.effectiveConfig),
     'Stages:',
     ...job.stageRuns.map(
       (s) =>

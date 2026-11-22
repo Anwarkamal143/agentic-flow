@@ -12,7 +12,6 @@ import {
   integrationBranch,
   combineVerdicts,
   DeliveryReportSchema,
-  EffectiveConfigSchema,
   deliveryBranches,
   evidenceSource,
   isCurrent,
@@ -31,6 +30,7 @@ import { changedPaths, commitsBetween } from '@factory/git';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { latestSetupRun } from './setup.js';
+import { frozenRepositoryConfig } from './repositories.js';
 import { criteriaCoveredBy, currentCriteria } from './criteria.js';
 import { latestArtifact } from './plan-approval.js';
 import { integrationSources } from './integration.js';
@@ -65,8 +65,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   if (job === undefined || repo === undefined) throw new Error(`Job ${jobId} has no Repository`);
 
   const pullRequests = pullRequestsOf(db, jobId);
-  const mergePolicy = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson)).mergePolicy
-    .value;
+  const mergePolicy = frozenRepositoryConfig(job.configSnapshotJson, repo).mergePolicy.value;
   const mergeFailed =
     db
       .select({ state: schema.stageRuns.state })

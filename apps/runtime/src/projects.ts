@@ -18,6 +18,7 @@ import {
   type SetProjectConfigInput,
 } from '@factory/domain';
 import { asc, eq } from 'drizzle-orm';
+import { assertNarrowing } from './config-tree.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 import { toRepository } from './repositories.js';
@@ -121,6 +122,7 @@ export class ProjectService {
         const project = this.find(tx, ref);
         const change = setProjectConfigKey(project.config, input.key, input.value);
         if (!change.ok) throw new ApiFailure(400, change.code, change.message);
+        assertNarrowing(tx, { project: { id: project.id, config: change.config } });
         return writeConfig(tx, project, change.config, { key: input.key });
       },
       { behavior: 'immediate' },
@@ -138,6 +140,7 @@ export class ProjectService {
       (tx) => {
         const row = tx.select().from(schema.projects).where(eq(schema.projects.id, id)).get();
         if (row === undefined) throw new ApiFailure(404, 'project_not_found', `no Project ${id}`);
+        assertNarrowing(tx, { project: { id, config } });
         return writeConfig(tx, toProject(row), config, {});
       },
       { behavior: 'immediate' },

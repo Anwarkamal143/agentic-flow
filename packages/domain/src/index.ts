@@ -8,13 +8,26 @@ import { TaskCancelReasonSchema, TaskStateSchema } from './execution.js';
 import { BlockerSchema } from './rework.js';
 import { GitHubCoordinatesSchema, parseCoordinates } from './github.js';
 import { TaskKindSchema } from './integration.js';
-import { ReviewRerunOnBaseChangeSchema } from './base-change.js';
+import { ReviewRerunOnBaseChangeSchema, type ReviewRerunOnBaseChange } from './base-change.js';
 import { SetupCommandSchema } from './setup.js';
+import {
+  ChainLinkSchema,
+  ConcurrencyOverrideSchema,
+  ConfigSourceSchema,
+  LEVEL_CONFIG_SHAPE,
+  narrowingChain,
+  PlanApprovalPolicySchema,
+  type ConcurrencyOverride,
+  type ConfigSource,
+  type ConfigViolation,
+  type PlanApprovalPolicy,
+} from './config-levels.js';
 import {
   EffectiveMergePolicySchema,
   MergeMethodSchema,
   MergePolicySchema,
-  type EffectiveMergePolicy,
+  type MergeMethod,
+  type MergePolicy,
 } from './merge-gate.js';
 import {
   DEFAULT_TOOL_POLICIES,
@@ -63,6 +76,7 @@ export * from './base-change.js';
 export * from './setup.js';
 export * from './projects.js';
 export * from './factory-level.js';
+export * from './config-levels.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -101,42 +115,12 @@ export const RepositoryProfileSchema = z.object({
 });
 export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
 
-/**
- * `required`: every new Plan waits at `plan_approval` for a human. `skip`: the
- * Stage Run ends `skipped`, with the reason in its event (PRODUCT_SPEC §4).
- */
-export const PlanApprovalPolicySchema = z.enum(['required', 'skip']);
-export type PlanApprovalPolicy = z.infer<typeof PlanApprovalPolicySchema>;
-
-/** Task concurrency limits set at a level (Project, or a Job at creation); unset inherits. */
-export const ConcurrencyOverrideSchema = z
-  .object({
-    perRepository: z.number().int().min(1).max(16).optional(),
-    perJob: z.number().int().min(1).max(16).optional(),
-  })
-  .strict();
-export type ConcurrencyOverride = z.infer<typeof ConcurrencyOverrideSchema>;
-
 /** Operator-set Project configuration. Every field is optional: unset means inherit. */
 export const ProjectConfigSchema = z
   .object({
-    /** Attempts per Task, Rework included (ARCHITECTURE §4.6). */
-    maxAttempts: z.number().int().min(1).max(10).optional(),
-    /** Retries per Task: new Attempts after an interrupted one. They don't count toward `maxAttempts`. */
-    maxRetries: z.number().int().min(0).max(10).optional(),
-    /** Answered Questions per Task, each a new Attempt (ARCHITECTURE §8). */
-    maxQuestions: z.number().int().min(0).max(10).optional(),
-    /** Whether a new Plan waits for a human at `plan_approval` (ADR-0016). */
-    planApproval: PlanApprovalPolicySchema.optional(),
-    /** Replans per Job; re-specification counts too, a Plan Edit doesn't (ARCHITECTURE §4.6, §4.7). */
-    maxReplans: z.number().int().min(0).max(10).optional(),
+    ...LEVEL_CONFIG_SHAPE,
     /** Task concurrency limits (ARCHITECTURE §12). A Job may override them at creation. */
     concurrency: ConcurrencyOverrideSchema.optional(),
-    /** How a Review follows a moved base (ADR-0041): `rerunOnBaseChange`, `if_diff_changed` by default. */
-    review: z
-      .object({ rerunOnBaseChange: ReviewRerunOnBaseChangeSchema.optional() })
-      .strict()
-      .optional(),
   })
   .strict();
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -489,13 +473,38 @@ export function currentStageOf(stageRuns: readonly StageRunPosition[]): StageId 
   return stage.stageId;
 }
 
-// ---- Configuration (ARCHITECTURE §15, Phase A minimal) ---------------------
-
-export const ConfigSourceSchema = z.enum(['recipe', 'project', 'job']);
-export type ConfigSource = z.infer<typeof ConfigSourceSchema>;
+// ---- Configuration (ARCHITECTURE §15, ADR-0049, ADR-0057) -------------------
 
 const effectiveValue = <T extends z.ZodType>(value: T) =>
   z.object({ value, source: ConfigSourceSchema });
+
+/** A permission value: its value, its source, and (since Phase D) its chain of narrowings. */
+const permissionValue = <T extends z.ZodType>(value: T) =>
+  z.object({
+    value,
+    source: ConfigSourceSchema,
+    /** Each level that set it, least specific first. Absent in snapshots from before Phase D. */
+    chain: z.array(ChainLinkSchema).optional(),
+  });
+
+/**
+ * One Repository's section of a Job's Effective Configuration (ADR-0049),
+ * resolved for every Repository of the Project at creation.
+ */
+export const RepositoryEffectiveConfigSchema = z.object({
+  repositoryId: z.string(),
+  name: z.string(),
+  /** The Merge Policy (ADR-0038): the Repository's, or the Job's stricter override. */
+  mergePolicy: permissionValue(MergePolicySchema),
+  mergeMethod: effectiveValue(MergeMethodSchema),
+  /** The Worktree setup command (ADR-0047); `null`: none. */
+  setup: effectiveValue(SetupCommandSchema.nullable()),
+  /** The profile's verification commands. */
+  commands: effectiveValue(RepositoryCommandsSchema),
+  /** The Merge Gate's `requiredChecks`; empty: every check counts. */
+  requiredChecks: effectiveValue(z.array(z.string())),
+});
+export type RepositoryEffectiveConfig = z.infer<typeof RepositoryEffectiveConfigSchema>;
 
 /** The settings for one Job once every level is resolved; each value records its source level. */
 export const EffectiveConfigSchema = z.object({
@@ -519,7 +528,7 @@ export const EffectiveConfigSchema = z.object({
     source: 'recipe',
   }),
   /** Jobs created before #35 have no `plan_approval` Stage; the value is unused there. */
-  planApproval: effectiveValue(PlanApprovalPolicySchema).default({
+  planApproval: permissionValue(PlanApprovalPolicySchema).default({
     value: 'required',
     source: 'recipe',
   }),
@@ -538,23 +547,23 @@ export const EffectiveConfigSchema = z.object({
       perRepository: { value: 2, source: 'recipe' },
       perJob: { value: 2, source: 'recipe' },
     }),
-  /** The Merge Policy (ADR-0038). Jobs created before #59 were all `never_auto`, the only policy then. */
-  mergePolicy: EffectiveMergePolicySchema.default({ value: 'never_auto', source: 'repository' }),
   /** `review.rerunOnBaseChange` (ADR-0041). Jobs created before #62 get the recipe default. */
   reviewRerunOnBaseChange: effectiveValue(ReviewRerunOnBaseChangeSchema).default({
     value: 'if_diff_changed',
     source: 'recipe',
   }),
   /**
-   * The Repository's Worktree setup command, frozen at creation (ADR-0047);
-   * `null`: none. Jobs created before it have none.
+   * A section per Repository of the Project at creation, by name (ADR-0049).
+   * Jobs created before Phase D have none: `repositoryConfigOf` builds their
+   * one Repository's section from `mergePolicy` and `setup` below.
    */
+  repositories: z.array(RepositoryEffectiveConfigSchema).default([]),
+  /** Before Phase D only: the Job's one Repository's Merge Policy (ADR-0038). Unset before #59: `never_auto`. */
+  mergePolicy: EffectiveMergePolicySchema.optional(),
+  /** Before Phase D only: the Job's one Repository's setup command (ADR-0047). */
   setup: z
     .object({ value: SetupCommandSchema.nullable(), source: z.literal('repository') })
-    .default({
-      value: null,
-      source: 'repository',
-    }),
+    .optional(),
 });
 export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
 
@@ -565,6 +574,7 @@ export const RECIPE_DEFAULTS: {
   readonly planApproval: PlanApprovalPolicy;
   readonly maxReplans: number;
   readonly concurrency: { readonly perRepository: number; readonly perJob: number };
+  readonly reviewRerunOnBaseChange: ReviewRerunOnBaseChange;
 } = {
   maxAttempts: 3,
   maxRetries: 2,
@@ -572,6 +582,7 @@ export const RECIPE_DEFAULTS: {
   planApproval: 'required',
   maxReplans: 2,
   concurrency: { perRepository: 2, perJob: 2 },
+  reviewRerunOnBaseChange: 'if_diff_changed',
 };
 
 /**
@@ -584,55 +595,161 @@ export function toolPolicyOf(configSnapshotJson: string, role: HarnessRole): Too
   );
 }
 
-/** Resolves the Effective Configuration. Pure; frozen onto the Job at creation. */
-export function resolveEffectiveConfig(levels: {
+/** What a Repository contributes to the hierarchy: its own settings and its profile's. */
+export interface RepositoryConfigLevel {
+  id: string;
+  name: string;
+  mergePolicy: MergePolicy;
+  mergeMethod: MergeMethod;
+  profile: Pick<RepositoryProfile, 'commands'> & {
+    requiredChecks?: string[] | undefined;
+    setup?: string | undefined;
+  };
+}
+
+/** The Job-wide keys a level sets; the Factory Level's `concurrency.global` is read by the scheduler only. */
+export type LevelValues = Omit<ProjectConfig, 'concurrency'> & {
+  concurrency?: (ConcurrencyOverride & { global?: number | undefined }) | undefined;
+};
+
+/** The levels `resolveEffectiveConfig` reads, least specific first (recipe defaults are built in). */
+export interface EffectiveConfigLevels {
+  factory?: LevelValues | undefined;
   project: ProjectConfig;
-  /** The Job's own overrides, given at creation (ARCHITECTURE §12: concurrency only). */
-  job?: { concurrency?: ConcurrencyOverride | undefined };
-  /** The Merge Policy resolved from the Repository and the Job's override (`resolveMergePolicy`). */
-  mergePolicy?: EffectiveMergePolicy;
-  /** The Repository's setup command (its profile's `setup`), if it has one. */
-  setup?: string | undefined;
-}): EffectiveConfig {
+  /** Every Repository of the Project; each gets a section. */
+  repositories?: readonly RepositoryConfigLevel[] | undefined;
+  /** The Job's own overrides, given at creation (ARCHITECTURE §12). */
+  job?:
+    | { concurrency?: ConcurrencyOverride | undefined; mergePolicy?: MergePolicy | undefined }
+    | undefined;
+}
+
+export type EffectiveConfigResolution =
+  { ok: true; config: EffectiveConfig } | ({ ok: false } & ConfigViolation);
+
+/**
+ * Resolves the Effective Configuration (ADR-0049, ADR-0057): recipe < Factory
+ * < Project < Repository < Job, the most specific level that sets a value
+ * wins, and a permission value wider than its parent is refused with the
+ * parent's value. Pure; frozen onto the Job at creation.
+ */
+export function resolveEffectiveConfig(levels: EffectiveConfigLevels): EffectiveConfigResolution {
+  const factory = levels.factory ?? {};
   const { project } = levels;
-  const limit = (key: keyof ConcurrencyOverride) => {
-    const job = levels.job?.concurrency?.[key];
-    if (job !== undefined) return { value: job, source: 'job' as const };
-    const own = project.concurrency?.[key];
-    return own === undefined
-      ? { value: RECIPE_DEFAULTS.concurrency[key], source: 'recipe' as const }
-      : { value: own, source: 'project' as const };
+  const pick = <T>(
+    recipe: T,
+    ...set: [ConfigSource, T | undefined][]
+  ): { value: T; source: ConfigSource } => {
+    let found: { value: T; source: ConfigSource } = { value: recipe, source: 'recipe' };
+    for (const [source, value] of set) if (value !== undefined) found = { value, source };
+    return found;
   };
+  const cap = (key: 'maxAttempts' | 'maxRetries' | 'maxQuestions' | 'maxReplans') =>
+    pick(RECIPE_DEFAULTS[key], ['factory', factory[key]], ['project', project[key]]);
+  const limit = (key: keyof ConcurrencyOverride) =>
+    pick(
+      RECIPE_DEFAULTS.concurrency[key],
+      ['factory', factory.concurrency?.[key]],
+      ['project', project.concurrency?.[key]],
+      ['job', levels.job?.concurrency?.[key]],
+    );
+
+  const planApproval = narrowingChain(
+    'planApproval',
+    [
+      { source: 'factory', value: factory.planApproval },
+      { source: 'project', value: project.planApproval },
+    ],
+    { value: RECIPE_DEFAULTS.planApproval, source: 'recipe' },
+  );
+  if (!planApproval.ok)
+    return { ok: false, code: planApproval.code, message: planApproval.message };
+
+  const repositories: RepositoryEffectiveConfig[] = [];
+  const sorted = [...(levels.repositories ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  for (const repo of sorted) {
+    const merge = narrowingChain(
+      'mergePolicy',
+      [
+        { source: 'factory', value: factory.mergePolicy },
+        { source: 'project', value: project.mergePolicy },
+        { source: 'repository', name: repo.name, value: repo.mergePolicy },
+        { source: 'job', value: levels.job?.mergePolicy },
+      ],
+      { value: repo.mergePolicy, source: 'repository' },
+    );
+    if (!merge.ok) return { ok: false, code: merge.code, message: merge.message };
+    repositories.push({
+      repositoryId: repo.id,
+      name: repo.name,
+      mergePolicy: {
+        value: MergePolicySchema.parse(merge.value),
+        source: merge.source,
+        chain: merge.chain,
+      },
+      mergeMethod: { value: repo.mergeMethod, source: 'repository' },
+      setup: { value: repo.profile.setup ?? null, source: 'repository' },
+      commands: { value: repo.profile.commands, source: 'repository' },
+      requiredChecks: { value: repo.profile.requiredChecks ?? [], source: 'repository' },
+    });
+  }
+
   return {
-    maxAttempts:
-      project.maxAttempts === undefined
-        ? { value: RECIPE_DEFAULTS.maxAttempts, source: 'recipe' }
-        : { value: project.maxAttempts, source: 'project' },
-    maxRetries:
-      project.maxRetries === undefined
-        ? { value: RECIPE_DEFAULTS.maxRetries, source: 'recipe' }
-        : { value: project.maxRetries, source: 'project' },
-    toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
-    maxQuestions:
-      project.maxQuestions === undefined
-        ? { value: RECIPE_DEFAULTS.maxQuestions, source: 'recipe' }
-        : { value: project.maxQuestions, source: 'project' },
-    planApproval:
-      project.planApproval === undefined
-        ? { value: RECIPE_DEFAULTS.planApproval, source: 'recipe' }
-        : { value: project.planApproval, source: 'project' },
-    maxReplans:
-      project.maxReplans === undefined
-        ? { value: RECIPE_DEFAULTS.maxReplans, source: 'recipe' }
-        : { value: project.maxReplans, source: 'project' },
-    concurrency: { perRepository: limit('perRepository'), perJob: limit('perJob') },
-    mergePolicy: levels.mergePolicy ?? { value: 'never_auto', source: 'repository' },
-    reviewRerunOnBaseChange:
-      project.review?.rerunOnBaseChange === undefined
-        ? { value: 'if_diff_changed', source: 'recipe' }
-        : { value: project.review.rerunOnBaseChange, source: 'project' },
-    setup: { value: levels.setup ?? null, source: 'repository' },
+    ok: true,
+    config: {
+      maxAttempts: cap('maxAttempts'),
+      maxRetries: cap('maxRetries'),
+      toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
+      maxQuestions: cap('maxQuestions'),
+      planApproval: {
+        value: PlanApprovalPolicySchema.parse(planApproval.value),
+        source: planApproval.source,
+        chain: planApproval.chain,
+      },
+      maxReplans: cap('maxReplans'),
+      concurrency: { perRepository: limit('perRepository'), perJob: limit('perJob') },
+      reviewRerunOnBaseChange: pick(
+        RECIPE_DEFAULTS.reviewRerunOnBaseChange,
+        ['factory', factory.review?.rerunOnBaseChange],
+        ['project', project.review?.rerunOnBaseChange],
+      ),
+      repositories,
+    },
   };
+}
+
+/**
+ * The section of `repository` in a Job's Effective Configuration. A Job
+ * created before Phase D has none: its section is built from its frozen
+ * `mergePolicy` and `setup` and, for what it never froze (the merge method,
+ * the commands, the required checks), the Repository as it is now.
+ */
+export function repositoryConfigOf(
+  config: EffectiveConfig,
+  repository: RepositoryConfigLevel,
+): RepositoryEffectiveConfig {
+  const frozen = config.repositories.find((r) => r.repositoryId === repository.id);
+  if (frozen !== undefined) return frozen;
+  return {
+    repositoryId: repository.id,
+    name: repository.name,
+    mergePolicy: config.mergePolicy ?? { value: 'never_auto', source: 'repository' },
+    mergeMethod: { value: repository.mergeMethod, source: 'repository' },
+    setup: config.setup ?? { value: null, source: 'repository' },
+    commands: { value: repository.profile.commands, source: 'repository' },
+    requiredChecks: { value: repository.profile.requiredChecks ?? [], source: 'repository' },
+  };
+}
+
+/**
+ * A Task's `maxAttempts`: the Plan's narrower cap (source `task`; Plan
+ * validation refuses a wider one, ADR-0017), else the Job's.
+ */
+export function taskMaxAttempts(
+  config: EffectiveConfig,
+  planned: number | undefined,
+): { value: number; source: ConfigSource } {
+  return planned === undefined ? config.maxAttempts : { value: planned, source: 'task' };
 }
 
 // ---- Job API contracts ------------------------------------------------------

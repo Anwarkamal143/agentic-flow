@@ -259,6 +259,11 @@ async function mergeItems(rt: RunningRuntime, jobId: string): Promise<ItemBody[]
 const commentPosts = (gh: FakeGitHub) =>
   gh.requests.filter((r) => r.method === 'POST' && /\/issues\/\d+\/comments$/.test(r.path));
 
+/** The Merge Policy frozen in the Job's one Repository section (ADR-0057). */
+interface FrozenMergePolicy {
+  repositories: { mergePolicy: { value: string } }[];
+}
+
 describe('the PR feedback loop', { timeout: 180_000 }, () => {
   it('C5: a CHANGES_REQUESTED review produces a Rework Attempt, updates the same PR in place, and re-runs the Integration Review on the new head', async () => {
     const { gh, rt, repo, job, pr } = await start();
@@ -437,8 +442,8 @@ describe('the PR feedback loop', { timeout: 180_000 }, () => {
     const waiting = await readJob(rt, job.id);
     expect(waiting.status).toBe('waiting_human');
     expect(
-      (waiting as JobBody & { effectiveConfig: { mergePolicy: { value: string } } }).effectiveConfig
-        .mergePolicy.value,
+      (waiting as JobBody & { effectiveConfig: FrozenMergePolicy }).effectiveConfig.repositories[0]
+        ?.mergePolicy.value,
     ).toBe('human_approval');
     expect(stagesOf(waiting, 'integration_review')).toEqual(['skipped']);
     expect(stagesOf(waiting, 'merge_approval')).toEqual(['waiting_human']);
@@ -467,8 +472,8 @@ describe('the PR feedback loop', { timeout: 180_000 }, () => {
     expect(gh.requests.some((r) => r.method === 'PUT' && /\/merge$/.test(r.path))).toBe(false);
     const after = await readJob(rt, job.id);
     expect(
-      (after as JobBody & { effectiveConfig: { mergePolicy: { value: string } } }).effectiveConfig
-        .mergePolicy.value,
+      (after as JobBody & { effectiveConfig: FrozenMergePolicy }).effectiveConfig.repositories[0]
+        ?.mergePolicy.value,
     ).toBe('human_approval');
   });
 

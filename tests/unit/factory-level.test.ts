@@ -34,7 +34,18 @@ describe('the Factory Level', () => {
 
   it('sets one key, validated, leaving the given config unchanged', () => {
     const before = {};
-    expect(factoryConfigKeys()).toEqual(['concurrency.global']);
+    expect(factoryConfigKeys()).toEqual([
+      'maxAttempts',
+      'maxRetries',
+      'maxQuestions',
+      'planApproval',
+      'maxReplans',
+      'review.rerunOnBaseChange',
+      'mergePolicy',
+      'concurrency.global',
+      'concurrency.perRepository',
+      'concurrency.perJob',
+    ]);
     expect(setFactoryConfigKey(before, 'concurrency.global', 2)).toEqual({
       ok: true,
       config: { concurrency: { global: 2 } },
@@ -44,10 +55,13 @@ describe('the Factory Level', () => {
       ok: false,
       code: 'invalid_config_value',
     });
-    expect(setFactoryConfigKey(before, 'maxAttempts', 2)).toMatchObject({
+    expect(setFactoryConfigKey(before, 'concurrency.perProjectJobs', 2)).toMatchObject({
       ok: false,
       code: 'unknown_config_key',
-      message: "unknown Factory Level config key 'maxAttempts'. Known keys: concurrency.global",
+    });
+    expect(setFactoryConfigKey(before, 'maxAttempts', 2)).toEqual({
+      ok: true,
+      config: { maxAttempts: 2 },
     });
   });
 });

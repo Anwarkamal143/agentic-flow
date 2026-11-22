@@ -179,7 +179,10 @@ describe('the Worktree setup step', { timeout: 120_000 }, () => {
     const created = await createJob(rt, repo.id);
     const job = await waitForJob(rt, created.id, settled, 90_000);
     expect(job.status, rt.output()).toBe('completed');
-    expect((job.effectiveConfig as unknown as { setup: unknown }).setup).toEqual({
+    expect(
+      (job.effectiveConfig as unknown as { repositories: { setup: unknown }[] }).repositories[0]
+        ?.setup,
+    ).toEqual({
       value: setup,
       source: 'repository',
     });

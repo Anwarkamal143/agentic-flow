@@ -22,7 +22,6 @@ import {
   JobStatusSchema,
   JobTypeSchema,
   ProjectConfigSchema,
-  RepositoryProfileSchema,
   resolveEffectiveConfig,
   resolveMergePolicy,
   MergePolicySchema,
@@ -58,6 +57,8 @@ import { currentCriteria } from './criteria.js';
 import { cancelOpenItems } from './inbox.js';
 import { requestReplanIn } from './replan.js';
 import { newId } from './ids.js';
+import { read as readFactoryLevel } from './factory-level.js';
+import { toRepository } from './repositories.js';
 import { setupRunsOfAttempts } from './setup.js';
 
 const OPERATOR = 'user:local';
@@ -133,13 +134,21 @@ export class JobService {
           input.mergePolicy,
         );
         if (!mergePolicy.ok) throw new ApiFailure(409, mergePolicy.code, mergePolicy.message);
-        const effectiveConfig = resolveEffectiveConfig({
+        // Every Repository of the Project gets a section, frozen like the rest: a later
+        // config or profile change can't reach this Job (ADR-0047, ADR-0049).
+        const resolution = resolveEffectiveConfig({
+          factory: readFactoryLevel(tx)?.config,
           project: ProjectConfigSchema.parse(JSON.parse(project.configJson)),
-          job: { concurrency: input.concurrency },
-          mergePolicy: mergePolicy.policy,
-          // Frozen like the rest: a later profile change can't reach this Job (ADR-0047).
-          setup: RepositoryProfileSchema.parse(JSON.parse(repo.profileJson)).setup,
+          repositories: tx
+            .select()
+            .from(schema.repositories)
+            .where(eq(schema.repositories.projectId, project.id))
+            .all()
+            .map(toRepository),
+          job: { concurrency: input.concurrency, mergePolicy: input.mergePolicy },
         });
+        if (!resolution.ok) throw new ApiFailure(409, resolution.code, resolution.message);
+        const effectiveConfig = resolution.config;
         const jobId = newId('job');
         const now = new Date().toISOString();
         tx.insert(schema.jobs)

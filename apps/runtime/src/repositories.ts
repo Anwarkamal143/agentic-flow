@@ -11,6 +11,9 @@ import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   chooseProject,
   coordinatesFromRemoteUrl,
+  EffectiveConfigSchema,
+  repositoryConfigOf,
+  type RepositoryEffectiveConfig,
   formatCoordinates,
   MergeMethodSchema,
   MergePolicySchema,
@@ -34,6 +37,7 @@ import {
   workTreeRoot,
 } from '@factory/git';
 import { and, eq, or } from 'drizzle-orm';
+import { assertNarrowing } from './config-tree.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 import { toProject } from './projects.js';
@@ -88,7 +92,9 @@ export class RepositoryService {
     }
 
     // Checked again inside the transaction; refused before the clone, so nothing is made.
-    findProject(this.db, input.project);
+    const target = findProject(this.db, input.project);
+    const mergePolicy = input.mergePolicy ?? 'never_auto';
+    assertNarrowing(this.db, { repository: { projectId: target.id, name, mergePolicy } });
 
     const id = newId('repo');
     const clonesDir = join(this.workspaceRoot, 'clones');
@@ -107,7 +113,6 @@ export class RepositoryService {
         );
       });
       const now = new Date().toISOString();
-      const mergePolicy = input.mergePolicy ?? 'never_auto';
       const mergeMethod = input.mergeMethod ?? 'merge';
       const profile = RepositoryProfileSchema.parse({
         version: 1,
@@ -122,6 +127,7 @@ export class RepositoryService {
       });
       const project = this.db.transaction((tx) => {
         const proj = findProject(tx, input.project);
+        assertNarrowing(tx, { repository: { projectId: proj.id, name, mergePolicy } });
         const clash = tx
           .select({ id: schema.repositories.id })
           .from(schema.repositories)
@@ -207,6 +213,21 @@ export class RepositoryService {
   listRepositories(): Repository[] {
     return this.db.select().from(schema.repositories).all().map(toRepository);
   }
+}
+
+/**
+ * A Repository's section of a Job's frozen Effective Configuration (ADR-0049,
+ * ADR-0057): what the Job uses for it, never the Repository as it is now
+ * (except, for a Job from before Phase D, what that Job never froze).
+ */
+export function frozenRepositoryConfig(
+  configSnapshotJson: string,
+  row: typeof schema.repositories.$inferSelect,
+): RepositoryEffectiveConfig {
+  return repositoryConfigOf(
+    EffectiveConfigSchema.parse(JSON.parse(configSnapshotJson)),
+    toRepository(row),
+  );
 }
 
 export function toRepository(row: typeof schema.repositories.$inferSelect): Repository {
