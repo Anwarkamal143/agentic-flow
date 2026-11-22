@@ -408,7 +408,7 @@ Loop (every 1–2 s, plus a wake-up after any relevant event):
 - **The DB is authoritative at runtime.** `factory config export` / `import` gives a YAML GitOps path. An import is validated, diffed, and applied as one audited change.
 - Levels [Phase D, ADR-0049], from least to most specific: recipe defaults < **Factory** (the factory-wide level in the DB; "org" for a single-user factory) < project < repository < job overrides < task restrictions. The most specific level that sets a value wins; Immutable Invariants are a ceiling no level lifts. A level may only **narrow** anything permission-related relative to the level above it (also on import). The Factory's `config.json` is bootstrap-only (home, port, workspace root, the API token's location).
 - `resolveEffectiveConfig(job)` is a pure function. Its result is stored in `jobs.config_snapshot_json` at creation, so later config edits never change a running job. The snapshot holds Job-wide values plus a section for every Repository of the Project at creation; the Job uses the sections of its confirmed Repository set. (Re-snapshotting by a human is promised but deferred past Phase D, spec issue 46.)
-- Each effective value records its source level (for the "effective value" UI).
+- Each effective value records its source level (for the "effective value" UI); permission values (`mergePolicy`, `planApproval`, ADR-0057) also record their chain of narrowings. Every config write is checked against the whole stored tree and refused when it would leave a level wider than its parent.
 
 ## 16. Identity [MVP single user; v1 RBAC]
 
