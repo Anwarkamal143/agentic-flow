@@ -280,24 +280,25 @@ function oneLine(text: string): string {
   return text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
 }
 
+/** A frozen value as one line: `none`, a list, `key=value` pairs, or the value itself. */
+function shownValue(value: unknown): string {
+  if (value === null || value === undefined) return 'none';
+  if (Array.isArray(value)) return value.length === 0 ? 'every check' : value.join(', ');
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([k, x]) => (typeof x === 'object' && x !== null ? k : `${k}=${shownValue(x)}`))
+      .join(', ');
+  }
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
 /** One effective value as `job show` prints it: the value, its source and any chain of narrowings. */
 function effective(
   key: string,
   v: { value: unknown; source: string; chain?: { source: string; value: string }[] | undefined },
   width: number,
 ): string {
-  const value =
-    v.value === null
-      ? 'none'
-      : Array.isArray(v.value)
-        ? v.value.length === 0
-          ? 'every check'
-          : v.value.join(', ')
-        : typeof v.value === 'object'
-          ? Object.entries(v.value as Record<string, unknown>)
-              .map(([k, x]) => (typeof x === 'object' && x !== null ? k : `${k}=${String(x ?? 'none')}`))
-              .join(', ')
-          : String(v.value);
+  const value = shownValue(v.value);
   const chain =
     v.chain === undefined || v.chain.length < 2
       ? ''
@@ -310,9 +311,10 @@ function configLines(config: Job['effectiveConfig']): string[] {
   const { concurrency, repositories, mergePolicy, setup, ...settings } = config;
   const jobWide: [string, Parameters<typeof effective>[1]][] = [
     ...Object.entries(settings),
-    ...Object.entries(concurrency).map(
-      ([key, v]): [string, Parameters<typeof effective>[1]] => [`concurrency.${key}`, v],
-    ),
+    ...Object.entries(concurrency).map(([key, v]): [string, Parameters<typeof effective>[1]] => [
+      `concurrency.${key}`,
+      v,
+    ]),
   ];
   // A Job from before Phase D froze its one Repository's values at the top level.
   if (mergePolicy !== undefined) jobWide.push(['mergePolicy', mergePolicy]);

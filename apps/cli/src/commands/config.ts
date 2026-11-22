@@ -1,6 +1,7 @@
 import {
   factoryConfigKeys,
   factoryGlobalConcurrency,
+  RECIPE_DEFAULTS,
   type FactoryLevel,
   type SetFactoryConfigInput,
 } from '@factory/domain';
@@ -21,8 +22,18 @@ export async function configShow(opts: { json: boolean }): Promise<number> {
     return 0;
   }
   const set = new Map(configEntries(level.config));
+  // What applies when the key is unset: the recipe default (`mergePolicy`: each Repository's own).
   const defaults: Record<string, unknown> = {
+    maxAttempts: RECIPE_DEFAULTS.maxAttempts,
+    maxRetries: RECIPE_DEFAULTS.maxRetries,
+    maxQuestions: RECIPE_DEFAULTS.maxQuestions,
+    planApproval: RECIPE_DEFAULTS.planApproval,
+    maxReplans: RECIPE_DEFAULTS.maxReplans,
+    'review.rerunOnBaseChange': RECIPE_DEFAULTS.reviewRerunOnBaseChange,
+    mergePolicy: "each Repository's own",
     'concurrency.global': factoryGlobalConcurrency(level.config),
+    'concurrency.perRepository': RECIPE_DEFAULTS.concurrency.perRepository,
+    'concurrency.perJob': RECIPE_DEFAULTS.concurrency.perJob,
   };
   const keys = factoryConfigKeys();
   const width = Math.max(...keys.map((k) => k.length));
@@ -55,7 +66,9 @@ export async function configSet(
   const value = new Map(configEntries(level.config)).get(key);
   process.stdout.write(
     `Factory Level: ${key} = ${shown(value)} (version ${String(level.version)})\n` +
-      'The Task scheduler uses a new concurrency.global from its next claim.\n',
+      (key === 'concurrency.global'
+        ? 'The Task scheduler uses a new concurrency.global from its next claim.\n'
+        : 'Jobs created from now on use it; existing Jobs keep the value they froze.\n'),
   );
   return 0;
 }

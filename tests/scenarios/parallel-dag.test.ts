@@ -296,8 +296,8 @@ describe('concurrency limits', { timeout: 60_000 }, () => {
       '3',
     ]);
     expect(res.code, res.stderr).toBe(0);
-    expect(res.stdout).toContain('concurrency.perRepository=3 (from job)');
-    expect(res.stdout).toContain('concurrency.perJob=3 (from job)');
+    expect(res.stdout).toMatch(/concurrency\.perRepository +3 +\(job\)/);
+    expect(res.stdout).toMatch(/concurrency\.perJob +3 +\(job\)/);
     const [job] = await json<JobBody[]>(rt.request('/v1/jobs'));
     if (job === undefined) throw new Error('no Job');
     expect(await inFlight(rt, job)).toBe(3);

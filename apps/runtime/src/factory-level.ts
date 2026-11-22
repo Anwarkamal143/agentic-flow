@@ -19,6 +19,7 @@ import {
   setFactoryConfigKey,
 } from '@factory/domain';
 import { asc, eq, sql } from 'drizzle-orm';
+import { assertNarrowing } from './config-tree.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 
@@ -91,6 +92,7 @@ export class FactoryLevelService {
         }
         const change = setFactoryConfigKey(current.config, input.key, input.value);
         if (!change.ok) throw new ApiFailure(400, change.code, change.message);
+        assertNarrowing(tx, { factory: change.config });
         const level: FactoryLevel = {
           config: change.config,
           version: current.version + 1,

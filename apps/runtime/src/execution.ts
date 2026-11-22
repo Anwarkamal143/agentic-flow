@@ -59,7 +59,6 @@ import {
   integrationReviewSkip,
   type IntegrationReviewSkip,
   type Redactor,
-  EffectiveConfigSchema,
   setupEnvironment,
   setupNeeded,
   type SetupLogContent,

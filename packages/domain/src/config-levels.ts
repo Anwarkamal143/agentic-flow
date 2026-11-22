@@ -190,10 +190,7 @@ export function configTreeViolation(tree: ConfigTree): ConfigViolation | undefin
     ];
     const levels = project.repositories.length === 0 ? [parents] : [];
     for (const repo of project.repositories) {
-      levels.push([
-        ...parents,
-        { source: 'repository', name: repo.name, value: repo.mergePolicy },
-      ]);
+      levels.push([...parents, { source: 'repository', name: repo.name, value: repo.mergePolicy }]);
     }
     for (const chain of levels) {
       const merge = narrowingChain('mergePolicy', chain, {

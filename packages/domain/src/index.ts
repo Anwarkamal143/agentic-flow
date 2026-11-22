@@ -20,7 +20,6 @@ import {
   type ConcurrencyOverride,
   type ConfigSource,
   type ConfigViolation,
-  type PermissionLevel,
   type PlanApprovalPolicy,
 } from './config-levels.js';
 import {
@@ -608,9 +607,9 @@ export interface RepositoryConfigLevel {
   };
 }
 
-/** The Job-wide keys a level sets (the Factory Level's `concurrency.global` is not one of them). */
+/** The Job-wide keys a level sets; the Factory Level's `concurrency.global` is read by the scheduler only. */
 export type LevelValues = Omit<ProjectConfig, 'concurrency'> & {
-  concurrency?: ConcurrencyOverride | undefined;
+  concurrency?: (ConcurrencyOverride & { global?: number | undefined }) | undefined;
 };
 
 /** The levels `resolveEffectiveConfig` reads, least specific first (recipe defaults are built in). */
@@ -626,8 +625,7 @@ export interface EffectiveConfigLevels {
 }
 
 export type EffectiveConfigResolution =
-  | { ok: true; config: EffectiveConfig }
-  | ({ ok: false } & ConfigViolation);
+  { ok: true; config: EffectiveConfig } | ({ ok: false } & ConfigViolation);
 
 /**
  * Resolves the Effective Configuration (ADR-0049, ADR-0057): recipe < Factory
@@ -664,7 +662,8 @@ export function resolveEffectiveConfig(levels: EffectiveConfigLevels): Effective
     ],
     { value: RECIPE_DEFAULTS.planApproval, source: 'recipe' },
   );
-  if (!planApproval.ok) return { ok: false, code: planApproval.code, message: planApproval.message };
+  if (!planApproval.ok)
+    return { ok: false, code: planApproval.code, message: planApproval.message };
 
   const repositories: RepositoryEffectiveConfig[] = [];
   const sorted = [...(levels.repositories ?? [])].sort((a, b) => a.name.localeCompare(b.name));

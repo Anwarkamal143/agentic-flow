@@ -102,6 +102,20 @@ describe('factory job create / job show', () => {
     const rt = await startRuntime();
     const repo = await registeredRepo(rt, { planApproval: 'required' });
 
+    // The Repository's section: every Repository of the Project, resolved at creation.
+    const section = {
+      repositoryId: repo.id,
+      name: 'tiny-ts',
+      mergePolicy: {
+        value: 'never_auto',
+        source: 'repository',
+        chain: [{ source: 'repository', value: 'never_auto' }],
+      },
+      mergeMethod: { value: 'merge', source: 'repository' },
+      setup: { value: null, source: 'repository' },
+      commands: { value: expect.any(Object) as unknown, source: 'repository' },
+      requiredChecks: { value: [], source: 'repository' },
+    };
     const first = await createJob(rt, repo.id, 'before any config edit');
     expect(first.workflowSnapshot).toEqual({
       recipeId: 'feature',
@@ -113,15 +127,14 @@ describe('factory job create / job show', () => {
       maxRetries: { value: 2, source: 'recipe' },
       toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
       maxQuestions: { value: 3, source: 'recipe' },
-      planApproval: { value: 'required', source: 'recipe' },
+      planApproval: { value: 'required', source: 'recipe', chain: [] },
       maxReplans: { value: 2, source: 'recipe' },
       concurrency: {
         perRepository: { value: 2, source: 'recipe' },
         perJob: { value: 2, source: 'recipe' },
       },
-      mergePolicy: { value: 'never_auto', source: 'repository' },
       reviewRerunOnBaseChange: { value: 'if_diff_changed', source: 'recipe' },
-      setup: { value: null, source: 'repository' },
+      repositories: [section],
     });
 
     const edit = await post(rt, `/v1/projects/${repo.projectId}/config`, { maxAttempts: 5 });
@@ -133,15 +146,14 @@ describe('factory job create / job show', () => {
       maxRetries: { value: 2, source: 'recipe' },
       toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
       maxQuestions: { value: 3, source: 'recipe' },
-      planApproval: { value: 'required', source: 'recipe' },
+      planApproval: { value: 'required', source: 'recipe', chain: [] },
       maxReplans: { value: 2, source: 'recipe' },
       concurrency: {
         perRepository: { value: 2, source: 'recipe' },
         perJob: { value: 2, source: 'recipe' },
       },
-      mergePolicy: { value: 'never_auto', source: 'repository' },
       reviewRerunOnBaseChange: { value: 'if_diff_changed', source: 'recipe' },
-      setup: { value: null, source: 'repository' },
+      repositories: [section],
     });
 
     expect(
@@ -168,15 +180,14 @@ describe('factory job create / job show', () => {
       maxRetries: { value: 0, source: 'project' },
       toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
       maxQuestions: { value: 3, source: 'recipe' },
-      planApproval: { value: 'required', source: 'recipe' },
+      planApproval: { value: 'required', source: 'recipe', chain: [] },
       maxReplans: { value: 2, source: 'recipe' },
       concurrency: {
         perRepository: { value: 2, source: 'recipe' },
         perJob: { value: 1, source: 'project' },
       },
-      mergePolicy: { value: 'never_auto', source: 'repository' },
       reviewRerunOnBaseChange: { value: 'if_diff_changed', source: 'recipe' },
-      setup: { value: null, source: 'repository' },
+      repositories: [section],
     });
   });
 

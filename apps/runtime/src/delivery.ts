@@ -12,7 +12,6 @@ import {
   integrationBranch,
   combineVerdicts,
   DeliveryReportSchema,
-  EffectiveConfigSchema,
   deliveryBranches,
   evidenceSource,
   isCurrent,

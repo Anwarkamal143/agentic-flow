@@ -37,6 +37,7 @@ import {
   workTreeRoot,
 } from '@factory/git';
 import { and, eq, or } from 'drizzle-orm';
+import { assertNarrowing } from './config-tree.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 import { toProject } from './projects.js';
@@ -91,7 +92,9 @@ export class RepositoryService {
     }
 
     // Checked again inside the transaction; refused before the clone, so nothing is made.
-    findProject(this.db, input.project);
+    const target = findProject(this.db, input.project);
+    const mergePolicy = input.mergePolicy ?? 'never_auto';
+    assertNarrowing(this.db, { repository: { projectId: target.id, name, mergePolicy } });
 
     const id = newId('repo');
     const clonesDir = join(this.workspaceRoot, 'clones');
@@ -110,7 +113,6 @@ export class RepositoryService {
         );
       });
       const now = new Date().toISOString();
-      const mergePolicy = input.mergePolicy ?? 'never_auto';
       const mergeMethod = input.mergeMethod ?? 'merge';
       const profile = RepositoryProfileSchema.parse({
         version: 1,
@@ -125,6 +127,7 @@ export class RepositoryService {
       });
       const project = this.db.transaction((tx) => {
         const proj = findProject(tx, input.project);
+        assertNarrowing(tx, { repository: { projectId: proj.id, name, mergePolicy } });
         const clash = tx
           .select({ id: schema.repositories.id })
           .from(schema.repositories)
