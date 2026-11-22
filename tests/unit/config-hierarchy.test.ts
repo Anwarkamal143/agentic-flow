@@ -24,6 +24,7 @@ const api = {
   profile: {
     commands: { test: { run: 'npm test', acceptsArgs: false } },
     sensitivePaths: ['infra/**'],
+    instructionFiles: ['CLAUDE.md'],
     requiredChecks: ['build'],
     setup: 'npm ci',
   },
@@ -101,9 +102,11 @@ describe('resolveEffectiveConfig: levels and sources', () => {
       commands: { value: { test: { run: 'npm test', acceptsArgs: false } }, source: 'repository' },
       sensitivePaths: { value: ['infra/**'], source: 'repository' },
       requiredChecks: { value: ['build'], source: 'repository' },
+      instructionFiles: { value: ['CLAUDE.md'], source: 'repository' },
     });
     expect(config.repositories[1]?.setup).toEqual({ value: null, source: 'repository' });
     expect(config.repositories[1]?.requiredChecks).toEqual({ value: [], source: 'repository' });
+    expect(config.repositories[1]?.instructionFiles).toEqual({ value: [], source: 'repository' });
   });
 
   it('a Task narrows its maxAttempts with source task, else keeps the Job value', () => {
@@ -247,6 +250,7 @@ describe('snapshots of Jobs created before Phase D', () => {
       commands: { value: { test: { run: 'npm test', acceptsArgs: false } }, source: 'repository' },
       sensitivePaths: { value: ['infra/**'], source: 'repository' },
       requiredChecks: { value: ['build'], source: 'repository' },
+      instructionFiles: { value: ['CLAUDE.md'], source: 'repository' },
     });
     const older = EffectiveConfigSchema.parse({ maxAttempts: { value: 3, source: 'recipe' } });
     expect(repositoryConfigOf(older, api).mergePolicy).toEqual({
@@ -277,6 +281,8 @@ describe('snapshots of Jobs created before Phase D', () => {
       value: [...DEFAULT_SENSITIVE_PATHS],
       source: 'repository',
     });
+    // Frozen before #102: no instruction files were frozen, so the Job gives none.
+    expect(config.repositories[0]?.instructionFiles).toEqual({ value: [], source: 'repository' });
   });
 
   it('a new snapshot gives the frozen section, not the live Repository', () => {

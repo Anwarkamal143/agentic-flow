@@ -119,6 +119,7 @@ describe('factory job create / job show', () => {
         value: ['.env*', '**/.env*', '.github/workflows/**', 'infra/**', '**/*.pem', '**/*.key'],
         source: 'repository',
       },
+      instructionFiles: { value: [], source: 'repository' },
     };
     const first = await createJob(rt, repo.id, 'before any config edit');
     expect(first.workflowSnapshot).toEqual({

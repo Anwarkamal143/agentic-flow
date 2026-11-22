@@ -331,7 +331,10 @@ describe('verification by profile command name (ADR-0051)', () => {
     expect(rules(verifying({ command: 'lint' }), withCommands)).toEqual([]);
     expect(
       rules(
-        verifying({ command: 'test', args: ['tests/unit/a.test.ts', '--reporter=dot', 'a@1,b+c:d'] }),
+        verifying({
+          command: 'test',
+          args: ['tests/unit/a.test.ts', '--reporter=dot', 'a@1,b+c:d'],
+        }),
         withCommands,
       ),
     ).toEqual([]);

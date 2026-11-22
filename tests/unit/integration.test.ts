@@ -150,6 +150,29 @@ describe('integrationDefinition', () => {
     ]);
   });
 
+  it('runs a profile command once per distinct argument list, keeping its arguments', () => {
+    const named = (key: string, args: string[]) => ({
+      key,
+      command: 'test',
+      args,
+      required: true,
+      criteria: [],
+    });
+    const d = integrationDefinition([
+      { key: 'a', definition: definition({ verification: [named('test', ['tests/a.test.ts'])] }) },
+      {
+        key: 'b',
+        definition: definition({
+          verification: [named('test', ['tests/a.test.ts']), named('test', ['tests/b.test.ts'])],
+        }),
+      },
+    ]);
+    expect(d.verification.map((v) => [v.key, v.command, v.args])).toEqual([
+      ['test', 'test', ['tests/a.test.ts']],
+      ['test-2', 'test', ['tests/b.test.ts']],
+    ]);
+  });
+
   it('needs at least one Plan Task', () => {
     expect(() => integrationDefinition([])).toThrow(/at least one/);
   });

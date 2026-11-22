@@ -469,7 +469,7 @@ function writeAttempts(
       lines.push(
         e.kind === 'verification'
           ? `    ${String(e.verificationKey).padEnd(12)} ${e.verdict.padEnd(10)} exit ${String(run?.exitCode ?? 'none')}` +
-            profileCommandNote(run?.profileCommand ?? null)
+              profileCommandNote(run?.profileCommand ?? null)
           : `    ${String(e.criterionCode).padEnd(12)} ${e.verdict.padEnd(10)} ${e.source}: ${e.detail}`,
       );
     }
