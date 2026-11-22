@@ -61,7 +61,7 @@ export const PROPOSAL_STAGES: readonly ProposalStage[] = [
     role: 'planner',
     kind: 'plan',
     schema: PlanProposalSchema,
-    ask: "Plan the work as Tasks. Each Task is one coherent change in one of the Job's Repositories, with writable and forbidden path globs relative to the Repository root, its dependencies, the Acceptance Criteria it covers, and the commands that verify it. Tasks that no dependency path orders may run in parallel, so their writable paths must not overlap. Give each Task a priority (low, normal or high); a Task's maxAttempts may only lower the configured limit.",
+    ask: "Plan the work as Tasks. Each Task is one coherent change in one of the Job's Repositories, with writable and forbidden path globs relative to the Repository root, its dependencies, the Acceptance Criteria it covers, and the Repository Profile commands that verify it. Tasks that no dependency path orders may run in parallel, so their writable paths must not overlap. Give each Task a priority (low, normal or high); a Task's maxAttempts may only lower the configured limit.",
     validate: (value, ctx) => validatePlan(PlanProposalSchema.parse(value), ctx),
   },
 ];
@@ -100,9 +100,10 @@ export interface RepositoryPromptProfile {
 /**
  * `@2` added the Replan section (ADR-0019); `@3` says how carry-over keeps
  * unaffected work (ADR-0029); `@4` added the re-specification section
- * (ADR-0031); `@5` lists the planner's profile commands and Sensitive Paths (#102).
+ * (ADR-0031); `@5` lists the planner's profile commands and Sensitive Paths (#102);
+ * `@6` says a verification command that names no profile command is invalid (#104).
  */
-export const PROMPT_TEMPLATE_ID = 'proposal-stage@5';
+export const PROMPT_TEMPLATE_ID = 'proposal-stage@6';
 
 const TEMPLATE = `You are the {{role}} for a software Job in an automated software factory.
 {{ask}}
@@ -119,8 +120,17 @@ Reply with exactly one JSON object and nothing else. It must match this JSON Sch
 {{schema}}
 `;
 
-/** Hash of the template text, recorded with each Harness Run. */
-export const PROMPT_TEMPLATE_HASH = `sha256:${createHash('sha256').update(TEMPLATE).digest('hex')}`;
+/** What the planner is told about verification commands and Sensitive Paths (#102, #104). */
+const PROFILE_RULES = `A verification entry's command must be the name of one of its Repository's profile commands, never a shell command: a Plan with any other command is invalid. Give args only to a command that accepts arguments; each argument must match ${VERIFICATION_ARG_PATTERN.source}. Never list a Sensitive Path in writable.`;
+
+/**
+ * Hash of the template's fixed text (the template, each Stage's ask and the
+ * planner's profile rules; `@6` added the last two), recorded with each
+ * Harness Run.
+ */
+export const PROMPT_TEMPLATE_HASH = `sha256:${createHash('sha256')
+  .update([TEMPLATE, ...PROPOSAL_STAGES.map((s) => s.ask), PROFILE_RULES].join('\0'))
+  .digest('hex')}`;
 
 export function renderPrompt(stage: ProposalStage, input: PromptInput): string {
   const rejected =
@@ -180,5 +190,5 @@ function profilesSection(profiles: readonly RepositoryPromptProfile[]): string {
     const sensitive = p.sensitivePaths.length === 0 ? '(none)' : p.sensitivePaths.join(', ');
     return `Repository ${p.name}:\n  profile commands: ${commands}\n  Sensitive Paths (forbidden for every Task): ${sensitive}`;
   });
-  return `\nA verification entry's command names one of its Repository's profile commands. Give args only to a command that accepts arguments; each argument must match ${VERIFICATION_ARG_PATTERN.source}. Never list a Sensitive Path in writable.\n${lines.join('\n')}\n`;
+  return `\n${PROFILE_RULES}\n${lines.join('\n')}\n`;
 }

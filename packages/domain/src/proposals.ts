@@ -67,8 +67,9 @@ export const VerificationCommandSchema = z.object({
   key: slug,
   /**
    * A Repository Profile command name (ADR-0051), resolved from the Job's
-   * frozen per-Repository section; or, until #104 refuses it, a free shell
-   * command. A string that names a profile command is that command.
+   * frozen per-Repository section. `validatePlan` refuses any other string
+   * (`plan.verification_command`, #104); only a Plan accepted before #104
+   * can hold free shell.
    */
   command: z.string().trim().min(1).max(1000),
   /**
@@ -96,9 +97,10 @@ export interface ResolvedVerification {
 /**
  * How a verification entry runs (ADR-0051): a name of one of `commands` (the
  * Job's frozen profile commands of the Task's Repository) runs that command's
- * `run` with each argument shell-quoted and appended; anything else is free
- * shell, run as written. Plan validation refuses arguments except on a
- * profile command that accepts them, so free shell never carries any. Pure.
+ * `run` with each argument shell-quoted and appended. Plan validation refuses
+ * any other command (#104), so only an entry of a Plan accepted before #104
+ * runs as written, free shell with no arguments: a stored Plan is never
+ * re-validated or regenerated. Pure.
  */
 export function resolveVerification(
   entry: Pick<VerificationCommand, 'command' | 'args'>,
@@ -271,7 +273,7 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
         });
       }
       issues.push(
-        ...verificationArgIssues(task, repository.name, ctx.commands.get(repository.id) ?? {}),
+        ...verificationCommandIssues(task, repository.name, ctx.commands.get(repository.id) ?? {}),
       );
     }
     for (const [list, globs] of [
@@ -344,29 +346,31 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
 }
 
 /**
- * `plan.verification_args` (ADR-0051): arguments only on a profile command of
- * the Task's Repository marked `acceptsArgs`, each matching
+ * The verification entries' commands (ADR-0051): `plan.verification_command`
+ * for an entry that names no profile command of the Task's Repository (free
+ * shell is refused, #104); `plan.verification_args` for arguments except on a
+ * profile command marked `acceptsArgs`, each matching
  * {@link VERIFICATION_ARG_PATTERN}.
  */
-function verificationArgIssues(
+function verificationCommandIssues(
   task: PlanTaskProposal,
   repository: string,
   commands: Readonly<Record<string, ProfileCommand>>,
 ): RuleIssue[] {
   const issues: RuleIssue[] = [];
   for (const v of task.verification) {
-    const args = v.args ?? [];
-    if (args.length === 0) continue;
     const at = `Task ${task.key}: verification ${v.key}`;
     const named = Object.hasOwn(commands, v.command) ? commands[v.command] : undefined;
     if (named === undefined) {
       const names = Object.keys(commands).sort();
       issues.push({
-        rule: 'plan.verification_args',
-        message: `${at}: '${v.command}' is not a profile command of Repository ${repository} (${names.length === 0 ? 'it has none' : names.join(', ')}); arguments are allowed only on a profile command that accepts them`,
+        rule: 'plan.verification_command',
+        message: `${at}: '${v.command}' is not a profile command of Repository ${repository} (${names.length === 0 ? 'it has none' : names.join(', ')}); a verification entry names one of its Repository's profile commands, never free shell`,
       });
       continue;
     }
+    const args = v.args ?? [];
+    if (args.length === 0) continue;
     if (!named.acceptsArgs) {
       issues.push({
         rule: 'plan.verification_args',

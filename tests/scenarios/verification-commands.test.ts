@@ -3,7 +3,8 @@
  * step): a Plan's verification entry names a profile command, with arguments
  * only when the command accepts them; the factory runs it from the Job's
  * frozen per-Repository section and its Evidence names the command and the
- * arguments. Free shell entries still run. The Task Packet gives the
+ * arguments. A free shell entry makes the Plan invalid and is re-prompted
+ * (#104, ADR-0064). The Task Packet gives the
  * developer the Repository's instruction files as context, and the planner's
  * prompt lists each Repository's profile commands and Sensitive Paths.
  */
@@ -71,7 +72,7 @@ describe('verification by profile command name', () => {
           {
             output: planVerifying([
               { key: 'test', command: 'has-sum', args: ['src/math.ts'], criteria: ['AC-01'] },
-              { key: 'typecheck', command: 'test -f src/math.ts && echo typecheck ok' },
+              { key: 'typecheck', command: 'math-exists' },
             ]),
           },
         ],
@@ -99,7 +100,7 @@ describe('verification by profile command name', () => {
       },
       {
         key: 'typecheck',
-        command: 'test -f src/math.ts && echo typecheck ok',
+        command: 'math-exists',
         run: 'test -f src/math.ts && echo typecheck ok',
         required: true,
       },
@@ -113,7 +114,12 @@ describe('verification by profile command name', () => {
         { name: 'has-sum', args: ['src/math.ts'] },
         0,
       ],
-      ['typecheck', 'test -f src/math.ts && echo typecheck ok', null, 0],
+      [
+        'typecheck',
+        'test -f src/math.ts && echo typecheck ok',
+        { name: 'math-exists', args: [] },
+        0,
+      ],
     ]);
     const shown = await rt.home.cli(['job', 'show', job.id]);
     expect(shown.stdout).toContain('test: has-sum src/math.ts');
@@ -161,6 +167,61 @@ describe('verification by profile command name', () => {
       ],
     });
   });
+
+  it('re-prompts a Plan whose verification is free shell, and runs the corrected Plan', async () => {
+    const home = await initializedHome();
+    useFakeHarness(
+      home,
+      scriptWith({
+        planning: [
+          {
+            output: planVerifying([
+              { key: 'test', command: 'npm install && npm test', criteria: ['AC-01'] },
+            ]),
+          },
+          { output: validOutput('planning') },
+        ],
+      }),
+    );
+    const rt = await startRuntime(home);
+    const repo = await registeredRepo(rt);
+
+    const created = await createJob(rt, repo.id);
+    const job = await waitForJob(rt, created.id, jobSettled, 20_000);
+
+    expect(job.status, rt.output()).toBe('completed');
+    const events = await json<{ type: string; payload: Record<string, unknown> }[]>(
+      rt.request(`/v1/jobs/${job.id}/events`),
+    );
+    const reprompt = events.find(
+      (e) =>
+        e.type === 'harness_run.started' &&
+        e.payload['stageId'] === 'planning' &&
+        e.payload['reprompt'] !== undefined,
+    )?.payload['reprompt'];
+    expect(reprompt).toEqual({
+      issues: [
+        {
+          rule: 'plan.verification_command',
+          message:
+            "Task add-sum: verification test: 'npm install && npm test' is not a profile command of Repository tiny-ts (dir-exists, exists, has-sum, math-exists, pass, test, typecheck); a verification entry names one of its Repository's profile commands, never free shell",
+        },
+      ],
+    });
+    const planning = events.filter(
+      (e) => e.type === 'harness_run.started' && e.payload['stageId'] === 'planning',
+    );
+    expect(planning.map((e) => (e.payload['template'] as { id: string }).id)).toEqual([
+      'proposal-stage@6',
+      'proposal-stage@6',
+    ]);
+    // The free shell never ran: every verification run names a profile command.
+    const attempt = await onlyAttempt<AttemptBody>(rt, job.id);
+    expect(attempt.verificationRuns.map((r) => r.profileCommand?.name)).toEqual([
+      'has-sum',
+      'math-exists',
+    ]);
+  });
 });
 
 describe('the Repository Profile as agent context', () => {
@@ -192,13 +253,16 @@ describe('the Repository Profile as agent context', () => {
 
     expect(job.status, rt.output()).toBe('completed');
     const attempt = await onlyAttempt<AttemptBody>(rt, job.id);
-    expect(attempt.promptTemplate.id).toBe('task-packet@7');
-    expect(attempt.packet.packetVersion).toBe(2);
+    expect(attempt.promptTemplate.id).toBe('task-packet@8');
+    expect(attempt.packet.packetVersion).toBe(3);
     expect(attempt.packet.context.instructionFiles).toEqual(['CLAUDE.md', 'docs/AGENTS.md']);
     const developer = stub.invocations().find((r) => r.role === 'developer')?.prompt ?? '';
     expect(developer).toContain('context.instructionFiles');
 
     const planner = stub.invocations().find((r) => r.role === 'planner')?.prompt ?? '';
+    expect(planner).toContain(
+      "A verification entry's command must be the name of one of its Repository's profile commands, never a shell command: a Plan with any other command is invalid.",
+    );
     expect(planner).toContain(
       'Repository tiny-ts:\n' +
         "  profile commands: has-sum (grep -q 'export function sum' src/math.ts), " +

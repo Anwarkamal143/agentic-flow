@@ -2080,7 +2080,7 @@ export class TaskScheduler {
     const criteria = criteriaCoveredBy(this.opts.db, job.id, definition.acceptance);
     const section = frozenRepositoryConfig(job.configSnapshotJson, repo);
     return TaskPacketSchema.parse({
-      packetVersion: 2,
+      packetVersion: 3,
       job: { id: job.id, title: job.title, objective },
       task: {
         id: task.id,
