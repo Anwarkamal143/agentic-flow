@@ -10,6 +10,13 @@ import { GitHubCoordinatesSchema, parseCoordinates } from './github.js';
 import { TaskKindSchema } from './integration.js';
 import { ReviewRerunOnBaseChangeSchema, type ReviewRerunOnBaseChange } from './base-change.js';
 import { SetupCommandSchema } from './setup.js';
+import {
+  DEFAULT_SENSITIVE_PATHS,
+  DetectedProfileSchema,
+  ProfileCommandsSchema,
+  RepositoryProfileSchema,
+  type RepositoryProfile,
+} from './profile.js';
 import { ProjectJobLimitSchema } from './scheduling.js';
 import {
   ChainLinkSchema,
@@ -79,43 +86,7 @@ export * from './projects.js';
 export * from './factory-level.js';
 export * from './config-levels.js';
 export * from './scheduling.js';
-
-const commandSchema = z.string().trim().min(1).max(1000).nullable();
-
-/** Shell commands the factory runs to verify work in a Repository. `null`: none. */
-export const RepositoryCommandsSchema = z.object({
-  test: commandSchema,
-  typecheck: commandSchema,
-});
-export type RepositoryCommands = z.infer<typeof RepositoryCommandsSchema>;
-
-export const PackageManagerSchema = z.enum(['npm', 'pnpm', 'yarn', 'bun']);
-export type PackageManager = z.infer<typeof PackageManagerSchema>;
-
-/**
- * What the factory knows about how to work in a Repository. Detected commands
- * are proposals until a human confirms them; only confirmed profiles are saved.
- */
-export const RepositoryProfileSchema = z.object({
-  version: z.literal(1),
-  packageManager: PackageManagerSchema.nullable(),
-  commands: RepositoryCommandsSchema,
-  /**
-   * The checks the Merge Gate counts (#58): when set, only these, and each
-   * must report (never passed by the grace window). Unset or empty: every
-   * check on the PR head.
-   */
-  requiredChecks: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
-  /**
-   * The setup command the factory runs in each Worktree before the Harness
-   * Run and verification (ADR-0047), from `repo add --setup`. Set by a human
-   * only, never detected. Unset: no setup runs.
-   */
-  setup: SetupCommandSchema.optional(),
-  confirmedBy: z.string(),
-  confirmedAt: z.string(),
-});
-export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
+export * from './profile.js';
 
 /** Operator-set Project configuration. Every field is optional: unset means inherit. */
 export const ProjectConfigSchema = z
@@ -220,9 +191,11 @@ export const RepositoryInspectionSchema = z.object({
   remoteUrl: z.string().nullable(),
   /** The GitHub coordinates `remoteUrl` gives, when it is a github.com URL. */
   github: GitHubCoordinatesSchema.nullable(),
-  packageManager: PackageManagerSchema.nullable(),
-  /** Proposed commands, for the human to confirm or replace. */
-  detectedCommands: RepositoryCommandsSchema,
+  /**
+   * What Profile Detection proposes (ADR-0060), from the source's HEAD; for
+   * the human to confirm or replace. Never a setup command.
+   */
+  detected: DetectedProfileSchema,
 });
 export type RepositoryInspection = z.infer<typeof RepositoryInspectionSchema>;
 
@@ -231,7 +204,11 @@ export const RegisterRepositoryInputSchema = z.object({
   path: absolutePath,
   /** An existing Project's name or id; an unknown one is refused, never created (ADR-0055). */
   project: z.string().trim().min(1).max(100),
-  commands: RepositoryCommandsSchema,
+  /**
+   * The detected profile fields as the human confirmed them (`repo add`
+   * shows each one; `--yes` accepts them). Saved with detection `detected`.
+   */
+  profile: DetectedProfileSchema,
   /** The Merge Gate's `requiredChecks`, from `repo add --required-check` (repeatable). */
   requiredChecks: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
   /** `repo add --setup`: the Worktree setup command (ADR-0047). Never inferred. */
@@ -508,8 +485,16 @@ export const RepositoryEffectiveConfigSchema = z.object({
   mergeMethod: effectiveValue(MergeMethodSchema),
   /** The Worktree setup command (ADR-0047); `null`: none. */
   setup: effectiveValue(SetupCommandSchema.nullable()),
-  /** The profile's verification commands. */
-  commands: effectiveValue(RepositoryCommandsSchema),
+  /** The profile's named commands (v1 snapshots' `{test, typecheck}` read as named). */
+  commands: effectiveValue(ProfileCommandsSchema),
+  /**
+   * The profile's Sensitive Paths (ADR-0051). Snapshots from before #100
+   * have none frozen: they read as the fixed defaults.
+   */
+  sensitivePaths: effectiveValue(z.array(z.string())).default({
+    value: [...DEFAULT_SENSITIVE_PATHS],
+    source: 'repository',
+  }),
   /** The Merge Gate's `requiredChecks`; empty: every check counts. */
   requiredChecks: effectiveValue(z.array(z.string())),
 });
@@ -610,7 +595,7 @@ export interface RepositoryConfigLevel {
   name: string;
   mergePolicy: MergePolicy;
   mergeMethod: MergeMethod;
-  profile: Pick<RepositoryProfile, 'commands'> & {
+  profile: Pick<RepositoryProfile, 'commands' | 'sensitivePaths'> & {
     requiredChecks?: string[] | undefined;
     setup?: string | undefined;
   };
@@ -699,6 +684,7 @@ export function resolveEffectiveConfig(levels: EffectiveConfigLevels): Effective
       mergeMethod: { value: repo.mergeMethod, source: 'repository' },
       setup: { value: repo.profile.setup ?? null, source: 'repository' },
       commands: { value: repo.profile.commands, source: 'repository' },
+      sensitivePaths: { value: repo.profile.sensitivePaths, source: 'repository' },
       requiredChecks: { value: repo.profile.requiredChecks ?? [], source: 'repository' },
     });
   }
@@ -746,6 +732,7 @@ export function repositoryConfigOf(
     mergeMethod: { value: repository.mergeMethod, source: 'repository' },
     setup: config.setup ?? { value: null, source: 'repository' },
     commands: { value: repository.profile.commands, source: 'repository' },
+    sensitivePaths: { value: repository.profile.sensitivePaths, source: 'repository' },
     requiredChecks: { value: repository.profile.requiredChecks ?? [], source: 'repository' },
   };
 }

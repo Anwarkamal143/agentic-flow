@@ -1,16 +1,20 @@
 /**
  * Repository registration (PRODUCT_SPEC §13, ARCHITECTURE §10, ADR-0001).
  *
- * The source checkout is only ever read: its `origin` URL, and `package.json`
- * plus lockfile names for command detection. Every Worktree later comes from the
+ * The source checkout is only ever read: its `origin` URL, and for Profile
+ * Detection (ADR-0060) the paths and a few files of its HEAD commit, through
+ * git plumbing. Every Worktree later comes from the
  * Factory Clone made here, under `<workspace_root>/clones/<repo-id>`.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
   chooseProject,
   coordinatesFromRemoteUrl,
+  detectProfile,
+  type FileSnapshot,
+  profileDetectionReads,
   EffectiveConfigSchema,
   type EffectiveConfigPreview,
   repositoryConfigOf,
@@ -20,17 +24,17 @@ import {
   MergePolicySchema,
   parseCoordinates,
   RepositoryProfileSchema,
-  type PackageManager,
   type Project,
   type RegisterRepositoryInput,
   type RegisterRepositoryResult,
   type Repository,
-  type RepositoryCommands,
   type RepositoryInspection,
   type GitHubCoordinates,
 } from '@factory/domain';
 import {
   clone,
+  committedFile,
+  committedPaths,
   currentBranch,
   GitError,
   hasEmbeddedCredentials,
@@ -71,7 +75,8 @@ export class RepositoryService {
     // A relative origin (e.g. `../upstream.git`) is relative to the source repository.
     const remoteUrl = origin === undefined ? null : resolveRemote(source, origin);
     const github = remoteUrl === null ? null : coordinatesFromRemoteUrl(remoteUrl);
-    return { source, name: basename(source), remoteUrl, github, ...detectCommands(source) };
+    const detected = detectProfile(await snapshotOf(source, 'HEAD'));
+    return { source, name: basename(source), remoteUrl, github, detected };
   }
 
   async register(input: RegisterRepositoryInput): Promise<RegisterRepositoryResult> {
@@ -116,9 +121,9 @@ export class RepositoryService {
       const now = new Date().toISOString();
       const mergeMethod = input.mergeMethod ?? 'merge';
       const profile = RepositoryProfileSchema.parse({
-        version: 1,
-        packageManager: inspection.packageManager,
-        commands: input.commands,
+        version: 2,
+        detection: 'detected',
+        ...input.profile,
         ...(input.requiredChecks === undefined || input.requiredChecks.length === 0
           ? {}
           : { requiredChecks: input.requiredChecks }),
@@ -288,57 +293,20 @@ function resolveRemote(source: string, url: string): string {
   return isUrl || isAbsolute(url) ? url : resolve(source, url);
 }
 
+/** Files detection reads larger than this are left out of the snapshot (nothing detected from them). */
+const MAX_SNAPSHOT_FILE_BYTES = 1024 * 1024;
+
 /**
- * Proposes test and typecheck commands from `package.json`. The result is a
- * proposal only: the operator confirms or replaces it before it is saved.
- * Repository content is untrusted, so a malformed file just means "nothing detected".
+ * The snapshot Profile Detection reads (ADR-0060): every path tracked at
+ * `rev`, and the contents of the few files `profileDetectionReads` names.
+ * Plumbing reads only: nothing is written to `repo`, its index or its tree.
  */
-function detectCommands(
-  source: string,
-): Pick<RepositoryInspection, 'packageManager' | 'detectedCommands'> {
-  const none = { packageManager: null, detectedCommands: { test: null, typecheck: null } };
-  let pkg: unknown;
-  try {
-    pkg = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8'));
-  } catch {
-    return none;
+export async function snapshotOf(repo: string, rev: string): Promise<FileSnapshot> {
+  const paths = await committedPaths(repo, rev);
+  const files: Record<string, string> = {};
+  for (const path of profileDetectionReads(paths)) {
+    const text = await committedFile(repo, rev, path, MAX_SNAPSHOT_FILE_BYTES);
+    if (text !== undefined) files[path] = text;
   }
-  if (typeof pkg !== 'object' || pkg === null) return none;
-  const manifest = pkg as { scripts?: unknown; packageManager?: unknown };
-  const scripts =
-    typeof manifest.scripts === 'object' && manifest.scripts !== null
-      ? (manifest.scripts as Record<string, unknown>)
-      : {};
-  const pm = packageManagerOf(source, manifest.packageManager);
-  const run = (script: string) => (pm === 'npm' ? `npm run ${script}` : `${pm} run ${script}`);
-
-  const testScript = scripts['test'];
-  const isNpmPlaceholder =
-    typeof testScript === 'string' && testScript.includes('no test specified');
-  const test =
-    typeof testScript === 'string' && !isNpmPlaceholder
-      ? pm === 'bun'
-        ? run('test')
-        : `${pm} test`
-      : null;
-
-  const typecheckScript = ['typecheck', 'type-check', 'tsc'].find(
-    (s) => typeof scripts[s] === 'string',
-  );
-  const commands: RepositoryCommands = {
-    test,
-    typecheck: typecheckScript === undefined ? null : run(typecheckScript),
-  };
-  return { packageManager: pm, detectedCommands: commands };
-}
-
-function packageManagerOf(source: string, declared: unknown): PackageManager {
-  if (typeof declared === 'string') {
-    const name = declared.split('@', 1)[0];
-    if (name === 'pnpm' || name === 'yarn' || name === 'bun' || name === 'npm') return name;
-  }
-  if (existsSync(join(source, 'pnpm-lock.yaml'))) return 'pnpm';
-  if (existsSync(join(source, 'yarn.lock'))) return 'yarn';
-  if (existsSync(join(source, 'bun.lock')) || existsSync(join(source, 'bun.lockb'))) return 'bun';
-  return 'npm';
+  return { paths, files };
 }

@@ -9,7 +9,7 @@ import {
   type ProjectSummary,
   type RegisterRepositoryInput,
   type RegisterRepositoryResult,
-  type RepositoryCommands,
+  type DetectedProfile,
   type RepositoryInspection,
 } from '@factory/domain';
 import { resolveHome } from '@factory/home';
@@ -94,13 +94,17 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
   const inspection = await client.json<RepositoryInspection>('POST', '/v1/repositories/inspect', {
     body: { path },
   });
-  const commands: RepositoryCommands = {
-    test: override(opts.testCommand, inspection.detectedCommands.test),
-    typecheck: override(opts.typecheckCommand, inspection.detectedCommands.typecheck),
-  };
-
-  const label = (key: keyof RepositoryCommands, flag: string | undefined) =>
-    `${commands[key] ?? 'none'}${flag === undefined ? (commands[key] === null ? ' (not detected)' : ' (detected)') : ` (from --${key}-command)`}`;
+  const { detected } = inspection;
+  const commands = { ...detected.commands };
+  for (const [name, flag] of [
+    ['test', opts.testCommand],
+    ['typecheck', opts.typecheckCommand],
+  ] as const) {
+    if (flag === undefined) continue;
+    if (flag.trim() === '') delete commands[name];
+    else commands[name] = { run: flag.trim(), acceptsArgs: false };
+  }
+  const profile: DetectedProfile = { ...detected, commands };
   process.stdout.write(
     `Repository: ${inspection.name} (${inspection.source})\n` +
       `  project:   ${project}\n` +
@@ -116,9 +120,11 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
             ? 'none (no github.com origin; set one with --github owner/name)'
             : `${formatCoordinates(inspection.github)} (from the origin URL)`
       }\n` +
-      `Commands${inspection.packageManager === null ? '' : ` (package manager: ${inspection.packageManager})`}:\n` +
-      `  test:      ${label('test', opts.testCommand)}\n` +
-      `  typecheck: ${label('typecheck', opts.typecheckCommand)}\n` +
+      `Repository Profile (detected from the files of ${inspection.name}'s HEAD; nothing is saved until you confirm):\n` +
+      profileLines(profile, {
+        test: opts.testCommand === undefined ? 'detected' : 'from --test-command',
+        typecheck: opts.typecheckCommand === undefined ? 'detected' : 'from --typecheck-command',
+      }) +
       `  setup:     ${
         setup === undefined
           ? 'none (the factory installs nothing in a Worktree; set one with --setup)'
@@ -137,10 +143,10 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
   );
 
   if (!opts.yes) {
-    const answer = (await ask('Save these commands and register the Repository? [y/N] '))?.trim();
+    const answer = (await ask('Save this profile and register the Repository? [y/N] '))?.trim();
     if (answer === undefined || !/^y(es)?$/i.test(answer)) {
       process.stderr.write(
-        'Nothing registered. To change a command, re-run with --test-command or --typecheck-command.\n',
+        'Nothing registered. To change a command, re-run with --test-command or --typecheck-command; any field can be changed after registering, with factory repo profile set.\n',
       );
       return 1;
     }
@@ -149,7 +155,7 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
   const input: RegisterRepositoryInput = {
     path,
     project,
-    commands,
+    profile,
     ...(opts.github === undefined ? {} : { github: opts.github.trim() }),
     ...(opts.requiredChecks.length === 0 ? {} : { requiredChecks: opts.requiredChecks }),
     ...(setup === undefined ? {} : { setup: setup.data }),
@@ -176,7 +182,42 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
   return 0;
 }
 
-function override(flag: string | undefined, detected: string | null): string | null {
-  if (flag === undefined) return detected;
-  return flag.trim() === '' ? null : flag.trim();
+/**
+ * The detectable profile fields, one per line, as `repo add` and `repo
+ * profile` show them. `origins` names where a command came from (default
+ * `detected`).
+ */
+export function profileLines(
+  profile: DetectedProfile,
+  origins: Partial<Record<string, string>> = {},
+): string {
+  const lines = [`  package manager: ${profile.packageManager ?? 'none (no package.json)'}`];
+  const names = Object.keys(profile.commands).sort();
+  if (names.length === 0)
+    lines.push('  commands:  none detected (add one with factory repo profile set)');
+  else lines.push('  commands:');
+  for (const name of names) {
+    const command = profile.commands[name];
+    if (command === undefined) continue;
+    lines.push(
+      `    ${`${name}:`.padEnd(11)}${command.run} (${origins[name] ?? 'detected'}${command.acceptsArgs ? '; accepts arguments' : ''})`,
+    );
+  }
+  lines.push(
+    profile.ciFiles.length === 0
+      ? '  CI files:  none'
+      : `  CI files:  ${profile.ciFiles
+          .map(
+            (f) =>
+              `${f.path} (candidate checks: ${f.checks.length === 0 ? 'none found' : f.checks.join(', ')})`,
+          )
+          .join('; ')}`,
+    `  instruction files: ${
+      profile.instructionFiles.length === 0
+        ? 'none'
+        : `${profile.instructionFiles.join(', ')} (listed, never written)`
+    }`,
+    `  Sensitive Paths (no Task may write them): ${profile.sensitivePaths.join(', ')}`,
+  );
+  return lines.join('\n') + '\n';
 }
