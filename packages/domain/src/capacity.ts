@@ -15,7 +15,17 @@ export const CAPACITY_RESOURCE = {
   global: 'capacity.global',
   repository: 'capacity.repository',
   job: 'capacity.job',
+  /**
+   * A Project slot `<project-id>:<i>` (ADR-0050, ADR-0058): held by a Job, not
+   * a claim, while it has work in flight, under the lease id `projectSlotLeaseId`.
+   */
+  project: 'capacity.project',
 } as const;
+
+/** The lease id of the Project slot a Job holds while it has work in flight. */
+export function projectSlotLeaseId(jobId: string): string {
+  return `job:${jobId}`;
+}
 
 export interface CapacityLimits {
   /** `config.json` `concurrency.global`. */

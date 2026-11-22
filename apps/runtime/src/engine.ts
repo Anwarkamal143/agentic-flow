@@ -28,6 +28,7 @@ import {
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { openBlockerItem } from './blocker-approvals.js';
 import { ApiFailure } from './errors.js';
+import { releaseIdleProjectSlot } from './project-slot.js';
 
 /** A Job's row and its Stage Runs, as read inside a transaction. */
 export interface JobState {
@@ -82,6 +83,8 @@ export function changeJobIn<T>(
   const state = readJobState(tx, op.jobId);
   const step = stageRunStepper(tx, op.jobId, op.actor);
   const result = body(tx, state, step);
+  // A change that ends the Job's last work in flight frees its Project slot (ADR-0050).
+  releaseIdleProjectSlot(tx, op.jobId);
 
   const runs = readJobState(tx, op.jobId).stageRuns;
   const status = deriveJobStatus(

@@ -94,7 +94,9 @@ export async function projectConfigSet(ref: string, key: string, raw: string): P
   const value = valueAt(project.config, key);
   process.stdout.write(
     `Project ${project.name}: ${key} = ${shown(value)}\n` +
-      'Jobs already created keep the configuration they froze; new Jobs use this value.\n',
+      (key === 'concurrency.perProjectJobs'
+        ? 'The schedulers use it from their next claim, for every Job of the Project.\n'
+        : 'Jobs already created keep the configuration they froze; new Jobs use this value.\n'),
   );
   return 0;
 }

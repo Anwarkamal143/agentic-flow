@@ -1,6 +1,7 @@
 import {
   factoryConfigKeys,
   factoryGlobalConcurrency,
+  FAIRNESS_DEFAULTS,
   RECIPE_DEFAULTS,
   type FactoryLevel,
   type SetFactoryConfigInput,
@@ -34,6 +35,9 @@ export async function configShow(opts: { json: boolean }): Promise<number> {
     'concurrency.global': factoryGlobalConcurrency(level.config),
     'concurrency.perRepository': RECIPE_DEFAULTS.concurrency.perRepository,
     'concurrency.perJob': RECIPE_DEFAULTS.concurrency.perJob,
+    'concurrency.perProjectJobs': 'unlimited',
+    'scheduling.agingStep': FAIRNESS_DEFAULTS.agingStep,
+    'scheduling.agingIntervalSeconds': FAIRNESS_DEFAULTS.agingIntervalSeconds,
   };
   const keys = factoryConfigKeys();
   const width = Math.max(...keys.map((k) => k.length));
@@ -45,6 +49,14 @@ export async function configShow(opts: { json: boolean }): Promise<number> {
   process.stdout.write(out.join('\n') + '\n');
   return 0;
 }
+
+/** Keys read at each claim, never frozen into a Job (ADR-0056, ADR-0058). */
+export const READ_AT_CLAIM = new Set([
+  'concurrency.global',
+  'concurrency.perProjectJobs',
+  'scheduling.agingStep',
+  'scheduling.agingIntervalSeconds',
+]);
 
 /**
  * `factory config set <key> <value> [--expect-version <n>]`. The value is read as
@@ -66,8 +78,8 @@ export async function configSet(
   const value = new Map(configEntries(level.config)).get(key);
   process.stdout.write(
     `Factory Level: ${key} = ${shown(value)} (version ${String(level.version)})\n` +
-      (key === 'concurrency.global'
-        ? 'The Task scheduler uses a new concurrency.global from its next claim.\n'
+      (READ_AT_CLAIM.has(key)
+        ? `The schedulers use the new ${key} from their next claim, for every Job.\n`
         : 'Jobs created from now on use it; existing Jobs keep the value they froze.\n'),
   );
   return 0;

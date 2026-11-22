@@ -32,7 +32,8 @@ import {
   type HarnessRawResult,
   type HarnessRun,
 } from '@factory/harness';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
+import { claimNextProposalStage, resumeProposalSlot } from './claim.js';
 import type { ArtifactStore } from './artifacts.js';
 import { changeJob, readJobState, stepTask, type JobState } from './engine.js';
 import { newId } from './ids.js';
@@ -72,6 +73,8 @@ const PROPOSAL_MAX_TURNS = 30;
 
 export interface SchedulerOptions {
   db: FactoryDb;
+  /** The holder of the Project slots its claims take (`runtime:<pid>`, ADR-0050). */
+  holder: string;
   /** `undefined`: no Harness is configured, so queued Stages wait. */
   harness: AgentHarness | undefined;
   artifacts: ArtifactStore;
@@ -129,6 +132,10 @@ export class StageScheduler {
       )
       .all()
       .map((r) => r.id);
+    // A resumed Stage keeps its Job in flight: its Project slot passes to this runtime.
+    for (const id of this.orphans) {
+      resumeProposalSlot(this.opts.db, this.stageRun(id).jobId, this.opts.holder);
+    }
     this.loop.start();
   }
 
@@ -201,31 +208,18 @@ export class StageScheduler {
     }
   }
 
-  /** Moves the oldest Job's queued proposal Stage Run to `running`, and returns its id. */
+  /**
+   * Moves the first queued proposal Stage Run in the fair order whose Project
+   * has room (ADR-0050) to `running`, and returns its id.
+   */
   private claimNext(): string | undefined {
-    const next = this.opts.db
-      .select({ run: schema.stageRuns })
-      .from(schema.stageRuns)
-      .innerJoin(schema.jobs, eq(schema.jobs.id, schema.stageRuns.jobId))
-      .where(
-        and(
-          eq(schema.stageRuns.state, 'queued'),
-          inArray(schema.stageRuns.stageId, [...PROPOSAL_STAGE_IDS]),
-        ),
-      )
-      .orderBy(asc(schema.jobs.createdAt), asc(schema.stageRuns.position))
-      .limit(1)
-      .get();
-    if (next === undefined) return undefined;
-    changeJob(
-      this.opts.db,
-      { jobId: next.run.jobId, expectedVersion: 'current', actor: ACTOR },
-      (_, state, step) => {
-        step(requireStageRun(state, next.run.id, 'queued'), 'running');
-      },
-    );
+    const claimed = claimNextProposalStage(this.opts.db, {
+      holder: this.opts.holder,
+      actor: ACTOR,
+    });
+    if (claimed === undefined) return undefined;
     this.opts.onCommit();
-    return next.run.id;
+    return claimed.stageRunId;
   }
 
   private async runStage(harness: AgentHarness, stageRunId: string): Promise<void> {

@@ -10,6 +10,7 @@ import { GitHubCoordinatesSchema, parseCoordinates } from './github.js';
 import { TaskKindSchema } from './integration.js';
 import { ReviewRerunOnBaseChangeSchema, type ReviewRerunOnBaseChange } from './base-change.js';
 import { SetupCommandSchema } from './setup.js';
+import { ProjectJobLimitSchema } from './scheduling.js';
 import {
   ChainLinkSchema,
   ConcurrencyOverrideSchema,
@@ -77,6 +78,7 @@ export * from './setup.js';
 export * from './projects.js';
 export * from './factory-level.js';
 export * from './config-levels.js';
+export * from './scheduling.js';
 
 const commandSchema = z.string().trim().min(1).max(1000).nullable();
 
@@ -119,8 +121,15 @@ export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
 export const ProjectConfigSchema = z
   .object({
     ...LEVEL_CONFIG_SHAPE,
-    /** Task concurrency limits (ARCHITECTURE §12). A Job may override them at creation. */
-    concurrency: ConcurrencyOverrideSchema.optional(),
+    /**
+     * Task concurrency limits (ARCHITECTURE §12); a Job may override them at
+     * creation. `perProjectJobs` (ADR-0050) is read at each claim, not frozen.
+     */
+    concurrency: ConcurrencyOverrideSchema.extend({
+      perProjectJobs: ProjectJobLimitSchema.optional(),
+    })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
