@@ -761,6 +761,21 @@ export function taskMaxAttempts(
   return planned === undefined ? config.maxAttempts : { value: planned, source: 'task' };
 }
 
+/**
+ * `GET /v1/projects/:ref/effective-config` and `GET /v1/repositories/:id/effective-config`:
+ * the Effective Configuration a new Job of the Project would freeze now, with no Job-level
+ * overrides (ADR-0059). Resolved at each read, never stored. A Repository's preview keeps
+ * only that Repository's section.
+ */
+export const EffectiveConfigPreviewSchema = z.object({
+  projectId: z.string(),
+  projectName: z.string(),
+  /** The Repository the preview is for; `null` for a Project's (every section). */
+  repositoryId: z.string().nullable(),
+  config: EffectiveConfigSchema,
+});
+export type EffectiveConfigPreview = z.infer<typeof EffectiveConfigPreviewSchema>;
+
 // ---- Job API contracts ------------------------------------------------------
 
 /** Why a Stage Run failed. Recorded on the Stage Run itself, not only in its event. */

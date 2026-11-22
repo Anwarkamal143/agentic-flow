@@ -17,6 +17,9 @@ import {
   PlanViewSchema,
   PullRequestRecordSchema,
   ProjectSchema,
+  ProjectDetailSchema,
+  ProjectSummarySchema,
+  EffectiveConfigPreviewSchema,
   RepositorySchema,
   AttemptTailSchema,
   AttemptSchema,
@@ -32,6 +35,9 @@ import {
   type Artifact,
   type PlanView,
   type Project,
+  type ProjectDetail,
+  type ProjectSummary,
+  type EffectiveConfigPreview,
   type Repository,
   type AttemptTail,
   type Attempt,
@@ -200,6 +206,31 @@ export async function planView(jobId: string): Promise<PlanView | null> {
 
 export function projects(): Promise<Project[]> {
   return get('/v1/projects', z.array(ProjectSchema));
+}
+
+/** Every Project with its Repositories and active Jobs (ADR-0055). */
+export function projectSummaries(): Promise<ProjectSummary[]> {
+  return get('/v1/projects', z.array(ProjectSummarySchema));
+}
+
+export function projectDetail(ref: string): Promise<ProjectDetail> {
+  return get(`/v1/projects/${encodeURIComponent(ref)}`, ProjectDetailSchema);
+}
+
+/** What a new Job of the Project would freeze now, resolved by the runtime at this read (ADR-0059). */
+export function projectConfigPreview(ref: string): Promise<EffectiveConfigPreview> {
+  return get(
+    `/v1/projects/${encodeURIComponent(ref)}/effective-config`,
+    EffectiveConfigPreviewSchema,
+  );
+}
+
+/** The same for one Repository: the Job-wide values and its section only. */
+export function repositoryConfigPreview(id: string): Promise<EffectiveConfigPreview> {
+  return get(
+    `/v1/repositories/${encodeURIComponent(id)}/effective-config`,
+    EffectiveConfigPreviewSchema,
+  );
 }
 
 export function repositories(): Promise<Repository[]> {

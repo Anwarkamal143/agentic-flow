@@ -117,6 +117,9 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(deps.projects.create(input), 201);
   });
   app.get('/v1/projects/:ref', (c) => c.json(deps.projects.show(c.req.param('ref'))));
+  app.get('/v1/projects/:ref/effective-config', (c) =>
+    c.json(deps.projects.effectiveConfig(c.req.param('ref'))),
+  );
   app.post('/v1/projects/:id/config', async (c) => {
     const config = await parseBody(c, ProjectConfigSchema);
     return c.json(deps.projects.replaceConfig(c.req.param('id'), config));
@@ -126,6 +129,9 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(deps.projects.setConfigKey(c.req.param('ref'), input));
   });
   app.get('/v1/repositories', (c) => c.json(deps.repositories.listRepositories()));
+  app.get('/v1/repositories/:id/effective-config', (c) =>
+    c.json(deps.repositories.effectiveConfig(c.req.param('id'))),
+  );
   app.post('/v1/repositories/inspect', async (c) => {
     const input = await parseBody(c, InspectRepositoryInputSchema);
     return c.json(await deps.repositories.inspect(input.path));
