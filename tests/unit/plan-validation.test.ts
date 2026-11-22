@@ -36,7 +36,7 @@ const plan = (...tasks: TaskOver[]): PlanProposal =>
       scope: { writable: t.writable },
       dependsOn: t.dependsOn ?? [],
       acceptance: ['AC-01'],
-      verification: t.verification ?? [{ key: 'test', command: 'true', criteria: ['AC-01'] }],
+      verification: t.verification ?? [{ key: 'test', command: 'pass', criteria: ['AC-01'] }],
       ...(t.maxAttempts === undefined ? {} : { maxAttempts: t.maxAttempts }),
     })),
   });
@@ -48,6 +48,9 @@ const TRACKED = [
   'docs/readme.md',
   'package.json',
 ];
+
+/** The one profile command the default Plan's verification names. */
+const PASS = { pass: { run: 'true', acceptsArgs: false } };
 
 const ctx = (over: Partial<PlanContext> = {}): PlanContext => ({
   repositories: [
@@ -61,7 +64,10 @@ const ctx = (over: Partial<PlanContext> = {}): PlanContext => ({
     ['repo_web', TRACKED],
   ]),
   sensitivePaths: new Map(),
-  commands: new Map(),
+  commands: new Map([
+    ['repo_app', PASS],
+    ['repo_web', PASS],
+  ]),
   ...over,
 });
 
@@ -327,7 +333,7 @@ describe('verification by profile command name (ADR-0051)', () => {
       verification: [{ key: 'v', criteria: ['AC-01'], ...entry }],
     });
 
-  it('accepts a profile command, with arguments when it accepts them, and a free shell command', () => {
+  it('accepts a profile command, with arguments when it accepts them', () => {
     expect(rules(verifying({ command: 'lint' }), withCommands)).toEqual([]);
     expect(
       rules(
@@ -338,8 +344,24 @@ describe('verification by profile command name (ADR-0051)', () => {
         withCommands,
       ),
     ).toEqual([]);
-    // The expand step (#102): free shell is still accepted; #104 refuses it.
-    expect(rules(verifying({ command: 'grep -q sum src/math.ts' }), withCommands)).toEqual([]);
+  });
+
+  it('refuses a free shell verification command, naming the profile commands (#104)', () => {
+    expect(issues(verifying({ command: 'grep -q sum src/math.ts' }), withCommands)).toEqual([
+      {
+        rule: 'plan.verification_command',
+        message:
+          "Task one: verification v: 'grep -q sum src/math.ts' is not a profile command of Repository app (lint, test); a verification entry names one of its Repository's profile commands, never free shell",
+      },
+    ]);
+    // A Repository with no profile commands accepts no verification entry.
+    expect(issues(verifying({ command: 'npm install' }), ctx({ commands: new Map() }))).toEqual([
+      {
+        rule: 'plan.verification_command',
+        message:
+          "Task one: verification v: 'npm install' is not a profile command of Repository app (it has none); a verification entry names one of its Repository's profile commands, never free shell",
+      },
+    ]);
   });
 
   it('refuses arguments on a profile command that does not accept them', () => {
@@ -363,12 +385,12 @@ describe('verification by profile command name (ADR-0051)', () => {
     }
   });
 
-  it('refuses arguments on a command that is not one of the Repository’s profile commands', () => {
+  it('refuses a command that is not one of the Repository’s profile commands once, with or without arguments', () => {
     expect(issues(verifying({ command: 'echo', args: ['hi'] }), withCommands)).toEqual([
       {
-        rule: 'plan.verification_args',
+        rule: 'plan.verification_command',
         message:
-          "Task one: verification v: 'echo' is not a profile command of Repository app (lint, test); arguments are allowed only on a profile command that accepts them",
+          "Task one: verification v: 'echo' is not a profile command of Repository app (lint, test); a verification entry names one of its Repository's profile commands, never free shell",
       },
     ]);
     // Each Task is judged against its own Repository's commands.
@@ -382,7 +404,7 @@ describe('verification by profile command name (ADR-0051)', () => {
         }),
         withCommands,
       ),
-    ).toEqual(['plan.verification_args']);
+    ).toEqual(['plan.verification_command']);
   });
 
   it('resolves a profile command to its run, each argument shell-quoted and appended', () => {
@@ -398,7 +420,7 @@ describe('verification by profile command name (ADR-0051)', () => {
     });
   });
 
-  it('runs a command that names no profile command as free shell', () => {
+  it('runs a stored entry that names no profile command as written (a Plan accepted before #104)', () => {
     expect(resolveVerification({ command: 'grep -q sum src/math.ts' }, COMMANDS)).toEqual({
       run: 'grep -q sum src/math.ts',
       profileCommand: null,

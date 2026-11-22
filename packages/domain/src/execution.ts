@@ -232,9 +232,12 @@ export const TaskPacketSchema = z.object({
   /**
    * `2` (#102): verification entries name a profile command with its
    * arguments and the shell `run` it resolves to; `context.instructionFiles`.
-   * Packets stored before parse as version 1.
+   * Packets stored before parse as version 1. `3` (#104): free shell is
+   * refused at plan validation, so every entry's `command` names a profile
+   * command; only a Task of a Plan accepted before #104 may still carry free
+   * shell, its `run` then the same string.
    */
-  packetVersion: z.union([z.literal(1), z.literal(2)]),
+  packetVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   job: z.object({ id: z.string(), title: z.string(), objective: z.string() }),
   task: z.object({
     id: z.string(),
@@ -261,7 +264,7 @@ export const TaskPacketSchema = z.object({
   verification: z.array(
     z.object({
       key: z.string(),
-      /** A profile command name, or (until #104) free shell. */
+      /** A profile command name (free shell only in a Plan accepted before #104). */
       command: z.string(),
       args: z.array(z.string()).optional(),
       /** The shell command the factory runs (absent in version 1 packets). */

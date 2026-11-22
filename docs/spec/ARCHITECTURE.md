@@ -268,7 +268,7 @@ The packet is what the factory **sends**. It is versioned (`packet_version`), st
 
 ```ts
 TaskPacket = {
-  packet_version: 2,                       // 2 since Phase D (#102)
+  packet_version: 3,                       // 2 since Phase D (#102); 3: verification is profile commands only (#104)
   job: { id, title, objective },
   task: { id, key, title, objective, role, risk: "low"|"medium"|"high" },
   repository: { id, worktree_path, base_branch, base_sha },
@@ -302,7 +302,7 @@ TaskResult = {
 1. Check that the worktree is clean apart from the result file. If not, commit the leftovers as a `wip` commit on the task branch and flag them for review (never discard them).
 2. Read the actual `head_sha` from git. Commits that are listed but missing are a protocol violation.
 3. **Path gate:** `git diff --name-only base_sha..head_sha` must be inside `writable` and outside `forbidden`. A violation fails the gate, with the offending paths attached A Task's `forbidden` includes its Repository's Sensitive Paths, frozen in the Job's per-Repository section; forbidden beats writable (ADR-0051, ADR-0061).
-4. Run every `verification` command in the worktree. [Phase D] Each entry names a Repository Profile command (with validated arguments when the command accepts them), resolved from the Job's frozen Effective Configuration, never a planner-written shell command (ADR-0051). Store the exit code and the redacted output as evidence tied to `head_sha`.
+4. Run every `verification` command in the worktree. [Phase D] Each entry names a Repository Profile command (with validated arguments when the command accepts them), resolved from the Job's frozen Effective Configuration, never a planner-written shell command: plan validation refuses an entry that names no profile command (`plan.verification_command`, ADR-0051, ADR-0064). Only a Plan accepted before that refusal can still hold free shell; it runs as written, since a stored Plan is never re-validated. Store the exit code and the redacted output as evidence tied to `head_sha`.
 5. Missing or invalid result → the attempt is `failed` with `invalid_output`. The commits are preserved.
 
 Question rules [Phase B]: the developer packet sets `may_ask_questions: true`; the reviewer can't ask. `needs_decision` without a blocking question, and `done` with a blocking question, are protocol violations that get the one re-prompt (ADR-0010). A `scope_change_request` is treated as `needs_decision` (§8); scope never changes mid-Plan ([Phase E] `scope_change` Approval).
