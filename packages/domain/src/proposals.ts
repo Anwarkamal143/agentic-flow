@@ -6,6 +6,7 @@
  */
 import picomatch from 'picomatch';
 import { z } from 'zod';
+import { deliveryOrder } from './delivery-order.js';
 import type { ProfileCommand } from './profile.js';
 
 const text = z.string().trim().min(1).max(10_000);
@@ -332,6 +333,17 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
   const cycle = findCycle(plan.tasks);
   if (cycle !== undefined) {
     issues.push({ rule: 'plan.no_cycles', message: `dependency cycle: ${cycle.join(' → ')}` });
+  } else {
+    const order = deliveryOrder(
+      plan.tasks.map((t) => ({ ...t, repository: repositoryIdOf(ctx, t.repository) ?? '' })),
+      ctx.repositories,
+    );
+    if (!order.ok) {
+      issues.push({
+        rule: 'plan.delivery_order_cycle',
+        message: `cross-repo dependency cycle: ${order.cycle.join(' → ')}; the Delivery Order must be defined, so no Repository may depend on a Repository that depends on it`,
+      });
+    }
   }
   issues.push(...overlapIssues(plan, ctx));
   for (const c of ctx.criteria) {
@@ -343,6 +355,14 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
     }
   }
   return issues;
+}
+
+/** The id of the Job's Repository a Plan Task names (by id or name), if it is one. */
+export function repositoryIdOf(
+  ctx: Pick<PlanContext, 'repositories'>,
+  ref: string,
+): string | undefined {
+  return ctx.repositories.find((r) => r.id === ref || r.name === ref)?.id;
 }
 
 /**

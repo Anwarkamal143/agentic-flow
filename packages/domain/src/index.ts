@@ -68,6 +68,7 @@ export * from './approvals.js';
 export * from './plan-view.js';
 export * from './capacity.js';
 export * from './dependency-base.js';
+export * from './delivery-order.js';
 export * from './questions.js';
 export * from './blocker-approvals.js';
 export * from './carry-over.js';
