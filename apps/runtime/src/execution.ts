@@ -47,6 +47,7 @@ import {
   SpecificationProposalSchema,
   DiscoveryProposalSchema,
   TaskDefinitionSchema,
+  resolveVerification,
   TaskPacketSchema,
   TaskResultSchema,
   type RuleIssue,
@@ -296,7 +297,10 @@ interface Inspection extends GitFacts {
 
 interface VerificationRunRecord {
   key: string;
+  /** The shell command that ran. */
   command: string;
+  /** The profile command and arguments the entry named; `null`: free shell. */
+  profileCommand: { name: string; args: string[] } | null;
   required: boolean;
   criteria: string[];
   exitCode: number | null;
@@ -2074,8 +2078,9 @@ export class TaskScheduler {
             (f) => f.path,
           );
     const criteria = criteriaCoveredBy(this.opts.db, job.id, definition.acceptance);
+    const section = frozenRepositoryConfig(job.configSnapshotJson, repo);
     return TaskPacketSchema.parse({
-      packetVersion: 1,
+      packetVersion: 2,
       job: { id: job.id, title: job.title, objective },
       task: {
         id: task.id,
@@ -2102,11 +2107,14 @@ export class TaskScheduler {
       verification: definition.verification.map((v) => ({
         key: v.key,
         command: v.command,
+        ...(v.args === undefined ? {} : { args: v.args }),
+        run: resolveVerification(v, section.commands.value).run,
         required: v.required,
       })),
       context: {
         artifacts: artifacts.map((a) => ({ id: a.id, kind: a.kind, contentHash: a.contentHash })),
         files,
+        instructionFiles: section.instructionFiles.value,
         priorFindings: input.priorFindings,
         answers: input.answers,
         guidance: input.guidance,
@@ -2494,8 +2502,11 @@ export class TaskScheduler {
    */
   private async verify(ctx: AttemptContext): Promise<VerificationRunRecord[] | undefined> {
     const records: VerificationRunRecord[] = [];
+    // Named commands resolve from the Job's frozen section, never the profile as it is now.
+    const { commands } = frozenRepositoryConfig(ctx.job.configSnapshotJson, ctx.repo);
     for (const v of ctx.definition.verification) {
       if (await this.stopped(ctx)) return undefined;
+      const { run: command, profileCommand } = resolveVerification(v, commands.value);
       const startedAt = new Date().toISOString();
       const spool = this.spoolOf(ctx.attemptId, `verify-${v.key}`);
       rmSync(spool, { recursive: true, force: true });
@@ -2507,7 +2518,7 @@ export class TaskScheduler {
       });
       const proc = spawnGuarded({
         command: 'sh',
-        args: ['-c', v.command],
+        args: ['-c', command],
         cwd: ctx.path,
         env: ctx.env,
         timeoutMs: this.verifyTimeoutMs,
@@ -2522,7 +2533,8 @@ export class TaskScheduler {
       const exitCode = exit.timedOut ? null : exit.code;
       records.push({
         key: v.key,
-        command: v.command,
+        command,
+        profileCommand,
         required: v.required,
         criteria: v.criteria,
         exitCode,
@@ -2533,7 +2545,8 @@ export class TaskScheduler {
         content: this.opts.artifacts.writeContent({
           source: 'verification',
           key: v.key,
-          command: v.command,
+          command,
+          ...(profileCommand === null ? {} : { profileCommand }),
           exitCode,
           timedOut: exit.timedOut,
           truncated: exit.truncated,
@@ -2874,6 +2887,9 @@ export class TaskScheduler {
           attemptId,
           commandKey: run.key,
           command: run.command,
+          commandName: run.profileCommand?.name ?? null,
+          commandArgsJson:
+            run.profileCommand === null ? null : JSON.stringify(run.profileCommand.args),
           required: run.required,
           headSha: head,
           baseSha: base,

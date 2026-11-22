@@ -417,7 +417,12 @@ export const verificationRuns = sqliteTable(
       .notNull()
       .references(() => attempts.id),
     commandKey: text('command_key').notNull(),
+    /** The shell command that ran. */
     command: text('command').notNull(),
+    /** The Repository Profile command the entry named (ADR-0051); `null`: free shell. */
+    commandName: text('command_name'),
+    /** That command's arguments (a JSON array); `null` with `command_name`. */
+    commandArgsJson: text('command_args_json'),
     required: integer('required', { mode: 'boolean' }).notNull(),
     headSha: text('head_sha').notNull(),
     baseSha: text('base_sha').notNull(),

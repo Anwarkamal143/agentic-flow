@@ -19,6 +19,8 @@ import {
   type PlanContext,
   type PlanProposal,
   type PlanTaskProposal,
+  type ProfileCommands,
+  type RepositoryEffectiveConfig,
   type TaskDefinition,
   withSensitivePaths,
 } from '@factory/domain';
@@ -61,11 +63,29 @@ export function sensitivePathsOf(
   job: { configSnapshotJson: string },
   repositories: readonly { id: string }[],
 ): Map<string, readonly string[]> {
-  const result = new Map<string, readonly string[]>();
+  return sectionsOf(db, job, repositories, (s) => s.sensitivePaths.value);
+}
+
+/** Each of the Job's Repositories' frozen named profile commands (by id), ADR-0051. */
+export function commandsOf(
+  db: FactoryDb | Tx,
+  job: { configSnapshotJson: string },
+  repositories: readonly { id: string }[],
+): Map<string, ProfileCommands> {
+  return sectionsOf(db, job, repositories, (s) => s.commands.value);
+}
+
+function sectionsOf<T>(
+  db: FactoryDb | Tx,
+  job: { configSnapshotJson: string },
+  repositories: readonly { id: string }[],
+  pick: (section: RepositoryEffectiveConfig) => T,
+): Map<string, T> {
+  const result = new Map<string, T>();
   for (const { id } of repositories) {
     const row = db.select().from(schema.repositories).where(eq(schema.repositories.id, id)).get();
     if (row === undefined) throw new Error(`no Repository ${id}`);
-    result.set(id, frozenRepositoryConfig(job.configSnapshotJson, row).sensitivePaths.value);
+    result.set(id, pick(frozenRepositoryConfig(job.configSnapshotJson, row)));
   }
   return result;
 }
@@ -95,6 +115,7 @@ export async function planContextOf(
     maxAttempts: config.maxAttempts.value,
     trackedFiles,
     sensitivePaths: sensitivePathsOf(db, job, repositories),
+    commands: commandsOf(db, job, repositories),
   };
 }
 

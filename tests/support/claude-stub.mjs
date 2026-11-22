@@ -86,6 +86,7 @@ const record = (extra) =>
       cwd: process.cwd(),
       pid: process.pid,
       promptOnArgv: args.some((a) => a.includes('You are the')),
+      prompt,
       ...extra,
     }) + '\n',
   );

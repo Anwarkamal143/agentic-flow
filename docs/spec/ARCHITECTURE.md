@@ -188,8 +188,9 @@ attempts(id, task_id, n, state, harness_id, session_ref, worktree_id,
 leases(resource_kind, resource_id, holder, lease_id, expires_at, heartbeat_at)
          -- PK (resource_kind, resource_id)
 worktrees(id, repository_id, path, branch, base_sha, state /*active|preserved|quarantined|removed*/)
-verification_runs(id, attempt_id, command_key, command, head_sha, exit_code,
-                  started_at, duration_ms, output_artifact_id)
+verification_runs(id, attempt_id, command_key, command, command_name?, command_args_json?,
+                  head_sha, exit_code, started_at, duration_ms, output_artifact_id)
+         -- command: the shell that ran; command_name/args: the profile command it named [Phase D]
 evidence(id, attempt_id, criterion_id?, kind, verdict, head_sha, base_sha, artifact_id)
          -- verdict: pass | fail | blocked | not_tested | not_applicable(+justification)
 reviews(id, attempt_id, reviewer_harness_id, head_sha, outcome, artifact_id,
@@ -267,14 +268,16 @@ The packet is what the factory **sends**. It is versioned (`packet_version`), st
 
 ```ts
 TaskPacket = {
-  packet_version: 1,
+  packet_version: 2,                       // 2 since Phase D (#102)
   job: { id, title, objective },
   task: { id, key, title, objective, role, risk: "low"|"medium"|"high" },
   repository: { id, worktree_path, base_branch, base_sha },
   scope: { writable: Glob[], forbidden: Glob[], read_hints: string[] },
   acceptance: { code: string, text: string, mandatory: boolean }[],
-  verification: { key: string, command: string, required: boolean }[],
-  context: { artifacts: ArtifactRef[], files: string[], prior_findings?: Finding[] },
+  verification: { key: string, command: string /* profile command name */, args?: string[],
+                  run: string /* the shell it resolves to */, required: boolean }[],
+  context: { artifacts: ArtifactRef[], files: string[], prior_findings?: Finding[],
+             instruction_files: string[] /* the frozen profile's; guidance only [Phase D] */ },
   skills: SkillRef[],
   limits: { max_turns, wall_clock_s, max_output_tokens? },
   protocol: { result_file: ".factory/result.json", may_ask_questions: boolean }

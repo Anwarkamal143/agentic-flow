@@ -41,8 +41,10 @@ import { PassLoop } from './pass-loop.js';
 import { currentSpec } from './criteria.js';
 import { queueNextStage } from './plan-approval.js';
 import {
+  commandsOf,
   persistPlanTasks,
   planContextOf,
+  sensitivePathsOf,
   replanRequestOf,
   repositoriesOf,
   type JobRepository,
@@ -56,6 +58,7 @@ import {
   proposalStage,
   renderPrompt,
   type ProposalStage,
+  type RepositoryPromptProfile,
 } from './proposals.js';
 import {
   awaitSpecChange,
@@ -259,11 +262,16 @@ export class StageScheduler {
             spec: this.opts.artifacts.readJson(respec.specArtifactId),
           };
 
+    // The planner is told each Repository's frozen profile commands and Sensitive Paths.
+    const profiles =
+      stage.stageId === 'planning' ? this.promptProfiles(job, repositories) : undefined;
+
     let rejected: RuleIssue[] | undefined;
     for (let n = 1; n <= MAX_RUNS; n++) {
       const prompt = renderPrompt(stage, {
         job,
         repositories,
+        ...(profiles === undefined ? {} : { profiles }),
         inputs,
         ...(rejected === undefined ? {} : { rejected }),
         ...(replanInput === undefined ? {} : { replan: replanInput }),
@@ -381,6 +389,19 @@ export class StageScheduler {
       ...(outcome.kind === 'invalid' ? { issues: outcome.issues } : {}),
     });
     return outcome;
+  }
+
+  private promptProfiles(
+    job: { configSnapshotJson: string },
+    repositories: readonly JobRepository[],
+  ): RepositoryPromptProfile[] {
+    const commands = commandsOf(this.opts.db, job, repositories);
+    const sensitive = sensitivePathsOf(this.opts.db, job, repositories);
+    return repositories.map((r) => ({
+      name: r.name,
+      commands: commands.get(r.id) ?? {},
+      sensitivePaths: sensitive.get(r.id) ?? [],
+    }));
   }
 
   /**

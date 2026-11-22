@@ -19,4 +19,4 @@ ADR-0051 decides that a Repository's Sensitive Paths are added to every Task's `
 - A change to a Sensitive Path fails the path-scope Gate with a `scope.forbidden` Finding naming the Sensitive Path glob (`tests/scenarios/sensitive-paths.test.ts`), and goes through the usual Rework.
 - A Task created before #101 and carried over onto a new Plan keeps its stored definition, without the Sensitive Paths; a Task created after it has them.
 - Widening for one Job stays a human edit of the profile before the Job is created (PRODUCT_SPEC story 40); `scope_change` is Phase E.
-- The planner's prompt does not yet list the Sensitive Paths; it learns them from the re-prompt. The prompt template is bumped with verification by command name (#102).
+- The planner's prompt does not yet list the Sensitive Paths; it learns them from the re-prompt. The prompt template is bumped with verification by command name (#102), which lists them (ADR-0062).

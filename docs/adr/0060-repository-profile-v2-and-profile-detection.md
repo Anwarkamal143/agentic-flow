@@ -23,5 +23,5 @@ ADR-0051 decides that a Repository Profile is proposed by Profile Detection, con
 ## Consequences
 
 - D4 is tested end to end (`tests/scenarios/repo-add.test.ts`): a `CLAUDE.md` stays byte-identical in the source and the Factory Clone, and is listed as an instruction file and a Sensitive Path.
-- The Sensitive Paths are stored and frozen here; #101 merges them into each Task's `forbidden` (ADR-0061). Instruction files are not yet given to the Task Packet.
+- The Sensitive Paths are stored and frozen here; #101 merges them into each Task's `forbidden` (ADR-0061). Instruction files are not yet given to the Task Packet (they are since #102, ADR-0062).
 - Detection covers `package.json` projects and GitHub Actions only.

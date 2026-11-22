@@ -572,6 +572,14 @@ function VerificationRuns({ attempt }: { attempt: Attempt }) {
               <TableRow key={r.id}>
                 <TableCell className="font-mono text-xs">{r.key}</TableCell>
                 <TableCell>
+                  {r.profileCommand === null ? null : (
+                    <div className="text-muted-foreground text-xs">
+                      profile command{' '}
+                      <code className="font-mono">
+                        {[r.profileCommand.name, ...r.profileCommand.args].join(' ')}
+                      </code>
+                    </div>
+                  )}
                   <code className="font-mono text-xs">{r.command}</code>
                 </TableCell>
                 <TableCell>{r.required ? 'yes' : 'no'}</TableCell>

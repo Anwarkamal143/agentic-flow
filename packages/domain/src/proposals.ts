@@ -6,6 +6,7 @@
  */
 import picomatch from 'picomatch';
 import { z } from 'zod';
+import type { ProfileCommand } from './profile.js';
 
 const text = z.string().trim().min(1).max(10_000);
 const shortText = z.string().trim().min(1).max(500);
@@ -55,9 +56,26 @@ const slug = z
   .string()
   .regex(/^[a-z0-9][a-z0-9-]{0,39}$/, 'must be a lowercase slug (a-z, 0-9, -), at most 40 long');
 
+/**
+ * What an argument to a profile command must match (ADR-0051): no
+ * whitespace, quote, glob or shell metacharacter. Arguments are shell-quoted
+ * and appended to the command's `run` anyway.
+ */
+export const VERIFICATION_ARG_PATTERN = /^[A-Za-z0-9._/:=@+,-]+$/;
+
 export const VerificationCommandSchema = z.object({
   key: slug,
+  /**
+   * A Repository Profile command name (ADR-0051), resolved from the Job's
+   * frozen per-Repository section; or, until #104 refuses it, a free shell
+   * command. A string that names a profile command is that command.
+   */
   command: z.string().trim().min(1).max(1000),
+  /**
+   * Arguments appended to a profile command marked `acceptsArgs`, each
+   * matching {@link VERIFICATION_ARG_PATTERN} (checked by `validatePlan`).
+   */
+  args: z.array(z.string().max(200)).max(20).optional(),
   required: z.boolean().default(true),
   /**
    * Codes of the Task's Acceptance Criteria this command verifies. Its exit
@@ -66,6 +84,39 @@ export const VerificationCommandSchema = z.object({
   criteria: z.array(z.string()).default([]),
 });
 export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
+
+/** A verification entry as the factory runs it. */
+export interface ResolvedVerification {
+  /** The shell command run in the Worktree. */
+  run: string;
+  /** The profile command and arguments it names; `null`: a free shell command. */
+  profileCommand: { name: string; args: string[] } | null;
+}
+
+/**
+ * How a verification entry runs (ADR-0051): a name of one of `commands` (the
+ * Job's frozen profile commands of the Task's Repository) runs that command's
+ * `run` with each argument shell-quoted and appended; anything else is free
+ * shell, run as written. Plan validation refuses arguments except on a
+ * profile command that accepts them, so free shell never carries any. Pure.
+ */
+export function resolveVerification(
+  entry: Pick<VerificationCommand, 'command' | 'args'>,
+  commands: Readonly<Record<string, ProfileCommand>>,
+): ResolvedVerification {
+  const args = entry.args ?? [];
+  const named = Object.hasOwn(commands, entry.command) ? commands[entry.command] : undefined;
+  const base = named?.run ?? entry.command;
+  return {
+    run: [base, ...args.map(shellQuote)].join(' '),
+    profileCommand: named === undefined ? null : { name: entry.command, args: [...args] },
+  };
+}
+
+/** `value` as one single-quoted POSIX shell word. */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
 
 export const TaskScopeSchema = z.object({
   writable: z.array(z.string()).min(1),
@@ -175,6 +226,11 @@ export interface PlanContext {
    * per-Repository section (ADR-0051). A Task's `writable` may not list one.
    */
   sensitivePaths: ReadonlyMap<string, readonly string[]>;
+  /**
+   * The named profile commands of each Repository (by id), from the Job's
+   * frozen per-Repository section (ADR-0051). A verification entry names one.
+   */
+  commands: ReadonlyMap<string, Readonly<Record<string, ProfileCommand>>>;
 }
 
 /**
@@ -214,6 +270,9 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
           message: `${at}: writable '${glob}' is a Sensitive Path of Repository ${repository.name}; Sensitive Paths are forbidden for every Task (a human removes one from the Repository Profile to allow it)`,
         });
       }
+      issues.push(
+        ...verificationArgIssues(task, repository.name, ctx.commands.get(repository.id) ?? {}),
+      );
     }
     for (const [list, globs] of [
       ['writable', task.scope.writable],
@@ -278,6 +337,47 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
       issues.push({
         rule: 'plan.mandatory_criteria_covered',
         message: `mandatory ${c.code} is covered by no Task`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * `plan.verification_args` (ADR-0051): arguments only on a profile command of
+ * the Task's Repository marked `acceptsArgs`, each matching
+ * {@link VERIFICATION_ARG_PATTERN}.
+ */
+function verificationArgIssues(
+  task: PlanTaskProposal,
+  repository: string,
+  commands: Readonly<Record<string, ProfileCommand>>,
+): RuleIssue[] {
+  const issues: RuleIssue[] = [];
+  for (const v of task.verification) {
+    const args = v.args ?? [];
+    if (args.length === 0) continue;
+    const at = `Task ${task.key}: verification ${v.key}`;
+    const named = Object.hasOwn(commands, v.command) ? commands[v.command] : undefined;
+    if (named === undefined) {
+      const names = Object.keys(commands).sort();
+      issues.push({
+        rule: 'plan.verification_args',
+        message: `${at}: '${v.command}' is not a profile command of Repository ${repository} (${names.length === 0 ? 'it has none' : names.join(', ')}); arguments are allowed only on a profile command that accepts them`,
+      });
+      continue;
+    }
+    if (!named.acceptsArgs) {
+      issues.push({
+        rule: 'plan.verification_args',
+        message: `${at}: profile command '${v.command}' of Repository ${repository} does not accept arguments (a human marks it acceptsArgs in the Repository Profile)`,
+      });
+      continue;
+    }
+    for (const arg of args.filter((a) => !VERIFICATION_ARG_PATTERN.test(a))) {
+      issues.push({
+        rule: 'plan.verification_args',
+        message: `${at}: argument ${JSON.stringify(arg)} must match ${VERIFICATION_ARG_PATTERN.source}`,
       });
     }
   }
