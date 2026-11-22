@@ -334,6 +334,11 @@ export const PullRequestRecordSchema = z.object({
   lastPolledAt: z.string().nullable(),
   /** The merge commit, once the poller saw the PR merged on GitHub. */
   mergeSha: z.string().nullable(),
+  /**
+   * The earlier PRs in Delivery Order that had not merged when this one was
+   * seen merged (#106, ADR-0066): an out-of-order merge. Empty otherwise.
+   */
+  mergedBefore: z.array(z.string()),
   /** GitHub's `mergeable_state` as last read. */
   mergeableState: z.string().nullable(),
   /** When the factory first saw the current head: the checks grace window starts here. */

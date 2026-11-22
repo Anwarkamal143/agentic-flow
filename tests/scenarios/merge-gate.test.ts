@@ -332,7 +332,7 @@ describe('the poller and the Merge Gate under never_auto', { timeout: 150_000 },
     expect(recorded).toMatchObject({ state: 'merged', mergeSha });
 
     const report = await reportOf(rt, job.id);
-    expect(report.reportVersion).toBe(6);
+    expect(report.reportVersion).toBe(7);
     expect(report.outcome).toBe('completed');
     expect(report.pullRequests).toEqual([expect.objectContaining({ state: 'merged', mergeSha })]);
     expect(report.pullRequests[0]?.ci?.checks).toEqual([

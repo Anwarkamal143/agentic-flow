@@ -59,6 +59,7 @@ import { latestStageRun } from './replan.js';
 import { describeTriggers, ensureComment, triggersAnswered } from './pr-feedback.js';
 import { defaultBranchTip, startBaseMergeIn } from './base-change.js';
 import { foreignCommitsOf, foreignHeadsOf } from './foreign-push.js';
+import { multiRepositoryOf } from './multi-repo.js';
 import { createHash } from 'node:crypto';
 
 /** The Task scheduler, which runs this Stage. */
@@ -1370,6 +1371,7 @@ export function pullRequestBodyInput(
       author: c.author,
     })),
     changedFiles,
+    multiRepository: multiRepositoryOf(db, job.id, task.repositoryId),
   };
 }
 
@@ -1416,6 +1418,8 @@ export function toPullRequestRecord(
     ...row,
     replacedByNumber: replacedBy?.number ?? null,
     changesRequestedBy: JSON.parse(row.changesRequestedJson) as unknown,
+    mergedBefore:
+      row.mergedBeforeJson === null ? [] : (JSON.parse(row.mergedBeforeJson) as unknown),
     gate: row.gateJson === null ? null : (JSON.parse(row.gateJson) as unknown),
     checks,
   });

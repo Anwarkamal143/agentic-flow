@@ -623,6 +623,25 @@ function writeDelivery(report: DeliveryReport): void {
     );
     const ci = version >= 6 ? pr.ci : null;
     if (ci !== null) lines.push(`    CI checks: ${ci.status}: ${ci.reason}`);
+    if (version >= 7 && pr.mergedBefore.length > 0) {
+      lines.push(`    merged out of order, before ${pr.mergedBefore.join(', ')}`);
+    }
+  }
+  const repositories = version >= 7 ? report.repositories : [];
+  if (repositories.length > 1) {
+    lines.push(`  Repositories, in Delivery Order:`);
+    for (const r of repositories) {
+      lines.push(
+        `    ${r.name}: ${r.status.replaceAll('_', ' ')}` +
+          (r.after.length === 0 ? '' : ` (after ${r.after.join(', ')})`) +
+          (r.pullRequest === null ? '' : `, ${r.pullRequest}`) +
+          (r.integration === null ? '' : `, ${r.integration.branch} (${r.integration.state})`) +
+          `, clone ${r.clonePath}`,
+      );
+      if (r.integration?.fetchCommand != null && r.pullRequest === null) {
+        lines.push(`      fetch from your checkout: ${r.integration.fetchCommand}`);
+      }
+    }
   }
   lines.push(...report.notes.map((n) => `  ${n}`));
   if (report.knownLimitations.length > 0) {

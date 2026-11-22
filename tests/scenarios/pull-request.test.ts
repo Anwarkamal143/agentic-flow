@@ -271,7 +271,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
     const approval = reviews.find(
       (r) => r.taskId === integrationTask?.id && r.outcome === 'approved',
     );
-    expect(approval?.promptTemplate.id).toBe('integration-review-packet@1');
+    expect(approval?.promptTemplate.id).toBe('integration-review-packet@2');
     const branch = `factory/${job.id}/integration`;
 
     // On the fake GitHub: one PR, correct base, head and body; its head SHA is the approved one.
@@ -335,7 +335,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
     const completed = await waitForJob(rt, job.id, (j) => j.status === 'completed', 30_000);
     expect(stagesOf(completed, 'merge')).toEqual(['succeeded']);
     const report = await reportOf(rt, job.id);
-    expect(report.reportVersion).toBe(6);
+    expect(report.reportVersion).toBe(7);
     expect(report.outcome).toBe('completed');
     expect(report.pullRequests).toEqual([
       {

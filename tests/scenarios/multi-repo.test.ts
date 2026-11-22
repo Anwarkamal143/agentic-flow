@@ -289,22 +289,35 @@ describe('multi-repo Jobs (#105)', { timeout: 90_000 }, () => {
       'src/math.ts',
     );
 
-    // The Delivery Report reads each Task's diff in its own Factory Clone, and says which
-    // Integration Branch it shows (the per-Repository report is a later version).
+    // The Delivery Report reads each Task's diff in its own Factory Clone, and shows each
+    // Repository's Integration Branch, delivered locally (no GitHub coordinates, #106).
     const artifacts = await json<{ id: string; kind: string }[]>(
       rt.request(`/v1/jobs/${jobId}/artifacts`),
     );
     const reportId = artifacts.find((a) => a.kind === 'report')?.id ?? '';
     const report = await json<{
       tasks: { key: string; changedFiles: string[] }[];
-      knownLimitations: string[];
+      notes: string[];
+      repositories: {
+        name: string;
+        clonePath: string;
+        status: string;
+        integration: { branch: string; fetchCommand: string | null } | null;
+      }[];
     }>(rt.request(`/v1/artifacts/${reportId}/content`));
     expect(report.tasks.map((t) => [t.key, t.changedFiles]).sort()).toEqual([
       ['api-expand', ['src/math.ts']],
       ['web-use', ['src/use-sum.ts']],
     ]);
-    expect(report.knownLimitations).toContain(
-      `This Job spans 2 Repositories (api, web); this report shows the Integration Branch of api only. web's Integration Branch is ${integration} in its own Factory Clone at ${web.clonePath}. The branches of several Repositories are not atomic: each is delivered on its own.`,
+    expect(
+      report.repositories.map((r) => [r.name, r.clonePath, r.status, r.integration?.branch]),
+    ).toEqual([
+      ['api', api.clonePath, 'delivered_locally', integration],
+      ['web', web.clonePath, 'delivered_locally', integration],
+    ]);
+    expect(report.repositories[1]?.integration?.fetchCommand).toContain(web.clonePath);
+    expect(report.notes).toContain(
+      'This Job spans 2 Repositories, delivered in the Delivery Order api → web (web after api), each with its own Integration Branch in its own Factory Clone. The branches are not atomic: each is delivered on its own.',
     );
   });
 

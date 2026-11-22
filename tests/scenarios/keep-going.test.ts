@@ -259,7 +259,7 @@ describe(
 
       // The Delivery Report v3: says plainly that the Job failed, lists every Task, offers D only.
       const report = await reportOf(rt, job.id);
-      expect(report.reportVersion).toBe(6);
+      expect(report.reportVersion).toBe(7);
       expect(report.outcome).toBe('failed');
       expect(report.statement).toMatch(/The Job failed/);
       expect(report.statement).toMatch(/partial results/);

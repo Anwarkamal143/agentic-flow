@@ -319,7 +319,7 @@ describe('the PR feedback loop', { timeout: 180_000 }, () => {
     const newHead = rework.headSha;
     expect(newHead).not.toBe(firstHead);
     expect(reviews.map((r) => [r.promptTemplate.id, r.outcome, r.headSha])).toEqual([
-      ['integration-review-packet@1', 'approved', newHead],
+      ['integration-review-packet@2', 'approved', newHead],
     ]);
 
     // The same PR, updated in place: a fast-forward to the new head, the body re-rendered.

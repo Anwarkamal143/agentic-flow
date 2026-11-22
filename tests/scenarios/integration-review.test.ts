@@ -260,8 +260,8 @@ describe('the Integration Review', { timeout: 120_000 }, () => {
     expect(
       integrationReviews.map((r) => [r.promptTemplate.id, r.outcome, r.headSha, r.baseSha]),
     ).toEqual([
-      ['integration-review-packet@1', 'changes_requested', merge.headSha, merge.baseSha],
-      ['integration-review-packet@1', 'approved', rework.headSha, merge.baseSha],
+      ['integration-review-packet@2', 'changes_requested', merge.headSha, merge.baseSha],
+      ['integration-review-packet@2', 'approved', rework.headSha, merge.baseSha],
     ]);
     expect(integrationReviews[0]?.findings).toMatchObject([
       { faultOrigin: 'implementation', blocking: true, problem: DUPLICATED },

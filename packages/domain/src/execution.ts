@@ -559,10 +559,26 @@ export const AttemptSchema = z.object({
 });
 export type Attempt = z.infer<typeof AttemptSchema>;
 
-// ---- Delivery Report (v6: v5 of ADR-0036 plus the merge and the CI checks, ADR-0037) ----
+// ---- Delivery Report (v7: v6 of ADR-0037 plus each Repository in Delivery Order, ADR-0066) ----
+
+/**
+ * Where one Repository of the Job got to (#106, ADR-0066): `merged` (its PR
+ * merged), `awaiting_merge` (its PR is open), `pr_closed` (closed without
+ * merging), `delivered_locally` (its Integration Branch is approved and no PR
+ * was opened: no GitHub coordinates, or the PR could not be opened), or
+ * `not_delivered` (its Integration Branch was not approved).
+ */
+export const RepositoryDeliveryStatusSchema = z.enum([
+  'merged',
+  'awaiting_merge',
+  'pr_closed',
+  'delivered_locally',
+  'not_delivered',
+]);
+export type RepositoryDeliveryStatus = z.infer<typeof RepositoryDeliveryStatusSchema>;
 
 export const DeliveryReportSchema = z.object({
-  reportVersion: z.literal(6),
+  reportVersion: z.literal(7),
   /** How the Job ended: a `failed` Job's approved branches are partial results. */
   outcome: z.enum(['completed', 'failed']),
   /** One plain sentence on the outcome, saying so when the Job failed. */
@@ -725,6 +741,38 @@ export const DeliveryReportSchema = z.object({
           ),
         })
         .nullable(),
+      /**
+       * The earlier PRs in Delivery Order (or Repositories, when they had
+       * none) that had not merged when this one was seen merged: merged out
+       * of order on GitHub (ADR-0052). Empty when in order or not merged.
+       */
+      mergedBefore: z.array(z.string()),
+    }),
+  ),
+  /**
+   * Every Repository of the Job (#106, ADR-0066), in Delivery Order (by name
+   * before a Plan), each with what it comes after, its status, its
+   * Integration Branch and its PR. `repository` and `integration` above
+   * describe the first by name, as in v6.
+   */
+  repositories: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      clonePath: z.string(),
+      /** The Repositories (by name) whose PRs must merge before this one's. */
+      after: z.array(z.string()),
+      status: RepositoryDeliveryStatusSchema,
+      integration: z
+        .object({
+          branch: z.string(),
+          state: TaskStateSchema,
+          headSha: z.string().nullable(),
+          fetchCommand: z.string().nullable(),
+        })
+        .nullable(),
+      /** `owner/name#number` of its current PR; `null` when none was opened. */
+      pullRequest: z.string().nullable(),
     }),
   ),
   knownLimitations: z.array(z.string()),

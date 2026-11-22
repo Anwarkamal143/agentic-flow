@@ -408,8 +408,8 @@ describe('a moved base (C2)', { timeout: 240_000 }, () => {
     ]);
     const newHead = String(attempts[1]?.headSha);
     expect(reviews.map((r) => [r.promptTemplate.id, r.headSha, r.reanchoredFrom])).toEqual([
-      ['integration-review-packet@1', attempts[0]?.headSha, null],
-      ['integration-review-packet@1', newHead, null],
+      ['integration-review-packet@2', attempts[0]?.headSha, null],
+      ['integration-review-packet@2', newHead, null],
     ]);
     expect(reviews[1]?.baseSha).toBe(movedBase);
     expect(reviews[1]?.sessionRef).not.toBeNull();
