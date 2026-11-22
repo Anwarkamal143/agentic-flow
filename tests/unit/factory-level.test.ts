@@ -45,6 +45,9 @@ describe('the Factory Level', () => {
       'concurrency.global',
       'concurrency.perRepository',
       'concurrency.perJob',
+      'concurrency.perProjectJobs',
+      'scheduling.agingStep',
+      'scheduling.agingIntervalSeconds',
     ]);
     expect(setFactoryConfigKey(before, 'concurrency.global', 2)).toEqual({
       ok: true,
@@ -55,9 +58,18 @@ describe('the Factory Level', () => {
       ok: false,
       code: 'invalid_config_value',
     });
-    expect(setFactoryConfigKey(before, 'concurrency.perProjectJobs', 2)).toMatchObject({
+    expect(setFactoryConfigKey(before, 'concurrency.perProjects', 2)).toMatchObject({
       ok: false,
       code: 'unknown_config_key',
+    });
+    // `perProjectJobs` (ADR-0050) takes a count or `unlimited`, nothing else.
+    expect(setFactoryConfigKey(before, 'concurrency.perProjectJobs', 'unlimited')).toEqual({
+      ok: true,
+      config: { concurrency: { perProjectJobs: 'unlimited' } },
+    });
+    expect(setFactoryConfigKey(before, 'concurrency.perProjectJobs', 0)).toMatchObject({
+      ok: false,
+      code: 'invalid_config_value',
     });
     expect(setFactoryConfigKey(before, 'maxAttempts', 2)).toEqual({
       ok: true,
