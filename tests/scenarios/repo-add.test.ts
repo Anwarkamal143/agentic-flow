@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createProject, json } from '../support/api.js';
@@ -14,7 +14,16 @@ interface RepositoryBody {
   remoteUrl: string | null;
   clonePath: string;
   defaultBranch: string;
-  profile: { commands: { test: string | null; typecheck: string | null } };
+  profile: {
+    version: number;
+    detection: string;
+    packageManager: string | null;
+    commands: Record<string, { run: string; acceptsArgs: boolean }>;
+    ciFiles: { path: string; checks: string[] }[];
+    instructionFiles: string[];
+    sensitivePaths: string[];
+    setup?: string;
+  };
   github: { owner: string; name: string } | null;
 }
 
@@ -45,7 +54,14 @@ describe('factory repo add', () => {
       source: repo,
       remoteUrl: null,
       defaultBranch: 'main',
-      profile: { commands: { test: 'npm test', typecheck: 'npm run typecheck' } },
+      profile: {
+        version: 2,
+        detection: 'detected',
+        commands: {
+          test: { run: 'npm test', acceptsArgs: false },
+          typecheck: { run: 'npm run typecheck', acceptsArgs: false },
+        },
+      },
     });
     expect(registered.clonePath).toBe(join(rt.home.workspaceRoot, 'clones', registered.id));
     expect(git(registered.clonePath, ['rev-parse', 'HEAD'])).toBe(git(repo, ['rev-parse', 'HEAD']));
@@ -104,6 +120,60 @@ describe('factory repo add', () => {
     for (const [file, text] of Object.entries(instructions)) {
       expect(readFileSync(join(repo, file), 'utf8'), `${file} byte-identical`).toBe(text);
     }
+    // D4: the instruction files are listed, never written, and are Sensitive Paths.
+    expect(res.stdout).toContain('instruction files: AGENTS.md, CLAUDE.md (listed, never written)');
+    expect(registered.profile.instructionFiles).toEqual(['AGENTS.md', 'CLAUDE.md']);
+    expect(registered.profile.sensitivePaths).toEqual(
+      expect.arrayContaining(['AGENTS.md', 'CLAUDE.md', '.env*', '.github/workflows/**']),
+    );
+    expect(
+      readFileSync(join(registered.clonePath, 'CLAUDE.md'), 'utf8'),
+      'nor in the Factory Clone',
+    ).toBe(instructions['CLAUDE.md']);
+  });
+
+  it('presents every detected field, saves them with --yes and never detects setup', async () => {
+    const rt = await startRuntime();
+    await createProject(rt);
+    const repo = tinyTsRepo();
+    const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    manifest.scripts = { ...manifest.scripts, lint: 'eslint .', setup: 'npm ci' };
+    writeFileSync(join(repo, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
+    mkdirSync(join(repo, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(repo, '.github', 'workflows', 'ci.yml'),
+      'on: [push]\njobs:\n  test:\n    name: Unit tests\n    runs-on: ubuntu-latest\n',
+    );
+    git(repo, ['add', '--all']);
+    git(repo, ['commit', '--quiet', '--no-gpg-sign', '-m', 'lint and CI']);
+    // Uncommitted changes are not what the Factory Clone gets, so detection ignores them.
+    writeFileSync(join(repo, 'AGENTS.md'), 'untracked\n');
+
+    const res = await rt.home.cli(['repo', 'add', repo, '--yes']);
+
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).toMatch(/package manager: npm/);
+    expect(res.stdout).toMatch(/lint: +npm run lint \(detected\)/);
+    expect(res.stdout).toContain('.github/workflows/ci.yml (candidate checks: Unit tests)');
+    expect(res.stdout).toContain('instruction files: none');
+    expect(res.stdout).toMatch(/Sensitive Paths \(no Task may write them\): \.env\*/);
+    expect(res.stdout).toMatch(/setup: +none/);
+    const [registered] = await json<[RepositoryBody]>(rt.request('/v1/repositories'));
+    expect(registered.profile).toMatchObject({
+      detection: 'detected',
+      packageManager: 'npm',
+      commands: {
+        lint: { run: 'npm run lint', acceptsArgs: false },
+        test: { run: 'npm test', acceptsArgs: false },
+        typecheck: { run: 'npm run typecheck', acceptsArgs: false },
+      },
+      ciFiles: [{ path: '.github/workflows/ci.yml', checks: ['Unit tests'] }],
+      instructionFiles: [],
+    });
+    expect(registered.profile.setup).toBeUndefined();
+    expect(Object.keys(registered.profile.commands)).not.toContain('setup');
   });
 
   it('refuses an origin URL with embedded credentials, never showing them', async () => {
@@ -172,7 +242,9 @@ describe('factory repo add', () => {
     expect(res.code, res.stderr).toBe(0);
     expect(res.stdout).toMatch(/typecheck: +npx tsc -p \. \(from --typecheck-command\)/);
     const [registered] = (await (await rt.request('/v1/repositories')).json()) as [RepositoryBody];
-    expect(registered.profile.commands).toEqual({ test: null, typecheck: 'npx tsc -p .' });
+    expect(registered.profile.commands).toEqual({
+      typecheck: { run: 'npx tsc -p .', acceptsArgs: false },
+    });
   });
 
   it('refuses a path that is not a git repository, and a second registration', async () => {

@@ -15,6 +15,8 @@ import {
   SetFactoryConfigInputSchema,
   SetProjectConfigInputSchema,
   RegisterRepositoryInputSchema,
+  ApplyProfileDetectionInputSchema,
+  SetProfileFieldInputSchema,
   type ApiError,
   type Billing,
   type GitHubState,
@@ -135,6 +137,17 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/v1/repositories/inspect', async (c) => {
     const input = await parseBody(c, InspectRepositoryInputSchema);
     return c.json(await deps.repositories.inspect(input.path));
+  });
+  app.post('/v1/repositories/:ref/profile/detect', async (c) =>
+    c.json(await deps.repositories.detectProfile(c.req.param('ref'))),
+  );
+  app.post('/v1/repositories/:ref/profile/apply', async (c) => {
+    const input = await parseBody(c, ApplyProfileDetectionInputSchema);
+    return c.json(deps.repositories.applyDetection(c.req.param('ref'), input));
+  });
+  app.post('/v1/repositories/:ref/profile/set', async (c) => {
+    const input = await parseBody(c, SetProfileFieldInputSchema);
+    return c.json(deps.repositories.setProfileField(c.req.param('ref'), input));
   });
   app.post('/v1/repositories', async (c) => {
     const input = await parseBody(c, RegisterRepositoryInputSchema);

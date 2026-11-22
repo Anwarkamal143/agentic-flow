@@ -343,6 +343,7 @@ const jobs = new JobService(
   recipeVersion,
 );
 
+const repositories = new RepositoryService(database.db, config.workspaceRoot, notify);
 const app = createApp({
   token,
   status: () => ({
@@ -376,10 +377,11 @@ const app = createApp({
       config.harness?.id === 'claude-code' ? config.harness.command : 'claude',
       config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
       staleConfigKeys(home, factoryLevel.show()),
+      repositories.undetectedProfiles(),
     ),
   factoryLevel,
   projects: new ProjectService(database.db, notify),
-  repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
+  repositories,
   jobs,
   inbox: new InboxService(
     database.db,

@@ -9,12 +9,18 @@ import {
   type ProjectSummary,
   type RegisterRepositoryInput,
   type RegisterRepositoryResult,
+  type ApplyProfileDetectionInput,
   type DetectedProfile,
+  type ProfileChange,
+  type ProfileDetection,
+  type ProfileUpdate,
+  type SetProfileFieldInput,
   type RepositoryInspection,
 } from '@factory/domain';
 import { resolveHome } from '@factory/home';
 import { findRuntime } from '../client.js';
 import { ask } from '../prompt.js';
+import { client } from './job.js';
 import { EXIT_NOT_RUNNING } from './lifecycle.js';
 
 /** Cloning a large repository can take a while; the runtime does it inside the request. */
@@ -220,4 +226,78 @@ export function profileLines(
     `  Sensitive Paths (no Task may write them): ${profile.sensitivePaths.join(', ')}`,
   );
   return lines.join('\n') + '\n';
+}
+
+function shownValue(value: unknown): string {
+  if (value === null || value === undefined) return 'none';
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+function changeLines(changes: readonly ProfileChange[]): string {
+  return changes
+    .map((c) => `  ${c.field}:\n    - ${shownValue(c.from)}\n    + ${shownValue(c.to)}\n`)
+    .join('');
+}
+
+/**
+ * `factory repo profile detect <repo> [--yes]`: Profile Detection over the
+ * source's HEAD again, shown as a diff against the saved profile; saved only
+ * once confirmed. The setup command and required checks are kept as they are.
+ */
+export async function repoProfileDetect(ref: string, opts: { yes: boolean }): Promise<number> {
+  const api = client();
+  if (api === undefined) return EXIT_NOT_RUNNING;
+  const path = `/v1/repositories/${encodeURIComponent(ref)}/profile/detect`;
+  const detection = await api.json<ProfileDetection>('POST', path);
+  const { repository } = detection;
+  process.stdout.write(
+    `Repository ${repository.name} (${repository.id}): Profile Detection proposes\n` +
+      profileLines(detection.detected),
+  );
+  if (detection.changes.length === 0) {
+    process.stdout.write('The saved profile already matches; nothing to change.\n');
+    return 0;
+  }
+  process.stdout.write(
+    `Changes to the saved profile (setup and required checks are kept):\n${changeLines(detection.changes)}`,
+  );
+  if (!opts.yes) {
+    const answer = (await ask('Save these changes? [y/N] '))?.trim();
+    if (answer === undefined || !/^y(es)?$/i.test(answer)) {
+      process.stderr.write('Nothing changed.\n');
+      return 1;
+    }
+  }
+  const body: ApplyProfileDetectionInput = {
+    detected: detection.detected,
+    basis: detection.current.confirmedAt,
+  };
+  await api.json<ProfileUpdate>(
+    'POST',
+    `/v1/repositories/${encodeURIComponent(repository.id)}/profile/apply`,
+    { body },
+  );
+  process.stdout.write(
+    `Saved the detected profile of ${repository.name}. Jobs already created keep the configuration they froze.\n`,
+  );
+  return 0;
+}
+
+/** `factory repo profile set <repo> <key> <value>`: one field; the runtime validates it. */
+export async function repoProfileSet(ref: string, key: string, value: string): Promise<number> {
+  const api = client();
+  if (api === undefined) return EXIT_NOT_RUNNING;
+  const body: SetProfileFieldInput = { key, value };
+  const update = await api.json<ProfileUpdate>(
+    'POST',
+    `/v1/repositories/${encodeURIComponent(ref)}/profile/set`,
+    { body },
+  );
+  process.stdout.write(
+    update.changes.length === 0
+      ? `Repository ${update.repository.name}: ${key} unchanged.\n`
+      : `Repository ${update.repository.name}:\n${changeLines(update.changes)}` +
+          'Jobs already created keep the configuration they froze; new Jobs use this profile.\n',
+  );
+  return 0;
 }

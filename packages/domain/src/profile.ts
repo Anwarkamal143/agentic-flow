@@ -305,36 +305,40 @@ function scalar(text: string): string {
   return trimmed.replace(/\s+#.*$/, '');
 }
 
-/** One field `repo profile detect` would change. */
-export interface ProfileChange {
-  field: keyof DetectedProfile | 'detection';
-  from: unknown;
-  to: unknown;
-}
+/** One profile field a change sets: shown before a detection is confirmed, and recorded after. */
+export const ProfileChangeSchema = z.object({
+  field: z.string(),
+  from: z.unknown(),
+  to: z.unknown(),
+});
+export type ProfileChange = z.infer<typeof ProfileChangeSchema>;
 
-const DETECTED_FIELDS = [
+const DIFF_FIELDS = [
+  'detection',
   'packageManager',
   'commands',
   'ciFiles',
   'instructionFiles',
   'sensitivePaths',
+  'requiredChecks',
+  'setup',
 ] as const;
+
+/** The fields that differ between two profiles (the confirmation stamp aside), with both values. */
+export function profileDiff(before: RepositoryProfile, after: RepositoryProfile): ProfileChange[] {
+  return DIFF_FIELDS.filter((f) => canonical(before[f]) !== canonical(after[f])).map((field) => ({
+    field,
+    from: before[field] ?? null,
+    to: after[field] ?? null,
+  }));
+}
 
 /** What saving `detected` over `current` changes, field by field (the diff to confirm). */
 export function profileChanges(
   current: RepositoryProfile,
   detected: DetectedProfile,
 ): ProfileChange[] {
-  const changes: ProfileChange[] = [];
-  if (current.detection !== 'detected') {
-    changes.push({ field: 'detection', from: current.detection, to: 'detected' });
-  }
-  for (const field of DETECTED_FIELDS) {
-    if (canonical(current[field]) !== canonical(detected[field])) {
-      changes.push({ field, from: current[field], to: detected[field] });
-    }
-  }
-  return changes;
+  return profileDiff(current, applyDetection(current, detected, current.confirmedBy, current.confirmedAt));
 }
 
 /** JSON with object keys sorted, so key order never reads as a change. */
@@ -454,3 +458,40 @@ export function setProfileField(
       };
   }
 }
+
+const RepositoryRefSchema = z.object({ id: z.string(), name: z.string() });
+
+/** `POST /v1/repositories/:ref/profile/detect`: a read-only proposal and the diff to confirm. */
+export const ProfileDetectionSchema = z.object({
+  repository: RepositoryRefSchema,
+  current: RepositoryProfileSchema,
+  detected: DetectedProfileSchema,
+  changes: z.array(ProfileChangeSchema),
+});
+export type ProfileDetection = z.infer<typeof ProfileDetectionSchema>;
+
+/**
+ * `POST /v1/repositories/:ref/profile/apply`: the detected fields as the human
+ * confirmed them. `basis` is the shown profile's `confirmedAt`: a profile
+ * changed since is refused, so a confirmation never lands on a newer profile.
+ */
+export const ApplyProfileDetectionInputSchema = z.object({
+  detected: DetectedProfileSchema,
+  basis: z.string().min(1),
+});
+export type ApplyProfileDetectionInput = z.infer<typeof ApplyProfileDetectionInputSchema>;
+
+/** `POST /v1/repositories/:ref/profile/set` (`repo profile set`): one field, as typed. */
+export const SetProfileFieldInputSchema = z.object({
+  key: z.string().min(1).max(200),
+  value: z.string().max(10_000),
+});
+export type SetProfileFieldInput = z.infer<typeof SetProfileFieldInputSchema>;
+
+/** What a profile change returns: the Repository's new profile and what changed. */
+export const ProfileUpdateSchema = z.object({
+  repository: RepositoryRefSchema,
+  profile: RepositoryProfileSchema,
+  changes: z.array(ProfileChangeSchema),
+});
+export type ProfileUpdate = z.infer<typeof ProfileUpdateSchema>;

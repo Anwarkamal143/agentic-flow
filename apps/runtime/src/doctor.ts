@@ -89,10 +89,18 @@ export interface StaleConfigKey {
   message: string;
 }
 
+export interface UndetectedProfile {
+  repositoryId: string;
+  name: string;
+  message: string;
+}
+
 export interface DoctorReport {
   checkedAt: string;
   /** `config.json` keys that are stale; empty when there are none. */
   staleConfigKeys: StaleConfigKey[];
+  /** Repositories whose profile was upgraded from v1 without detection (ADR-0060); empty when none. */
+  undetectedProfiles: UndetectedProfile[];
   tools: ToolCheck[];
   credentials: CredentialCheck[];
   /** `null` when the configured Harness isn't Claude Code. */
@@ -152,6 +160,7 @@ export async function runDoctor(
   claudeCommand = 'claude',
   billing?: Billing,
   staleConfigKeys: StaleConfigKey[] = [],
+  undetectedProfiles: UndetectedProfile[] = [],
 ): Promise<DoctorReport> {
   const tools = await Promise.all(
     TOOLS.map((spec) =>
@@ -196,6 +205,7 @@ export async function runDoctor(
   return {
     checkedAt: new Date().toISOString(),
     staleConfigKeys,
+    undetectedProfiles,
     tools,
     credentials,
     billing: billing === undefined ? null : billingCheck(billing, env),

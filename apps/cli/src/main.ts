@@ -17,7 +17,7 @@ import { jobCancel, jobCreate, jobList, jobReplan, jobShow } from './commands/jo
 import { logs } from './commands/logs.js';
 import { planEdit, planRaw, planRequestChanges } from './commands/plan.js';
 import { projectConfigSet, projectCreate, projectList, projectShow } from './commands/project.js';
-import { repoAdd } from './commands/repo.js';
+import { repoAdd, repoProfileDetect, repoProfileSet } from './commands/repo.js';
 import { start, status, stop } from './commands/lifecycle.js';
 
 const USAGE = `Usage: factory <command> [options]
@@ -50,7 +50,17 @@ Commands:
                                   Factory Clone and save its confirmed commands (your
                                   checkout is never modified);
                                   --setup runs in each Worktree before the Harness and
-                                  verification (for example "npm ci")
+                                  verification (for example "npm ci"); every field of the
+                                  detected Repository Profile is shown first (--yes
+                                  accepts them); setup is never detected
+  repo profile detect <repo> [--yes]
+                                  Re-run Profile Detection on the source's HEAD and show
+                                  the diff against the saved profile; saved once confirmed
+  repo profile set <repo> <key> <value>
+                                  Set one profile field: commands.<name> (empty removes),
+                                  commands.<name>.acceptsArgs true|false, packageManager,
+                                  sensitivePaths, instructionFiles, requiredChecks (JSON
+                                  arrays), setup (empty removes)
   job create --title <text> [--project <id|name>] [--repo <id|name>]
              [--description <text>] [--per-repository <n>] [--per-job <n>]
              [--merge-policy <policy>]
@@ -122,6 +132,7 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'repo': {
       const [sub, ...subArgs] = rest;
+      if (sub === 'profile') return repoProfile(subArgs);
       if (sub !== 'add') {
         process.stderr.write(`factory: unknown repo command '${sub ?? ''}'\n\n${USAGE}`);
         return 2;
@@ -238,6 +249,35 @@ function config(argv: string[]): Promise<number> | number {
       process.stderr.write(`factory: unknown config command '${sub ?? ''}'\n\n${USAGE}`);
       return 2;
   }
+}
+
+function repoProfile(argv: string[]): Promise<number> | number {
+  const [action, ...args] = argv;
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: action === 'detect' ? { yes: { type: 'boolean', short: 'y' } } : {},
+  });
+  if (action === 'detect') {
+    const [ref, ...extra] = positionals;
+    if (ref === undefined || extra.length > 0) {
+      process.stderr.write(`factory: repo profile detect takes one Repository\n\n${USAGE}`);
+      return 2;
+    }
+    return repoProfileDetect(ref, { yes: values.yes === true });
+  }
+  if (action === 'set') {
+    const [ref, key, value, ...extra] = positionals;
+    if (ref === undefined || key === undefined || value === undefined || extra.length > 0) {
+      process.stderr.write(
+        `factory: repo profile set takes <repo> <key> <value> (quote the value)\n\n${USAGE}`,
+      );
+      return 2;
+    }
+    return repoProfileSet(ref, key, value);
+  }
+  process.stderr.write(`factory: unknown repo profile command '${action ?? ''}'\n\n${USAGE}`);
+  return 2;
 }
 
 function project(argv: string[]): Promise<number> | number {
