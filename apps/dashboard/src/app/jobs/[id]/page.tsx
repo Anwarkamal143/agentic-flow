@@ -7,6 +7,7 @@ import {
   StageRuns,
   Tasks,
 } from '@/components/job-sections';
+import { EffectiveConfigCard } from '@/components/effective-config';
 import { JobTimeline } from '@/components/live';
 import { PlanViewCard } from '@/components/plan-view';
 import { GitHubPauseNotice, RuntimeUnavailableNotice } from '@/components/states';
@@ -45,6 +46,11 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
       <StageRuns job={job} />
       <PullRequests pullRequests={pullRequests} />
       <AcceptanceCriteria criteria={criteria} />
+      <EffectiveConfigCard
+        config={job.effectiveConfig}
+        title="Configuration (frozen at creation)"
+        description="The Effective Configuration this Job froze when it was created. A later config change reaches only new Jobs."
+      />
       {plan === null ? (
         <Card data-testid="plan" id="plan">
           <CardHeader>

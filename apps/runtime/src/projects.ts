@@ -10,6 +10,7 @@ import {
   setProjectConfigKey,
   TERMINAL_JOB_STATUSES,
   type CreateProjectInput,
+  type EffectiveConfigPreview,
   type Project,
   type ProjectConfig,
   type ProjectDetail,
@@ -19,6 +20,7 @@ import {
 } from '@factory/domain';
 import { asc, eq } from 'drizzle-orm';
 import { assertNarrowing } from './config-tree.js';
+import { resolveProjectConfig } from './effective-config.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 import { toRepository } from './repositories.js';
@@ -115,6 +117,18 @@ export class ProjectService {
     return { ...project, repositories, activeJobs: this.activeJobs().get(project.id) ?? [] };
   }
 
+  /** What a new Job of the Project would freeze now (ADR-0059); never stored. */
+  effectiveConfig(ref: string): EffectiveConfigPreview {
+    const project = this.find(this.db, ref);
+    const row = this.db
+      .select()
+      .from(schema.projects)
+      .where(eq(schema.projects.id, project.id))
+      .get();
+    if (row === undefined) throw new Error(`Project ${project.id} vanished`);
+    return previewOf(this.db, row, null);
+  }
+
   /** `project config set`: one key, validated by the Project config schema. */
   setConfigKey(ref: string, input: SetProjectConfigInput): Project {
     const updated = this.db.transaction(
@@ -196,6 +210,32 @@ function writeConfig(
     payload: { ...extra, before: project.config, after: config },
   });
   return { ...project, config };
+}
+
+/**
+ * The preview of `project`: its resolution with no Job-level overrides, narrowed to
+ * `repositoryId`'s section when given. A widened stored level is `409`, as `job create` would be.
+ */
+export function previewOf(
+  db: FactoryDb | Tx,
+  project: typeof schema.projects.$inferSelect,
+  repositoryId: string | null,
+): EffectiveConfigPreview {
+  const resolution = resolveProjectConfig(db, project);
+  if (!resolution.ok) throw new ApiFailure(409, resolution.code, resolution.message);
+  const { config } = resolution;
+  return {
+    projectId: project.id,
+    projectName: project.name,
+    repositoryId,
+    config:
+      repositoryId === null
+        ? config
+        : {
+            ...config,
+            repositories: config.repositories.filter((r) => r.repositoryId === repositoryId),
+          },
+  };
 }
 
 export function toProject(row: typeof schema.projects.$inferSelect): Project {

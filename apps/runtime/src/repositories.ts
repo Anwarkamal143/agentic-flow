@@ -12,6 +12,7 @@ import {
   chooseProject,
   coordinatesFromRemoteUrl,
   EffectiveConfigSchema,
+  type EffectiveConfigPreview,
   repositoryConfigOf,
   type RepositoryEffectiveConfig,
   formatCoordinates,
@@ -40,7 +41,7 @@ import { and, eq, or } from 'drizzle-orm';
 import { assertNarrowing } from './config-tree.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
-import { toProject } from './projects.js';
+import { previewOf, toProject } from './projects.js';
 
 const ACTOR = 'user:local';
 
@@ -208,6 +209,24 @@ export class RepositoryService {
       }
       throw err;
     }
+  }
+
+  /** What a new Job would freeze now for this Repository (ADR-0059): the Job-wide values and its section. */
+  effectiveConfig(id: string): EffectiveConfigPreview {
+    const repo = this.db
+      .select({ projectId: schema.repositories.projectId })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, id))
+      .get();
+    if (repo === undefined)
+      throw new ApiFailure(404, 'repository_not_found', `no Repository ${id}`);
+    const project = this.db
+      .select()
+      .from(schema.projects)
+      .where(eq(schema.projects.id, repo.projectId))
+      .get();
+    if (project === undefined) throw new Error(`Repository ${id} has no Project`);
+    return previewOf(this.db, project, id);
   }
 
   listRepositories(): Repository[] {

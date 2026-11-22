@@ -21,6 +21,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               <Link href="/" className="text-sm text-muted-foreground hover:text-foreground">
                 Jobs
               </Link>
+              <Link
+                href="/projects"
+                className="text-sm text-muted-foreground hover:text-foreground"
+              >
+                Projects
+              </Link>
               <Link href="/inbox" className="text-sm text-muted-foreground hover:text-foreground">
                 Inbox
               </Link>
