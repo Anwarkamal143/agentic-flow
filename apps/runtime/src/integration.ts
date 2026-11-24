@@ -83,6 +83,8 @@ export function startIntegration(
   jobId: string,
   step: StageRunStepper,
   actor: string,
+  /** Repositories held by `repository_not_writable` (#108): not integrated, not delivered. */
+  held: readonly string[] = [],
 ): boolean {
   const state = readJobState(tx, jobId);
   const integration = latestStageRun(state, 'integration');
@@ -95,8 +97,14 @@ export function startIntegration(
     .from(schema.jobRepositories)
     .where(eq(schema.jobRepositories.jobId, jobId))
     .all();
-  step(integration, 'queued', { reason: 'every Plan Task is approved' });
+  step(integration, 'queued', {
+    reason:
+      held.length === 0
+        ? 'every Plan Task is approved'
+        : 'every Plan Task of the Repositories that are not held is approved',
+  });
   for (const repo of repositories) {
+    if (held.includes(repo.id)) continue;
     const planTasks = planTasksOf(tx, jobId, repo.id);
     if (planTasks.length === 0) continue;
     const definition: TaskDefinition = integrationDefinition(

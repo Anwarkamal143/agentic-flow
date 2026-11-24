@@ -393,6 +393,14 @@ export class InboxService {
       return this.get(item.id);
     }
 
+    if (input.option === 'retry_check') {
+      // The permission was fixed: check again (#108, ADR-0068).
+      this.decideOnly(item, input, actor, null, (tx, state, step) => {
+        retryWritabilityCheck(tx, { item, actor }, state, step);
+      });
+      return this.get(item.id);
+    }
+
     if (input.option === 'grant_replan') {
       // The held request is a Replan's, or a re-specification's (ADR-0031).
       if (this.artifacts.get(item.subjectRef).kind === 'respec_request') {
@@ -1190,6 +1198,54 @@ function requireAttemptRow(tx: Tx, id: string): typeof schema.attempts.$inferSel
   const row = tx.select().from(schema.attempts).where(eq(schema.attempts.id, id)).get();
   if (row === undefined) throw new Error(`no Attempt ${id}`);
   return row;
+}
+
+/**
+ * `retry_check` on a `repository_not_writable` Blocker Approval (#108,
+ * ADR-0068). A refused push: `pull_request` is queued again (the PRs already
+ * open are left as they are). A Task the preflight blocked: it is readied, so
+ * the preflight runs again before its first Attempt, and its Stage queued
+ * again. Refused (409 `partial_delivery_started`) once `execution` went on
+ * without it: the other Repositories were delivered, and this Job can't bring
+ * the held one back in; cancelling the Job remains.
+ */
+function retryWritabilityCheck(
+  tx: Tx,
+  op: { item: ApprovalRow; actor: string },
+  state: JobState,
+  step: StageRunStepper,
+): void {
+  const { item, actor } = op;
+  const reason = `Blocker Approval ${item.id}: ${actor} asked to check again`;
+  const pr = state.stageRuns.filter((r) => r.stageId === 'pull_request').at(-1);
+  const prBlocker =
+    pr?.blockerJson == null ? undefined : BlockerSchema.parse(JSON.parse(pr.blockerJson));
+  if (
+    pr?.state === 'blocked' &&
+    prBlocker?.reason === 'repository_not_writable' &&
+    prBlocker.attemptId === item.subjectRef
+  ) {
+    step(pr, 'queued', { reason });
+    return;
+  }
+  const { task, blocker } = blockedTaskOf(tx, item);
+  if (blocker.reason !== 'repository_not_writable') {
+    throw new Error(`Blocker Approval ${item.id} holds no repository_not_writable Blocker`);
+  }
+  const stageId = stageIdOfTask(tx, task.id);
+  const stage = state.stageRuns.filter((r) => r.stageId === stageId).at(-1);
+  if (stage === undefined || !['running', 'blocked', 'waiting_human'].includes(stage.state)) {
+    throw new ApiFailure(
+      409,
+      'partial_delivery_started',
+      `the Job's other Repositories were delivered without Task ${task.key}'s (its ${stageId} Stage is ${stage?.state ?? 'missing'}), so checking again can't bring it back into this Job; cancel the Job and create a new one for that Repository`,
+    );
+  }
+  stepTask(tx, { jobId: item.jobId, actor }, task, 'ready', {
+    reason: 'retry_check',
+    payload: { approvalId: item.id },
+  });
+  requeueExecution(tx, state, step, reason, task);
 }
 
 /**

@@ -24,6 +24,7 @@ import {
   TaskStateSchema,
   DeliveredSetupSchema,
   NOT_ATOMIC,
+  partialCompletion,
   type DeliveryReport,
   type PullRequestRecord,
   type RepositoryDeliveryStatus,
@@ -205,7 +206,31 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
   }
   const skipped = skippedReason(db, jobId, 'pull_request');
   if (skipped !== undefined) notes.push(`No pull request was opened: ${skipped}.`);
-  const perRepository = repositoryDeliveries(db, jobId, plan?.id, repositories, pullRequests);
+  const perRepository = repositoryDeliveries(
+    db,
+    jobId,
+    plan?.id,
+    repositories,
+    pullRequests,
+    tasks.filter((t) => t.planArtifactId === plan?.id),
+  );
+  // Partial Completion (#108): some Repositories delivered, others not. Held by
+  // `repository_not_writable`, the Job stays blocked; it is never a success.
+  const partial = partialCompletion(perRepository.map((r) => r.status));
+  const held = perRepository.filter((r) => r.blocker?.reason === 'repository_not_writable');
+  const blockedOutcome = partial !== null && held.length > 0 && outcome !== 'failed';
+  if (partial !== null) {
+    const missing = perRepository
+      .filter((r) => r.status === 'not_delivered' || r.status === 'pr_closed')
+      .map((r) => `${r.name} (${r.blocker?.reason ?? r.status})`);
+    notes.push(
+      `${partial.line}. Not delivered: ${missing.join(', ')}.${
+        blockedOutcome
+          ? ' The Job stays blocked until the Blocker is cleared or the Job is cancelled.'
+          : ''
+      }`,
+    );
+  }
   if (repositories.length > 1) {
     const order = perRepository.map((r) => r.name).join(' → ');
     const afters = perRepository
@@ -399,10 +424,17 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       );
     }
   }
+  const delivering = perRepository.filter((r) => !held.includes(r)).map((r) => r.name);
   return DeliveryReportSchema.parse({
     reportVersion: 7,
-    outcome,
-    statement,
+    outcome: blockedOutcome ? 'blocked' : outcome,
+    statement: blockedOutcome
+      ? `The Job is blocked (${partial.line}): ${delivering.join(', ')} ${delivering.length === 1 ? 'was' : 'were'} delivered, and ${held
+          .map((r) => `${r.name} was not: ${r.blocker?.detail ?? 'no detail'}`)
+          .join(
+            '; ',
+          )}. The pull requests are not atomic. The Job stays blocked until the Blocker is cleared or the Job is cancelled.`
+      : statement,
     job: { id: job.id, title: job.title },
     repository: { id: repo.id, name: repo.name, clonePath: repo.clonePath, source: repo.source },
     branches,
@@ -429,6 +461,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
       mergedBefore: pr.mergedBefore,
     })),
     repositories: perRepository,
+    partialCompletion: partial,
     knownLimitations: limitations,
   } satisfies DeliveryReport);
 }
@@ -444,6 +477,8 @@ function repositoryDeliveries(
   planId: string | undefined,
   repositories: readonly (typeof schema.repositories.$inferSelect)[],
   pullRequests: readonly PullRequestRecord[],
+  /** The newest Plan's Tasks, in Plan order: a blocked one says why its Repository was not delivered. */
+  planTasks: readonly (typeof schema.tasks.$inferSelect)[],
 ): DeliveryReport['repositories'] {
   const order = storedDeliveryOrder(db, jobId) ?? [];
   const rank = (id: string) => {
@@ -483,8 +518,22 @@ function repositoryDeliveries(
                 fetchCommand: approved ? fetchCommand(r.clonePath, integration.branch) : null,
               },
         pullRequest: pr === undefined ? null : `${pr.owner}/${pr.name}#${String(pr.number)}`,
+        blocker: status === 'not_delivered' ? blockerOf(planTasks, r.id) : null,
       };
     });
+}
+
+/** The first blocked Plan Task's Blocker in `repositoryId`, in Plan order, or `null`. */
+function blockerOf(
+  planTasks: readonly (typeof schema.tasks.$inferSelect)[],
+  repositoryId: string,
+): DeliveryReport['repositories'][number]['blocker'] {
+  const task = planTasks.find(
+    (t) => t.repositoryId === repositoryId && t.state === 'blocked' && t.blockerJson !== null,
+  );
+  if (task?.blockerJson == null) return null;
+  const blocker = BlockerSchema.parse(JSON.parse(task.blockerJson));
+  return { reason: blocker.reason, detail: blocker.detail };
 }
 
 /** The Merge Gate's checks condition of a PR as last polled, with its checks. */

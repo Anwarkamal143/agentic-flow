@@ -100,6 +100,7 @@ import { claimNextTask, heartbeatIntervalMs, leaseExpiry } from './claim.js';
 import { heartbeatTick, sweptAttempt } from './sweeper.js';
 import { criteriaCoveredBy, currentSpec } from './criteria.js';
 import { blockOnBaseConflict, makeDependencyBase } from './dependency-base.js';
+import { blockNotWritable, checkWritable, recordUnchecked } from './writability.js';
 import { settleExecution } from './keep-going.js';
 import {
   blockOnIntegrationConflict,
@@ -673,6 +674,19 @@ export class TaskScheduler {
       .where(eq(schema.attempts.taskId, taskId))
       .orderBy(desc(schema.attempts.n))
       .get();
+    // Before the first Attempt, the factory checks it can deliver to the Repository (#108).
+    if (previous === undefined) {
+      const writable = await checkWritable(repo, this.opts.github);
+      if (writable.kind === 'not_writable') {
+        // The exact reason, never an Attempt (ADR-0068): a human fixes it and checks again.
+        blockNotWritable(db, { jobId: job.id, actor: ACTOR }, taskId, writable.detail);
+        this.opts.onCommit();
+        return;
+      }
+      if (writable.kind === 'unchecked') {
+        recordUnchecked(db, { jobId: job.id, actor: ACTOR }, taskId, writable.detail);
+      }
+    }
     // The Integration Task's first Attempt merges and verifies; no Harness runs (ADR-0034).
     if (task.kind === 'integration' && previous === undefined) {
       await this.runMerge(harness, { task, definition, job, repo, n: 1 }, slot);

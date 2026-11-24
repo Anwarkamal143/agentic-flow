@@ -6,7 +6,13 @@
  * Report lists the approved Task Branches as partial results.
  */
 import { schema, type Tx } from '@factory/db';
-import { BlockerSchema, executionOutcome, TaskStateSchema, type Blocker } from '@factory/domain';
+import {
+  BlockerSchema,
+  executionOutcome,
+  partialDelivery,
+  TaskStateSchema,
+  type Blocker,
+} from '@factory/domain';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { readJobState, type JobState, type StageRunStepper } from './engine.js';
 import { settleIntegration, startIntegration } from './integration.js';
@@ -92,9 +98,27 @@ function settlePlanTasks(tx: Tx, state: JobState, step: StageRunStepper): void {
     case 'unchanged':
       return;
     case 'waiting_human':
-    case 'blocked':
+    case 'blocked': {
+      // Only an unwritable Repository holds the Job, and every other one is approved:
+      // those are delivered without it, a Partial Completion (#108, ADR-0068).
+      const partial = partialDelivery(
+        tasks.map((t) => ({
+          repositoryId: t.repositoryId,
+          state: TaskStateSchema.parse(t.state),
+          blocker: t.blockerJson === null ? null : BlockerSchema.parse(JSON.parse(t.blockerJson)),
+        })),
+      );
+      if (partial !== null) {
+        const reason = `every Plan Task of the Repositories it can deliver to is approved; ${String(partial.held.length)} Repositor${partial.held.length === 1 ? 'y is' : 'ies are'} not writable (repository_not_writable) and held`;
+        step(execution, 'succeeded', { reason });
+        if (!startIntegration(tx, state.job.id, step, 'system:scheduler', partial.held)) {
+          queueClosure();
+        }
+        return;
+      }
       step(execution, outcome.kind, { blocker: outcome.blocker });
       return;
+    }
     case 'failed':
       step(execution, 'failed', {
         failure: {

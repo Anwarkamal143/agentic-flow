@@ -12,6 +12,7 @@ import { AnsweredQuestionSchema, InboxQuestionSchema } from './questions.js';
 import { GrantGuidanceSchema } from './blocker-approvals.js';
 import { PullRequestStateSchema } from './pull-request.js';
 import { PrFeedbackEntrySchema } from './pr-feedback.js';
+import { BlockerReasonSchema } from './rework.js';
 
 // ---- Task states (ARCHITECTURE §4.4) ---------------------------------------
 
@@ -579,8 +580,12 @@ export type RepositoryDeliveryStatus = z.infer<typeof RepositoryDeliveryStatusSc
 
 export const DeliveryReportSchema = z.object({
   reportVersion: z.literal(7),
-  /** How the Job ended: a `failed` Job's approved branches are partial results. */
-  outcome: z.enum(['completed', 'failed']),
+  /**
+   * How the Job ended: a `failed` Job's approved branches are partial results.
+   * `blocked` (#108): some Repositories were delivered while others are held by
+   * `repository_not_writable`; the Job stays blocked (a Partial Completion).
+   */
+  outcome: z.enum(['completed', 'failed', 'blocked']),
   /** One plain sentence on the outcome, saying so when the Job failed. */
   statement: z.string(),
   job: z.object({ id: z.string(), title: z.string() }),
@@ -773,8 +778,26 @@ export const DeliveryReportSchema = z.object({
         .nullable(),
       /** `owner/name#number` of its current PR; `null` when none was opened. */
       pullRequest: z.string().nullable(),
+      /**
+       * Why it was not delivered when a Task of it is blocked (#108): the first
+       * blocked Plan Task's Blocker, in Plan order. `null` otherwise; reports
+       * written before #108 have none.
+       */
+      blocker: z
+        .object({ reason: BlockerReasonSchema, detail: z.string() })
+        .nullable()
+        .default(null),
     }),
   ),
+  /**
+   * Partial Completion (#108, GLOSSARY): some Repositories delivered and
+   * others not, as `partialCompletion()` counts them; `null` when every
+   * Repository, or none, was delivered. Reports written before #108 have none.
+   */
+  partialCompletion: z
+    .object({ delivered: z.number().int(), total: z.number().int(), line: z.string() })
+    .nullable()
+    .default(null),
   knownLimitations: z.array(z.string()),
 });
 export type DeliveryReport = z.infer<typeof DeliveryReportSchema>;

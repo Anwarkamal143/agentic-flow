@@ -9,6 +9,7 @@ import type { ArtifactStore } from './artifacts.js';
 import { buildDeliveryReport } from './delivery.js';
 import { changeJob, stepWorktree, type JobState } from './engine.js';
 import { requireWorktree } from './worktree.js';
+import { heldRepositoryBlocker } from './writability.js';
 
 /** The Task scheduler, which runs closure. */
 const ACTOR = 'system:scheduler';
@@ -142,8 +143,13 @@ export async function runClosure(
     deps.onCommit();
   }
 
-  changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (_, state, step) => {
-    step(requireStageRun(state, stageRunId, 'running'), 'succeeded');
+  changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx, state, step) => {
+    const run = requireStageRun(state, stageRunId, 'running');
+    // A Partial Completion (#108, ADR-0068): a Repository held by repository_not_writable
+    // was not delivered, so the Job stays blocked on it until a human cancels.
+    const held = heldRepositoryBlocker(tx, jobId);
+    if (held !== undefined) step(run, 'blocked', { blocker: held });
+    else step(run, 'succeeded');
   });
   deps.onCommit();
 }

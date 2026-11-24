@@ -12,6 +12,10 @@
 import type { RepositoryDeliveryStatus, TaskState } from './execution.js';
 import type { Blocker } from './rework.js';
 
+/** What a human does about `repository_not_writable`, for the Blocker and its Approval. */
+export const NOT_WRITABLE_ACTION =
+  'make the Factory Clone writable by the factory, or give the GitHub token push permission on the repository, then decide the Blocker Approval in the Inbox: check again, or cancel the Job';
+
 /** What the GitHub port's permission read returned, without importing the port. */
 export type PushPermissionRead =
   | { ok: true; push: boolean }
