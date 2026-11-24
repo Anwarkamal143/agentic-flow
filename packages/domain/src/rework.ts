@@ -153,6 +153,17 @@ export const BlockerReasonSchema = z.enum([
    * permission and checks again, or cancels.
    */
   'repository_not_writable',
+  /**
+   * A proposal Stage (triage, specification) still has a Discoverable question
+   * after its one discovery re-run (ADR-0071): a human is never asked one, so
+   * the Stage Run blocks with no Question. Held by the Stage Run only.
+   */
+  'discoverable_unresolved',
+  /**
+   * A proposal Stage asked humans again after `maxQuestions` Question batches
+   * (ADR-0071): no Question is opened and the Stage Run blocks.
+   */
+  'clarification_cap_reached',
 ]);
 
 /**

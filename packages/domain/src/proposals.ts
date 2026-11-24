@@ -6,6 +6,7 @@
  */
 import picomatch from 'picomatch';
 import { z } from 'zod';
+import { ProposalQuestionsSchema } from './clarification.js';
 import { deliveryOrder } from './delivery-order.js';
 import type { ProfileCommand } from './profile.js';
 
@@ -27,6 +28,8 @@ export const TriageProposalSchema = z.object({
    * ignored when the operator named it (or the Project has only one).
    */
   repositories: z.array(shortText).min(1).max(20).optional(),
+  /** Open questions, by category, routed in code (ADR-0071). */
+  questions: ProposalQuestionsSchema,
 });
 export type TriageProposal = z.infer<typeof TriageProposalSchema>;
 
@@ -121,6 +124,8 @@ export const SpecificationProposalSchema = z.object({
   edgeCases: z.array(shortText),
   securityConsiderations: z.array(shortText),
   definitionOfDone: z.array(shortText).min(1),
+  /** Open questions, by category, routed in code (ADR-0071). */
+  questions: ProposalQuestionsSchema,
 });
 export type SpecificationProposal = z.infer<typeof SpecificationProposalSchema>;
 
