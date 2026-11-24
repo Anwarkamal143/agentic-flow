@@ -13,6 +13,7 @@ import { GrantGuidanceSchema } from './blocker-approvals.js';
 import { PullRequestStateSchema } from './pull-request.js';
 import { PrFeedbackEntrySchema } from './pr-feedback.js';
 import { BlockerReasonSchema } from './rework.js';
+import { ContractStepSchema } from './contract-step.js';
 
 // ---- Task states (ARCHITECTURE §4.4) ---------------------------------------
 
@@ -798,6 +799,12 @@ export const DeliveryReportSchema = z.object({
     .object({ delivered: z.number().int(), total: z.number().int(), line: z.string() })
     .nullable()
     .default(null),
+  /**
+   * The Plan's deferred Tasks as the pending contract step (#110, ADR-0052),
+   * offered as a follow-up Job once every pull request merged; `null` when
+   * the Plan deferred nothing. Reports written before #110 have none.
+   */
+  contractStep: ContractStepSchema.nullable().default(null),
   knownLimitations: z.array(z.string()),
 });
 export type DeliveryReport = z.infer<typeof DeliveryReportSchema>;

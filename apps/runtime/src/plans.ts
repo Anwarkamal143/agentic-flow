@@ -144,13 +144,18 @@ export type PlanReader = (artifactId: string) => PlanProposal;
  * Worktree, Attempts and cap counts) and moved onto the new Plan; every
  * other unfinished one is cancelled, with its open Inbox Items, its Worktree
  * left preserved; every entry nothing carries becomes a new Task. An
- * unfinished Integration Task is cancelled too (ADR-0034).
+ * unfinished Integration Task is cancelled too (ADR-0034). A deferred
+ * (contract) entry gets no Task (#110): a Replan that defers a kept Task
+ * cancels it like any Task the new Plan drops.
  */
 export function persistPlanTasks(
   tx: Tx,
-  plan: PlanProposal,
+  proposed: PlanProposal,
   ctx: { jobId: string; artifactId: string; actor: string; readPlan: PlanReader },
 ): void {
+  // Deferred Tasks are the contract step (ADR-0052, #110): never Task rows, never dispatched.
+  // They stay in the stored Plan; the Delivery Report and the follow-up Job read them there.
+  const plan: PlanProposal = { ...proposed, tasks: proposed.tasks.filter((t) => !t.deferred) };
   const job = tx.select().from(schema.jobs).where(eq(schema.jobs.id, ctx.jobId)).get();
   if (job === undefined) throw new Error(`no Job ${ctx.jobId}`);
   const config = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson));

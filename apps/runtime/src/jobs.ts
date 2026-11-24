@@ -121,111 +121,117 @@ export class JobService {
    * Configuration, completes `intake`, and queues `triage`. One transaction.
    */
   create(input: CreateJobInput): Job {
-    const id = this.db.transaction(
-      (tx) => {
-        const { project, repos, setBy } = jobTarget(tx, input);
-        // A set triage chooses may be any of the Project's Repositories (ADR-0067).
-        const candidates =
-          setBy === 'triage'
-            ? tx
-                .select()
-                .from(schema.repositories)
-                .where(eq(schema.repositories.projectId, project.id))
-                .all()
-            : repos;
-
-        // Copies, never references: later edits to the Recipe or config can't reach the Job.
-        const snapshot: WorkflowSnapshot = WorkflowSnapshotSchema.parse(
-          structuredClone(featureRecipe(this.recipeVersion)),
-        );
-        // The Job's Merge Policy override must be at least as strict as every Repository's
-        // it may touch: for a set triage chooses, every one of the Project's.
-        for (const repo of candidates) {
-          const mergePolicy = resolveMergePolicy(
-            MergePolicySchema.parse(repo.mergePolicy),
-            input.mergePolicy,
-          );
-          if (!mergePolicy.ok) throw new ApiFailure(409, mergePolicy.code, mergePolicy.message);
-        }
-        // Every Repository of the Project gets a section, frozen like the rest: a later
-        // config or profile change can't reach this Job (ADR-0047, ADR-0049).
-        const resolution = resolveProjectConfig(tx, project, {
-          concurrency: input.concurrency,
-          mergePolicy: input.mergePolicy,
-        });
-        if (!resolution.ok) throw new ApiFailure(409, resolution.code, resolution.message);
-        const effectiveConfig = resolution.config;
-        const jobId = newId('job');
-        const now = new Date().toISOString();
-        tx.insert(schema.jobs)
-          .values({
-            id: jobId,
-            projectId: project.id,
-            title: input.title,
-            description: input.description,
-            type: JobTypeSchema.enum.feature,
-            priority: 'normal',
-            status: JobStatusSchema.enum.draft,
-            workflowSnapshotJson: JSON.stringify(snapshot),
-            configSnapshotJson: JSON.stringify(effectiveConfig),
-            createdBy: OPERATOR,
-            createdAt: now,
-            version: 0,
-            repositorySetBy: setBy,
-          })
-          .run();
-        for (const repo of repos) {
-          tx.insert(schema.jobRepositories).values({ jobId, repositoryId: repo.id }).run();
-        }
-        tx.insert(schema.stageRuns)
-          .values(
-            snapshot.stages.map((stage, position) => {
-              // Intake is this request itself: done once the Job record exists.
-              const intake = stage.id === 'intake';
-              return {
-                id: newId('stg'),
-                jobId,
-                stageId: stage.id,
-                position,
-                state: intake ? 'succeeded' : 'pending',
-                attempt: 1,
-                startedAt: intake ? now : null,
-                finishedAt: intake ? now : null,
-                version: 0,
-              };
-            }),
-          )
-          .run();
-        appendEvent(tx, {
-          entityKind: 'job',
-          entityId: jobId,
-          jobId,
-          type: 'job.created',
-          actor: OPERATOR,
-          payload: {
-            projectId: project.id,
-            // The first by name, as before multi-repo Jobs; `repositoryIds` lists them all.
-            repositoryId: repos[0]?.id,
-            repositoryIds: repos.map((r) => r.id),
-            repositorySetBy: setBy,
-            title: input.title,
-            recipe: { id: snapshot.recipeId, version: snapshot.recipeVersion },
-          },
-        });
-        changeJobIn(
-          tx,
-          { jobId, expectedVersion: 'current', actor: OPERATOR },
-          (_, state, step) => {
-            const next = state.stageRuns.find((r) => r.state === 'pending');
-            if (next !== undefined) step(next, 'queued');
-          },
-        );
-        return jobId;
-      },
-      { behavior: 'immediate' },
-    );
+    const id = this.db.transaction((tx) => this.createIn(tx, input), { behavior: 'immediate' });
     this.onCommit();
     return this.get(id);
+  }
+
+  /**
+   * {@link create} inside the caller's transaction, returning the new Job's id.
+   * A contract step's follow-up Job (#110) is created by the human who
+   * approved it, and names the Job it follows up.
+   */
+  createIn(
+    tx: Tx,
+    input: CreateJobInput,
+    opts: { actor: string; followUpOf?: string } = { actor: OPERATOR },
+  ): string {
+    const actor = opts.actor;
+    const { project, repos, setBy } = jobTarget(tx, input);
+    // A set triage chooses may be any of the Project's Repositories (ADR-0067).
+    const candidates =
+      setBy === 'triage'
+        ? tx
+            .select()
+            .from(schema.repositories)
+            .where(eq(schema.repositories.projectId, project.id))
+            .all()
+        : repos;
+
+    // Copies, never references: later edits to the Recipe or config can't reach the Job.
+    const snapshot: WorkflowSnapshot = WorkflowSnapshotSchema.parse(
+      structuredClone(featureRecipe(this.recipeVersion)),
+    );
+    // The Job's Merge Policy override must be at least as strict as every Repository's
+    // it may touch: for a set triage chooses, every one of the Project's.
+    for (const repo of candidates) {
+      const mergePolicy = resolveMergePolicy(
+        MergePolicySchema.parse(repo.mergePolicy),
+        input.mergePolicy,
+      );
+      if (!mergePolicy.ok) throw new ApiFailure(409, mergePolicy.code, mergePolicy.message);
+    }
+    // Every Repository of the Project gets a section, frozen like the rest: a later
+    // config or profile change can't reach this Job (ADR-0047, ADR-0049).
+    const resolution = resolveProjectConfig(tx, project, {
+      concurrency: input.concurrency,
+      mergePolicy: input.mergePolicy,
+    });
+    if (!resolution.ok) throw new ApiFailure(409, resolution.code, resolution.message);
+    const effectiveConfig = resolution.config;
+    const jobId = newId('job');
+    const now = new Date().toISOString();
+    tx.insert(schema.jobs)
+      .values({
+        id: jobId,
+        projectId: project.id,
+        title: input.title,
+        description: input.description,
+        type: JobTypeSchema.enum.feature,
+        priority: 'normal',
+        status: JobStatusSchema.enum.draft,
+        workflowSnapshotJson: JSON.stringify(snapshot),
+        configSnapshotJson: JSON.stringify(effectiveConfig),
+        createdBy: actor,
+        createdAt: now,
+        version: 0,
+        repositorySetBy: setBy,
+      })
+      .run();
+    for (const repo of repos) {
+      tx.insert(schema.jobRepositories).values({ jobId, repositoryId: repo.id }).run();
+    }
+    tx.insert(schema.stageRuns)
+      .values(
+        snapshot.stages.map((stage, position) => {
+          // Intake is this request itself: done once the Job record exists.
+          const intake = stage.id === 'intake';
+          return {
+            id: newId('stg'),
+            jobId,
+            stageId: stage.id,
+            position,
+            state: intake ? 'succeeded' : 'pending',
+            attempt: 1,
+            startedAt: intake ? now : null,
+            finishedAt: intake ? now : null,
+            version: 0,
+          };
+        }),
+      )
+      .run();
+    appendEvent(tx, {
+      entityKind: 'job',
+      entityId: jobId,
+      jobId,
+      type: 'job.created',
+      actor,
+      payload: {
+        ...(opts.followUpOf === undefined ? {} : { followUpOf: opts.followUpOf }),
+        projectId: project.id,
+        // The first by name, as before multi-repo Jobs; `repositoryIds` lists them all.
+        repositoryId: repos[0]?.id,
+        repositoryIds: repos.map((r) => r.id),
+        repositorySetBy: setBy,
+        title: input.title,
+        recipe: { id: snapshot.recipeId, version: snapshot.recipeVersion },
+      },
+    });
+    changeJobIn(tx, { jobId, expectedVersion: 'current', actor }, (_, state, step) => {
+      const next = state.stageRuns.find((r) => r.state === 'pending');
+      if (next !== undefined) step(next, 'queued');
+    });
+    return jobId;
   }
 
   get(id: string): Job {

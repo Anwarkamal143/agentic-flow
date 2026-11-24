@@ -180,6 +180,25 @@ export const PlanViewSchema = z.object({
       branch: z.string(),
     }),
   ),
+  /**
+   * The Plan's deferred Tasks (ADR-0052, #110): the contract step. They never
+   * run in this Job and are never Tasks of it; once every pull request has
+   * merged, an Approval offers them as a follow-up Job. Not in `tasks`, the
+   * waves or the estimate. Views read before #110 have none.
+   */
+  deferredTasks: z
+    .array(
+      z.object({
+        key: z.string(),
+        title: z.string(),
+        objective: z.string(),
+        repositoryId: z.string(),
+        dependsOn: z.array(z.string()),
+        acceptance: z.array(z.string()),
+        writable: z.array(z.string()),
+      }),
+    )
+    .default([]),
   /** Tasks that can start together, wave by wave. */
   parallel: z.array(z.array(z.string())),
   decisionPoints: z.array(DecisionPointSchema),

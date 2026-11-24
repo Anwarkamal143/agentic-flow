@@ -101,17 +101,22 @@ export const CONTRACT_JOB_OPTIONS: readonly ApprovalOption[] = [
 export function contractJobItemText(step: ContractStep): { question: string; why: string } {
   const repos = step.repositories;
   const listed =
-    repos.length <= 1 ? (repos[0] ?? '') : `${repos.slice(0, -1).join(', ')} and ${repos.at(-1)}`;
+    repos.length <= 1
+      ? (repos[0] ?? '')
+      : `${repos.slice(0, -1).join(', ')} and ${repos.at(-1) ?? ''}`;
   return {
     question: `Start the contract Job for ${listed}?`,
     why: `Every pull request of this Job has merged in Delivery Order, so its consumers have migrated. Its Plan deferred the contract step (removing the old interface): ${step.tasks
       .map((t) => `Task ${t.key} (${t.repository}): ${t.title}`)
-      .join('; ')}. Starting it creates a new Job with these Tasks as its description; it is planned and approved like any other Job.`,
+      .join(
+        '; ',
+      )}. Starting it creates a new Job with these Tasks as its description; it is planned and approved like any other Job.`,
   };
 }
 
-/** The Job title limit (`CreateJobInputSchema`). */
+/** The Job title and description limits (`CreateJobInputSchema`). */
 const TITLE_MAX = 200;
+const DESCRIPTION_MAX = 20_000;
 
 /**
  * The follow-up Job a human's `start_job` creates: the contract Repositories
@@ -143,6 +148,6 @@ export function contractJobRequest(
   return {
     title: `Contract step: ${job.title}`.slice(0, TITLE_MAX),
     repositories: [...step.repositories],
-    description: lines.join('\n'),
+    description: lines.join('\n').slice(0, DESCRIPTION_MAX),
   };
 }

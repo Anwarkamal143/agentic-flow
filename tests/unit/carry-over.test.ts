@@ -34,6 +34,7 @@ function entry(key: string, dependsOn: string[] = [], extra: Partial<PlanTaskPro
       { key: 'test', command: 'exists', args: [`docs/${key}.md`], required: true, criteria: [] },
     ],
     priority: 'normal',
+    deferred: false,
     ...extra,
   } satisfies PlanTaskProposal;
 }

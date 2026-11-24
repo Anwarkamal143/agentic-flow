@@ -25,7 +25,10 @@ import {
   DeliveredSetupSchema,
   NOT_ATOMIC,
   partialCompletion,
+  contractJobOffered,
+  contractStep,
   type DeliveryReport,
+  type PlanProposal,
   type PullRequestRecord,
   type RepositoryDeliveryStatus,
 } from '@factory/domain';
@@ -51,7 +54,12 @@ export function fetchCommand(clonePath: string, branch: string): string {
   return `git fetch ${shellQuote(clonePath)} ${shellQuote(`${branch}:${branch}`)}`;
 }
 
-export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise<DeliveryReport> {
+export async function buildDeliveryReport(
+  db: FactoryDb,
+  jobId: string,
+  /** Reads a stored Plan: its deferred Tasks are the contract step (#110). */
+  readPlan: (artifactId: string) => PlanProposal,
+): Promise<DeliveryReport> {
   const job = db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).get();
   // The Job's Repositories by name. `repository` and `integration` describe the first one;
   // `repositories` describes each, in Delivery Order (v7, #106).
@@ -228,6 +236,19 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
         blockedOutcome
           ? ' The Job stays blocked until the Blocker is cleared or the Job is cancelled.'
           : ''
+      }`,
+    );
+  }
+  // The contract step (#110, ADR-0052): the Plan's deferred Tasks, pending in another Job.
+  const contract = plan === undefined ? null : contractStep(readPlan(plan.id).tasks, repositories);
+  if (contract !== null) {
+    notes.push(
+      `${contract.line}. ${
+        contractJobOffered(perRepository.map((r) => r.status))
+          ? 'Every pull request has merged, so an Approval in the Inbox offers it as a follow-up Job.'
+          : pullRequests.length === 0
+            ? "The factory can't see a local delivery merged, so it offers no follow-up Job: once every Repository's change is merged, create the contract Job yourself (factory job create)."
+            : "Not every Repository's pull request merged, so no follow-up Job is offered: create the contract Job yourself once they have (factory job create)."
       }`,
     );
   }
@@ -462,6 +483,7 @@ export async function buildDeliveryReport(db: FactoryDb, jobId: string): Promise
     })),
     repositories: perRepository,
     partialCompletion: partial,
+    contractStep: contract,
     knownLimitations: limitations,
   } satisfies DeliveryReport);
 }

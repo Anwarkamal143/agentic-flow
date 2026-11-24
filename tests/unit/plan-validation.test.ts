@@ -532,7 +532,8 @@ describe('validatePlan: deferred contract Tasks (ADR-0052, #110)', () => {
     ).toEqual([
       {
         rule: 'plan.mandatory_criteria_covered',
-        message: 'mandatory AC-01 is covered by no Task that runs in this Job (deferred Tasks do not)',
+        message:
+          'mandatory AC-01 is covered by no Task that runs in this Job (deferred Tasks do not)',
       },
     ]);
   });

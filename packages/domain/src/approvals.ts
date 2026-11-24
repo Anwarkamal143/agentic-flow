@@ -13,6 +13,11 @@ export const ApprovalKindSchema = z.enum([
   'cleanup',
   /** One per PR `(head_sha, base_sha)`, held by `merge_approval` (#58, ADR-0037). */
   'merge',
+  /**
+   * Offers the contract step as a follow-up Job once every PR of a Job whose
+   * Plan deferred it has merged (ADR-0052, #110). Holds no Stage.
+   */
+  'contract_job',
 ]);
 export type ApprovalKind = z.infer<typeof ApprovalKindSchema>;
 
@@ -40,6 +45,8 @@ export const InboxDecisionSchema = z.object({
   answers: z.array(QuestionAnswerSchema).optional(),
   /** A Blocker Approval's grant size, when its `grant` option was chosen (ADR-0026). */
   grant: z.number().int().positive().optional(),
+  /** A `contract_job` item's follow-up Job, created by its `start_job` decision (#110). */
+  followUpJobId: z.string().optional(),
 });
 export type InboxDecision = z.infer<typeof InboxDecisionSchema>;
 

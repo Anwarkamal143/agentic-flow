@@ -592,7 +592,7 @@ export const approvals = sqliteTable(
     taskId: text('task_id').references(() => tasks.id),
     /** The Stage Run it holds, when it holds one (`plan_approval` for a plan). */
     stageRunId: text('stage_run_id').references(() => stageRuns.id),
-    /** `question | plan | spec_change | blocker | cleanup`. */
+    /** `question | plan | spec_change | blocker | cleanup | merge | contract_job`. */
     kind: text('kind').notNull(),
     subjectRef: text('subject_ref').notNull(),
     question: text('question').notNull(),
