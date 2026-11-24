@@ -10,6 +10,7 @@ import {
   TriageProposalSchema,
   validatePlan,
   validateSpecification,
+  validateTriage,
   VERIFICATION_ARG_PATTERN,
   type ArtifactKind,
   type PlanContext,
@@ -38,7 +39,8 @@ export const PROPOSAL_STAGES: readonly ProposalStage[] = [
     kind: 'triage',
     schema: TriageProposalSchema,
     ask: 'Triage the Job: summarise it, and classify its type and risk.',
-    validate: () => [],
+    validate: (value, ctx) =>
+      validateTriage(TriageProposalSchema.parse(value), ctx.repositoryCandidates ?? null),
   },
   {
     stageId: 'discovery',
@@ -76,6 +78,11 @@ export interface PromptInput {
   job: { id: string; title: string; description: string };
   repositories: readonly { id: string; name: string }[];
   /**
+   * Triage only: the Job has no Repository yet and triage chooses its set
+   * from `repositories`, the Project's (ADR-0067).
+   */
+  chooseRepositories?: boolean;
+  /**
    * Each Repository's frozen profile commands and Sensitive Paths (ADR-0051),
    * listed for the planner only.
    */
@@ -101,9 +108,10 @@ export interface RepositoryPromptProfile {
  * `@2` added the Replan section (ADR-0019); `@3` says how carry-over keeps
  * unaffected work (ADR-0029); `@4` added the re-specification section
  * (ADR-0031); `@5` lists the planner's profile commands and Sensitive Paths (#102);
- * `@6` says a verification command that names no profile command is invalid (#104).
+ * `@6` says a verification command that names no profile command is invalid (#104);
+ * `@7` asks triage to choose the Repository set when none was named (#107).
  */
-export const PROMPT_TEMPLATE_ID = 'proposal-stage@6';
+export const PROMPT_TEMPLATE_ID = 'proposal-stage@7';
 
 const TEMPLATE = `You are the {{role}} for a software Job in an automated software factory.
 {{ask}}
@@ -112,7 +120,7 @@ Job {{jobId}}: {{title}}
 {{description}}
 
 Repositories: {{repositories}}
-{{profiles}}
+{{choose}}{{profiles}}
 Earlier outputs of this Job (JSON, by kind):
 {{inputs}}
 {{replan}}{{respec}}{{rejected}}
@@ -123,13 +131,18 @@ Reply with exactly one JSON object and nothing else. It must match this JSON Sch
 /** What the planner is told about verification commands and Sensitive Paths (#102, #104). */
 const PROFILE_RULES = `A verification entry's command must be the name of one of its Repository's profile commands, never a shell command: a Plan with any other command is invalid. Give args only to a command that accepts arguments; each argument must match ${VERIFICATION_ARG_PATTERN.source}. Never list a Sensitive Path in writable.`;
 
+/** What triage is told when it chooses the Job's Repository set (#107, ADR-0067). */
+const CHOOSE_REPOSITORIES = `No Repository was named for this Job: choose the Repositories it must change from the Project's Repositories listed above, and give their names in "repositories". Choose only what the Job needs; a set of more than one waits for a human to confirm it.`;
+
 /**
- * Hash of the template's fixed text (the template, each Stage's ask and the
- * planner's profile rules; `@6` added the last two), recorded with each
- * Harness Run.
+ * Hash of the template's fixed text (the template, each Stage's ask, the
+ * planner's profile rules and triage's choice text; `@6` added the asks and
+ * profile rules, `@7` the choice text), recorded with each Harness Run.
  */
 export const PROMPT_TEMPLATE_HASH = `sha256:${createHash('sha256')
-  .update([TEMPLATE, ...PROPOSAL_STAGES.map((s) => s.ask), PROFILE_RULES].join('\0'))
+  .update(
+    [TEMPLATE, ...PROPOSAL_STAGES.map((s) => s.ask), PROFILE_RULES, CHOOSE_REPOSITORIES].join('\0'),
+  )
   .digest('hex')}`;
 
 export function renderPrompt(stage: ProposalStage, input: PromptInput): string {
@@ -153,7 +166,13 @@ export function renderPrompt(stage: ProposalStage, input: PromptInput): string {
     jobId: input.job.id,
     title: input.job.title,
     description: input.job.description === '' ? '(no description)' : input.job.description,
-    repositories: input.repositories.map((r) => `${r.name} (${r.id})`).join(', '),
+    repositories:
+      (input.chooseRepositories === true ? "(none chosen yet) the Project's: " : '') +
+      input.repositories.map((r) => `${r.name} (${r.id})`).join(', '),
+    choose:
+      stage.stageId === 'triage' && input.chooseRepositories === true
+        ? `${CHOOSE_REPOSITORIES}\n`
+        : '',
     inputs:
       input.inputs.length === 0
         ? '(none)'

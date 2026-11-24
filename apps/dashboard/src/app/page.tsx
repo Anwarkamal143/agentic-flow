@@ -69,7 +69,7 @@ export default async function JobsPage() {
                 </TableCell>
                 <TableCell>{job.currentStage}</TableCell>
                 <TableCell>
-                  <Repositories repositories={job.repositories} />
+                  <Repositories repositories={job.repositories} setBy={job.repositorySetBy} />
                 </TableCell>
                 <TableCell className="whitespace-nowrap">{formatTime(job.createdAt)}</TableCell>
                 <TableCell className="font-mono text-xs">{job.id}</TableCell>

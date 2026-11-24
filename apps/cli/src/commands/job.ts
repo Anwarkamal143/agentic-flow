@@ -88,7 +88,9 @@ export async function jobCreate(opts: JobCreateOptions): Promise<number> {
   };
   const job = await api.json<Job>('POST', '/v1/jobs', { body: input });
   process.stdout.write(
-    `Created Job ${job.id} for ${job.repositories.map((r) => r.name).join(', ')}\n`,
+    job.repositories.length === 0
+      ? `Created Job ${job.id}; triage will choose its Repositories from the Project's\n`
+      : `Created Job ${job.id} for ${job.repositories.map((r) => r.name).join(', ')}\n`,
   );
   writeJob(job);
   return 0;
@@ -109,7 +111,7 @@ export async function jobList(opts: { json: boolean }): Promise<number> {
   for (const job of jobs) {
     process.stdout.write(
       `${job.id}  ${job.status.padEnd(13)} ${job.currentStage.padEnd(13)} ${job.title}` +
-        `  [${job.repositories.map((r) => r.name).join(', ')}]\n`,
+        `  [${repositoryNames(job)}]\n`,
     );
   }
   return 0;
@@ -344,12 +346,25 @@ function configLines(config: Job['effectiveConfig']): string[] {
   return lines;
 }
 
+/** A Job's Repositories by name; a set triage has yet to choose says so (ADR-0067). */
+function repositoryNames(job: JobSummary): string {
+  return job.repositories.length === 0
+    ? 'to be chosen by triage'
+    : job.repositories.map((r) => r.name).join(', ');
+}
+
+function repositoryLine(job: Job): string {
+  if (job.repositories.length === 0) return "(to be chosen by triage from the Project's)";
+  const names = job.repositories.map((r) => `${r.name} (${r.id})`).join(', ');
+  return job.repositorySetBy === 'triage' ? `${names}, chosen by triage` : names;
+}
+
 function writeJob(job: Job): void {
   const lines = [
     `Job ${job.id}: ${job.title}`,
     `  status:       ${job.status}`,
     `  stage:        ${job.currentStage}`,
-    `  repositories: ${job.repositories.map((r) => `${r.name} (${r.id})`).join(', ')}`,
+    `  repositories: ${repositoryLine(job)}`,
     ...deliveryOrderLines(job),
     `  recipe:       ${job.workflowSnapshot.recipeId} v${String(job.workflowSnapshot.recipeVersion)}`,
     `  replans:      ${String(job.replans.used)} of ${String(job.replans.max)} used${job.replanRequested ? '; replan requested, waiting for the Attempts in flight' : ''}`,

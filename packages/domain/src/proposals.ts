@@ -21,8 +21,79 @@ export const TriageProposalSchema = z.object({
   summary: text,
   type: z.enum(['feature']),
   risk: RiskSchema,
+  /**
+   * The Repositories the Job changes, by name (ADR-0052, ADR-0067). Required
+   * when the Job's set is triage's to choose, from the Project's Repositories;
+   * ignored when the operator named it (or the Project has only one).
+   */
+  repositories: z.array(shortText).min(1).max(20).optional(),
 });
 export type TriageProposal = z.infer<typeof TriageProposalSchema>;
+
+/** Who chose a Job's Repository set (ADR-0067): the operator (named, or the Project's only one), or triage. */
+export const RepositorySetBySchema = z.enum(['operator', 'triage']);
+export type RepositorySetBy = z.infer<typeof RepositorySetBySchema>;
+
+/**
+ * The triage checks (ADR-0067). `candidates` are the Project's Repositories
+ * when triage chooses the Job's set, `null` when the set is fixed: a fixed set
+ * is never judged, and a proposed one is ignored, never applied. A chosen set
+ * must be given, each name a Repository of the Project, each once. Pure.
+ */
+export function validateTriage(
+  proposal: TriageProposal,
+  candidates: readonly { id: string; name: string }[] | null,
+): RuleIssue[] {
+  if (candidates === null) return [];
+  const names = candidates.map((c) => c.name).sort();
+  const rule = 'triage.repositories';
+  if (proposal.repositories === undefined) {
+    return [
+      {
+        rule,
+        message: `choose the Repositories the Job changes, by name, from the Project's: ${names.join(', ')}`,
+      },
+    ];
+  }
+  const issues: RuleIssue[] = [];
+  for (const name of proposal.repositories) {
+    if (!names.includes(name)) {
+      issues.push({
+        rule,
+        message: `${name} is not a Repository of the Project (its Repositories: ${names.join(', ')})`,
+      });
+    }
+  }
+  for (const dup of duplicates(proposal.repositories)) {
+    issues.push({ rule, message: `${dup} is listed more than once` });
+  }
+  return issues;
+}
+
+/** The Repositories a valid triage proposal chose, ordered by name, then id. Pure. */
+export function triageRepositorySet<R extends { id: string; name: string }>(
+  proposal: TriageProposal,
+  candidates: readonly R[],
+): R[] {
+  const chosen = new Set(proposal.repositories ?? []);
+  return candidates
+    .filter((c) => chosen.has(c.name))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+}
+
+/**
+ * Whether entering `plan_approval` must wait for a human whatever the
+ * `planApproval` policy (ADR-0052, ADR-0067): a triage-chosen set of more than
+ * one Repository, until a Plan of the Job has been approved (which confirms
+ * the set). Pure.
+ */
+export function repositorySetNeedsConfirmation(input: {
+  setBy: RepositorySetBy;
+  count: number;
+  confirmed: boolean;
+}): boolean {
+  return input.setBy === 'triage' && input.count > 1 && !input.confirmed;
+}
 
 export const DiscoveryProposalSchema = z.object({
   summary: text,
@@ -234,6 +305,11 @@ export interface PlanContext {
    * frozen per-Repository section (ADR-0051). A verification entry names one.
    */
   commands: ReadonlyMap<string, Readonly<Record<string, ProfileCommand>>>;
+  /**
+   * Triage only: the Project's Repositories when triage chooses the Job's set
+   * (ADR-0067); `null` or unset when the set is fixed.
+   */
+  repositoryCandidates?: readonly { id: string; name: string }[] | null;
 }
 
 /**

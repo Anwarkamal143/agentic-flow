@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { ApprovalSchema } from './approvals.js';
 import type { Billing } from './billing.js';
 import type { PlanApprovalPolicy, StageId, WorkflowSnapshot } from './index.js';
-import { RiskSchema } from './proposals.js';
+import { RepositorySetBySchema, RiskSchema } from './proposals.js';
 
 export const DecisionPointSchema = z.object({
   stageId: z.string(),
@@ -23,11 +23,22 @@ export type DecisionPoint = z.infer<typeof DecisionPointSchema>;
  */
 export function humanDecisionPoints(
   snapshot: WorkflowSnapshot,
-  policy: { planApproval: PlanApprovalPolicy },
+  policy: {
+    planApproval: PlanApprovalPolicy;
+    /** A triage-chosen Repository set waits for a human (ADR-0067). */
+    confirmRepositorySet?: boolean;
+  },
 ): DecisionPoint[] {
   const points: DecisionPoint[] = [];
   const has = (id: StageId) => snapshot.stages.some((s) => s.id === id);
-  if (has('plan_approval') && policy.planApproval === 'required') {
+  if (has('plan_approval') && policy.confirmRepositorySet === true) {
+    points.push({
+      stageId: 'plan_approval',
+      kind: 'plan',
+      description:
+        'Before any Task runs: approve or reject this Plan and the Repository set triage chose (a triage-chosen set of more than one waits for a human, even under planApproval: skip).',
+    });
+  } else if (has('plan_approval') && policy.planApproval === 'required') {
     points.push({
       stageId: 'plan_approval',
       kind: 'plan',
@@ -137,6 +148,8 @@ export const PlanViewSchema = z.object({
   specificationArtifactId: z.string().nullable(),
   triageRisk: RiskSchema.nullable(),
   repositories: z.array(z.object({ id: z.string(), name: z.string() })),
+  /** Who chose the Job's Repository set (ADR-0067): approving the Plan confirms a triage-chosen one. */
+  repositorySetBy: RepositorySetBySchema,
   tasks: z.array(
     z.object({
       id: z.string(),

@@ -46,6 +46,7 @@ import {
   type ToolPolicy,
 } from './tool-policy.js';
 import {
+  RepositorySetBySchema,
   RiskSchema,
   RuleIssueSchema,
   TaskRoleSchema,
@@ -822,8 +823,13 @@ export type JobRepository = z.infer<typeof JobRepositorySchema>;
 export const JobSummarySchema = z.object({
   id: z.string(),
   projectId: z.string(),
-  /** The Repositories the Job touches (one or more of its Project's, ADR-0052), by name. */
-  repositories: z.array(JobRepositorySchema).min(1),
+  /**
+   * The Repositories the Job touches (one or more of its Project's, ADR-0052),
+   * by name. Empty only while triage has yet to choose them (ADR-0067).
+   */
+  repositories: z.array(JobRepositorySchema),
+  /** Who chose `repositories`: the operator (named, or the Project's only one) or triage (ADR-0067). */
+  repositorySetBy: RepositorySetBySchema,
   title: z.string(),
   type: JobTypeSchema,
   status: JobStatusSchema,
@@ -872,7 +878,7 @@ export const CreateJobInputSchema = z
     project: z.string().min(1).optional(),
     /**
      * One Repository: the same as `repositoryIds` with one entry. Neither: the
-     * Project's only Repository; with several, the request is refused.
+     * Project's only Repository; with several, triage chooses the set (ADR-0067).
      */
     repositoryId: z.string().min(1).optional(),
     /**
