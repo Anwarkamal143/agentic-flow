@@ -18,7 +18,8 @@ import type { Blocker } from './rework.js';
 export const InboxQuestionSchema = z.object({
   /**
    * `q1`, `q2`, … in the Task Result's order; `scope` for a scope change
-   * request; `worktrees`, `pull_request`, `remote_branch` on a cleanup item.
+   * request; `worktrees`, `pull_request`, `remote_branch` on a cleanup item,
+   * `<repo>.<question>` when its Job has several Repositories (ADR-0069).
    */
   id: z.string(),
   source: z.enum(['question', 'scope_change_request', 'cleanup']),
@@ -38,7 +39,8 @@ export type InboxQuestion = z.infer<typeof InboxQuestionSchema>;
 
 /** One answer: an offered option, or free text. */
 export const QuestionAnswerSchema = z.object({
-  questionId: z.string().min(1).max(40),
+  /** At most 300: a multi-repo cleanup key is `<repo>.<question>`, a Repository name up to 255 (ADR-0069). */
+  questionId: z.string().min(1).max(300),
   option: z.string().max(5000).optional(),
   text: z.string().max(5000).optional(),
 });

@@ -99,9 +99,56 @@ export function cleanupQuestions(scope: CleanupScope): InboxQuestion[] {
   return questions;
 }
 
-/** The title and the reason a `cleanup` item shows. Pure. */
-export function cleanupItemText(scope: CleanupScope): { question: string; why: string } {
-  const asked = cleanupQuestions(scope).length;
+/** One Repository of the Job and what a cancel left in it. */
+export interface RepositoryCleanup {
+  /** The Repository's name: the prefix of its question keys in a multi-repo Job. */
+  repository: string;
+  scope: CleanupScope;
+}
+
+/**
+ * A question's key: `<repo>.<question>` in a multi-repo Job (ADR-0052), the
+ * bare question id otherwise. Pure.
+ */
+export function cleanupKey(repository: string | undefined, question: string): string {
+  return repository === undefined ? question : `${repository}.${question}`;
+}
+
+/**
+ * The parts of a question's key. A question id never holds a dot, so the last
+ * one separates it from a Repository name that may. Pure.
+ */
+export function splitCleanupKey(key: string): {
+  repository: string | undefined;
+  question: string;
+} {
+  const dot = key.lastIndexOf('.');
+  return dot < 0
+    ? { repository: undefined, question: key }
+    : { repository: key.slice(0, dot), question: key.slice(dot + 1) };
+}
+
+const NOTHING: CleanupScope = { preservedWorktrees: 0, openPullRequests: [], remoteBranches: [] };
+
+/**
+ * The questions a Job's `cleanup` item asks. A single-repo Job's are
+ * {@link cleanupQuestions}, keys unchanged; in a Job with several Repositories
+ * each Repository is asked its own, keyed `<repo>.<question>` and their text
+ * led by the Repository's name. A Repository with nothing to ask is left out. Pure.
+ */
+export function jobCleanupQuestions(repositories: readonly RepositoryCleanup[]): InboxQuestion[] {
+  if (repositories.length <= 1) return cleanupQuestions(repositories[0]?.scope ?? NOTHING);
+  return repositories.flatMap(({ repository, scope }) =>
+    cleanupQuestions(scope).map((q) => ({
+      ...q,
+      id: cleanupKey(repository, q.id),
+      text: `${repository}: ${q.text}`,
+    })),
+  );
+}
+
+/** What a cancel left in one scope, as phrases. */
+function leftovers(scope: CleanupScope): string[] {
   const parts: string[] = [];
   if (scope.preservedWorktrees > 0) {
     parts.push(
@@ -114,6 +161,21 @@ export function cleanupItemText(scope: CleanupScope): { question: string; why: s
   if (scope.remoteBranches.length > 0) {
     parts.push(`${list(scope.remoteBranches)} is still on the remote`);
   }
+  return parts;
+}
+
+/** The title and the reason a Job's `cleanup` item shows. Pure. */
+export function cleanupItemText(repositories: readonly RepositoryCleanup[]): {
+  question: string;
+  why: string;
+} {
+  const asked = jobCleanupQuestions(repositories).length;
+  const parts =
+    repositories.length <= 1
+      ? leftovers(repositories[0]?.scope ?? NOTHING)
+      : repositories.flatMap(({ repository, scope }) =>
+          leftovers(scope).map((part) => `${repository}: ${part}`),
+        );
   return {
     question: `Clean up after the cancel (${plural(asked, 'question')}, each defaulting to keep)`,
     why:
@@ -159,16 +221,18 @@ export function checkCleanupAnswers(
     }
     seen.set(q.id, a.option);
   }
-  const prAsked = questions.some((q) => q.id === CLEANUP_PULL_REQUEST);
-  if (
-    prAsked &&
-    seen.get(CLEANUP_REMOTE_BRANCH) === CLEANUP_DELETE &&
-    seen.get(CLEANUP_PULL_REQUEST) !== CLEANUP_CLOSE
-  ) {
-    return {
-      code: 'invalid_answer',
-      message: `${CLEANUP_REMOTE_BRANCH}=${CLEANUP_DELETE} conflicts with keeping the PR open: GitHub closes a PR whose head branch is deleted, so the PR could not stay open as you chose. Close the PR as well (${CLEANUP_PULL_REQUEST}=${CLEANUP_CLOSE}), or keep the branch`,
-    };
+  // Per Repository: its remote branch is not deleted under its own PR kept open.
+  for (const q of questions) {
+    const { repository, question: id } = splitCleanupKey(q.id);
+    if (id !== CLEANUP_PULL_REQUEST) continue;
+    const pr = cleanupKey(repository, CLEANUP_PULL_REQUEST);
+    const branch = cleanupKey(repository, CLEANUP_REMOTE_BRANCH);
+    if (seen.get(branch) === CLEANUP_DELETE && seen.get(pr) !== CLEANUP_CLOSE) {
+      return {
+        code: 'invalid_answer',
+        message: `${branch}=${CLEANUP_DELETE} conflicts with keeping the PR open: GitHub closes a PR whose head branch is deleted, so the PR could not stay open as you chose. Close the PR as well (${pr}=${CLEANUP_CLOSE}), or keep the branch`,
+      };
+    }
   }
   return undefined;
 }
@@ -182,10 +246,12 @@ export interface CleanupChoices {
 
 /**
  * The effect of a `cleanup` decision: exactly the explicit answers; an
- * unanswered question keeps. A decision made before the questions existed
- * (`keep` | `discard`, ADR-0027) is about the Worktrees only. Pure.
+ * unanswered question keeps. With `repository`, its effect on that Repository
+ * of a multi-repo Job: only its `<repo>.<question>` answers count. A decision
+ * made before the questions existed (`keep` | `discard`, ADR-0027) is about
+ * the Worktrees only. Pure.
  */
-export function cleanupChoices(decision: InboxDecision): CleanupChoices {
+export function cleanupChoices(decision: InboxDecision, repository?: string): CleanupChoices {
   if (decision.answers === undefined) {
     return {
       discardWorktrees: decision.option === CLEANUP_DISCARD,
@@ -193,7 +259,8 @@ export function cleanupChoices(decision: InboxDecision): CleanupChoices {
       deleteRemoteBranches: false,
     };
   }
-  const answer = (id: string) => decision.answers?.find((a) => a.questionId === id)?.option;
+  const answer = (id: string) =>
+    decision.answers?.find((a) => a.questionId === cleanupKey(repository, id))?.option;
   return {
     discardWorktrees: answer(CLEANUP_WORKTREES) === CLEANUP_DISCARD,
     closePullRequests: answer(CLEANUP_PULL_REQUEST) === CLEANUP_CLOSE,
