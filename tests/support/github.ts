@@ -13,7 +13,8 @@
  *
  * The control API (methods on the returned object) acts as GitHub's other
  * users would: set check results, add reviews and comments, move the base,
- * push foreign commits, close, reopen or merge a PR, refuse a merge method or
+ * push foreign commits, close, reopen or merge a PR, open, label, edit or close
+ * an issue (#112), refuse a merge method or
  * a reopen, and simulate a 304, a rate limit, a 5xx or a dropped connection.
  */
 import { createHash } from 'node:crypto';
@@ -159,6 +160,21 @@ interface Repo {
   refusedMethods: Set<MergeMethod>;
   /** What `GET /repos/:owner/:name` reports as `permissions.push` for the token. */
   push: boolean;
+  /** Issues (#112): numbered with the PRs, as on GitHub. */
+  issues: Issue[];
+}
+
+interface Issue {
+  number: number;
+  title: string;
+  body: string | null;
+  state: 'open' | 'closed';
+  labels: string[];
+}
+
+/** The next issue or PR number: issues and PRs share one sequence, as on GitHub. */
+function nextNumber(repo: Repo): number {
+  return Math.max(0, ...repo.pulls.map((p) => p.number), ...repo.issues.map((i) => i.number)) + 1;
 }
 
 /** The newest check run of each job (name) of a workflow run. */
@@ -256,6 +272,14 @@ export interface FakeGitHub {
   denyPush(fullName: string, opts?: { apiStillAllows?: boolean }): void;
   /** The token may push again, through the API and git. */
   allowPush(fullName: string): void;
+  /** Opens an issue as a GitHub user would; returns its number. */
+  addIssue(fullName: string, issue: { title: string; body?: string; labels?: string[] }): number;
+  /** Replaces an issue's labels (a user labeling or unlabeling it). */
+  setIssueLabels(fullName: string, number: number, labels: string[]): void;
+  /** Edits an issue's title or body. */
+  editIssue(fullName: string, number: number, edit: { title?: string; body?: string }): void;
+  closeIssue(fullName: string, number: number): void;
+  reopenIssue(fullName: string, number: number): void;
   /** Queues a one-shot fault for the next API request (matching `path`, when given). */
   simulate(fault: Fault, opts?: { path?: RegExp }): void;
 }
@@ -284,6 +308,13 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
     const pr = repoOf(fullName).pulls.find((p) => p.number === number);
     if (pr === undefined) throw new Error(`fake GitHub: no PR #${String(number)} in ${fullName}`);
     return pr;
+  };
+  const issueOf = (fullName: string, number: number): Issue => {
+    const issue = repoOf(fullName).issues.find((i) => i.number === number);
+    if (issue === undefined) {
+      throw new Error(`fake GitHub: no issue #${String(number)} in ${fullName}`);
+    }
+    return issue;
   };
   const head = (repo: Repo, branch: string): string | undefined => {
     try {
@@ -405,6 +436,16 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
     html_url: `${url}/${repo.remote.fullName}/pull/${String(prNumber)}#issuecomment-${String(c.id)}`,
   });
 
+  const issueJson = (repo: Repo, i: Issue) => ({
+    number: i.number,
+    title: i.title,
+    body: i.body,
+    state: i.state,
+    html_url: `${url}/${repo.remote.fullName}/issues/${String(i.number)}`,
+    labels: i.labels.map((name) => ({ name })),
+    user: user('octo-user'),
+  });
+
   type Reply = { status: number; body?: unknown };
   const notFound: Reply = { status: 404, body: { message: 'Not Found' } };
 
@@ -455,7 +496,7 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
         return { status: 422, body: { message: `A pull request already exists for ${headRef}.` } };
       }
       const pr: PullRequest = {
-        number: repo.pulls.length + 1,
+        number: nextNumber(repo),
         title: text(input['title']),
         body: typeof input['body'] === 'string' ? input['body'] : null,
         head: headRef,
@@ -547,6 +588,53 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
         };
       }
       return notFound;
+    }
+    if (rest === '/issues' && method === 'GET') {
+      // GitHub lists PRs here too (with a `pull_request` key); `labels` must all match.
+      const state = query.get('state') ?? 'open';
+      const wanted = (query.get('labels') ?? '')
+        .split(',')
+        .map((l) => l.trim().toLowerCase())
+        .filter((l) => l !== '');
+      const list = repo.issues.filter(
+        (i) =>
+          (state === 'all' || i.state === state) &&
+          wanted.every((w) => i.labels.some((l) => l.toLowerCase() === w)),
+      );
+      const pulls =
+        wanted.length === 0
+          ? repo.pulls.filter((p) => state === 'all' || p.state === state).map((p) => p.number)
+          : [];
+      return {
+        status: 200,
+        body: [
+          ...list.map((i) => issueJson(repo, i)),
+          ...pulls.map((number) => ({
+            ...issueJson(repo, { number, title: '', body: null, state: 'open', labels: [] }),
+            pull_request: { url: `${url}/repos/${repo.remote.fullName}/pulls/${String(number)}` },
+          })),
+        ],
+      };
+    }
+    if ((r = /^\/issues\/(\d+)$/.exec(rest)) !== null && method === 'GET') {
+      const number = Number(r[1]);
+      const issue = repo.issues.find((i) => i.number === number);
+      if (issue !== undefined) return { status: 200, body: issueJson(repo, issue) };
+      const pr = repo.pulls.find((p) => p.number === number);
+      if (pr === undefined) return notFound;
+      return {
+        status: 200,
+        body: {
+          ...issueJson(repo, {
+            number,
+            title: pr.title,
+            body: pr.body,
+            state: pr.state,
+            labels: [],
+          }),
+          pull_request: { url: `${url}/repos/${repo.remote.fullName}/pulls/${String(number)}` },
+        },
+      };
     }
     if ((r = /^\/issues\/(\d+)\/comments$/.exec(rest)) !== null) {
       const pr = repo.pulls.find((p) => p.number === Number(r?.[1]));
@@ -838,6 +926,7 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
         statuses: [],
         refusedMethods: new Set(),
         push: true,
+        issues: [],
       });
       return remote;
     },
@@ -992,6 +1081,32 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
       const repo = repoOf(fullName);
       repo.push = true;
       rmSync(join(repo.remote.bareDir, 'hooks', 'pre-receive'), { force: true });
+    },
+    addIssue(fullName, issue) {
+      const repo = repoOf(fullName);
+      const number = nextNumber(repo);
+      repo.issues.push({
+        number,
+        title: issue.title,
+        body: issue.body ?? null,
+        state: 'open',
+        labels: [...(issue.labels ?? [])],
+      });
+      return number;
+    },
+    setIssueLabels(fullName, number, labels) {
+      issueOf(fullName, number).labels = [...labels];
+    },
+    editIssue(fullName, number, edit) {
+      const issue = issueOf(fullName, number);
+      if (edit.title !== undefined) issue.title = edit.title;
+      if (edit.body !== undefined) issue.body = edit.body;
+    },
+    closeIssue(fullName, number) {
+      issueOf(fullName, number).state = 'closed';
+    },
+    reopenIssue(fullName, number) {
+      issueOf(fullName, number).state = 'open';
     },
     simulate(fault, opts) {
       faults.push({ fault, ...(opts?.path === undefined ? {} : { path: opts.path }) });

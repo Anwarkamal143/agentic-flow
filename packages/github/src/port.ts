@@ -109,6 +109,16 @@ export interface ReviewComment extends Comment {
   path: string | null;
 }
 
+/** An issue (never a PR). Its title and body are GitHub content: untrusted. */
+export interface Issue {
+  number: number;
+  title: string;
+  body: string | null;
+  state: 'open' | 'closed';
+  labels: string[];
+  htmlUrl: string;
+}
+
 /** The GitHub-wide pause a rate limit sets (ADR-0045), kept by the caller. */
 export interface RateLimitGate {
   /** The pause in force, or null: while `until` is in the future, no request is sent. */
@@ -222,6 +232,16 @@ const commentWire = z.object({
   html_url: z.string().nullable().optional(),
 });
 const reviewCommentWire = commentWire.extend({ path: z.string().nullable().optional() });
+const issueWire = z.object({
+  number: z.number().int(),
+  title: z.string(),
+  body: z.string().nullable().optional(),
+  state: z.enum(['open', 'closed']),
+  html_url: z.string(),
+  labels: z.array(z.union([z.string(), z.object({ name: z.string() })])).optional(),
+  /** Present on a PR: GitHub's issues API lists PRs too. */
+  pull_request: z.unknown().optional(),
+});
 const branchWire = z.object({ commit: z.object({ sha: z.string() }) });
 /** `permissions` is present only for an authenticated request; absent reads as no push. */
 const repositoryWire = z.object({
@@ -243,6 +263,17 @@ function toPullRequest(w: z.infer<typeof prWire>): PullRequest {
     author: w.user?.login ?? null,
     head: { ref: w.head.ref, sha: w.head.sha },
     base: { ref: w.base.ref, sha: w.base.sha },
+  };
+}
+
+function toIssue(w: z.infer<typeof issueWire>): Issue {
+  return {
+    number: w.number,
+    title: w.title,
+    body: w.body ?? null,
+    state: w.state,
+    labels: (w.labels ?? []).map((l) => (typeof l === 'string' ? l : l.name)),
+    htmlUrl: w.html_url,
   };
 }
 
@@ -479,6 +510,42 @@ export class GitHubPort {
       body,
     });
     return mapResult(res, commentWire, toComment);
+  }
+
+  // ---- issues ----
+
+  /**
+   * The open issues with `label` (one page of up to 100, as every list),
+   * PRs left out. Polled by the intake (#112, ADR-0072), so it takes an ETag.
+   */
+  async listIssues(
+    repo: GitHubCoordinates,
+    label: string,
+    opts: ReadOptions = {},
+  ): Promise<GitHubRead<Issue[]>> {
+    const query = new URLSearchParams({ state: 'open', labels: label, per_page: String(PER_PAGE) });
+    const res = await this.read(`${repoPath(repo)}/issues?${query.toString()}`, opts);
+    return mapRead(res, z.array(issueWire), (w) =>
+      w.filter((i) => i.pull_request === undefined).map(toIssue),
+    );
+  }
+
+  /** One issue, open or closed. A PR's number is a refusal: it is no issue. */
+  async getIssue(repo: GitHubCoordinates, number: number): Promise<GitHubResult<Issue>> {
+    const res = await this.send('GET', `${repoPath(repo)}/issues/${String(number)}`);
+    const read = mapResult(res, issueWire, (w) => w);
+    if (!read.ok) return read;
+    if (read.value.pull_request !== undefined) {
+      return {
+        ok: false,
+        failure: {
+          kind: 'refused',
+          status: null,
+          reason: `${repo.owner}/${repo.name}#${String(number)} is a pull request, not an issue`,
+        },
+      };
+    }
+    return { ok: true, value: toIssue(read.value) };
   }
 
   // ---- the repository ----
