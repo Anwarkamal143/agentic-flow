@@ -217,6 +217,45 @@ export interface ClarificationRound {
   answers: readonly { question: string; category: string; answer: string | null }[];
 }
 
+/** The one option of a proposal Stage's Question (ADR-0071). */
+export const CLARIFICATION_OPTIONS = [
+  {
+    id: 'answer',
+    label: 'Answer',
+    description:
+      'Answer each question (an offered option or free text); a new Stage Run continues with your answers, and the output that asked stays an Artifact. An answer never grants a permission.',
+    agentProposed: false,
+  },
+] as const;
+
+/** The line a proposal Stage's Question shows in a list. */
+export function clarificationItemTitle(
+  stageId: string,
+  questions: readonly InboxQuestion[],
+): string {
+  const n = questions.length;
+  return `${stageId.charAt(0).toUpperCase()}${stageId.slice(1)} asks ${String(n)} question${n === 1 ? '' : 's'}`;
+}
+
+/** Each asked question with its answer (`null`: left unanswered), for the next Stage Run. Pure. */
+export function clarificationAnswers(
+  questions: readonly InboxQuestion[],
+  answers: readonly {
+    questionId: string;
+    option?: string | undefined;
+    text?: string | undefined;
+  }[],
+): ClarificationRound['answers'] {
+  return questions.map((q) => {
+    const a = answers.find((x) => x.questionId === q.id);
+    return {
+      question: q.text,
+      category: q.category ?? 'product',
+      answer: a === undefined ? null : (a.option ?? a.text ?? null),
+    };
+  });
+}
+
 function isHuman(category: ClarificationCategory): category is HumanCategory {
   return (HUMAN_CATEGORIES as readonly string[]).includes(category);
 }

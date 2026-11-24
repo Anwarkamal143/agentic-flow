@@ -70,6 +70,7 @@ import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
 import { inspectSpool } from '@factory/harness';
 import { openBlockerItem, raiseCap, replaceBlocker } from './blocker-approvals.js';
+import { continueAfterAnswers } from './clarification.js';
 import { applyCleanupDecision, checkCleanupAnswersOf } from './cleanup.js';
 import {
   ciFailedHolder,
@@ -361,6 +362,11 @@ export class InboxService {
           throw new ApiFailure(ANSWER_STATUS[refusal.code], refusal.code, refusal.message);
         }
         markDecided(tx, row, actor, { option: 'answer', comment: null, answers: input.answers });
+        if (row.taskId === null && row.stageRunId !== null) {
+          // A proposal Stage's Question (ADR-0071): a new Stage Run reads the answers.
+          continueAfterAnswers(state, step, { itemId: id, stageRunId: row.stageRunId, actor }, tx);
+          return;
+        }
         const task =
           row.taskId === null
             ? undefined

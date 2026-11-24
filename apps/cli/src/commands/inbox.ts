@@ -292,7 +292,13 @@ function writeItem(i: Approval): void {
           i.questions.some((q) => q.agentProposed)
             ? '  questions (asked by an agent):'
             : '  decide each (fixed options; unanswered keeps):',
-          ...i.questions.flatMap((q) => [
+          ...i.questions.flatMap((q, n) => [
+            // A proposal Stage's batch is grouped by category (ADR-0071).
+            ...(q.category !== undefined && q.category !== i.questions?.[n - 1]?.category
+              ? [
+                  `   ${q.category}${q.requiresApprover === true ? ' (needs approver rights)' : ''}:`,
+                ]
+              : []),
             `    ${q.id.padEnd(6)} ${q.blocking ? 'blocking' : 'optional'}  ${q.text}`,
             ...(q.options.length === 0
               ? ['           answer in free text']

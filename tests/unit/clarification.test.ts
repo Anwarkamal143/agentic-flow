@@ -122,20 +122,28 @@ describe('routing a proposal Stage’s questions', () => {
 
 describe('the shape of a proposal’s questions', () => {
   it('a well-formed set has no issues', () => {
-    expect(
-      clarificationIssues([discoverable, technical, product, security, operational]),
-    ).toEqual([]);
+    expect(clarificationIssues([discoverable, technical, product, security, operational])).toEqual(
+      [],
+    );
   });
 
   it('a Technical question needs the agent’s decision', () => {
-    const { decision: _d, ...undecided } = technical;
+    const undecided: ClarificationQuestion = {
+      category: 'technical',
+      text: technical.text,
+      options: ['bcrypt', 'argon2'],
+    };
     expect(clarificationIssues([undecided]).map((i) => i.rule)).toEqual([
       'clarification.technical_decision',
     ]);
   });
 
   it('a human question needs at least two options and a recommended one of them', () => {
-    const { recommended: _r, ...unrecommended } = security;
+    const unrecommended: ClarificationQuestion = {
+      category: 'security',
+      text: security.text,
+      options: ['allow', 'deny'],
+    };
     const issues = clarificationIssues([
       { ...product, options: ['1h'] },
       unrecommended,
