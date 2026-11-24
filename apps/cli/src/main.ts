@@ -65,8 +65,9 @@ Commands:
              [--description <text>] [--per-repository <n>] [--per-job <n>]
              [--merge-policy <policy>]
                                   Create a Job (unset --project: the only Project;
-                                  unset --repo: the Project's only Repository; repeat
-                                  --repo for a multi-repo Job, all of one Project); the
+                                  unset --repo: the Project's only Repository, or with
+                                  several, triage chooses; repeat --repo for a
+                                  multi-repo Job, all of one Project); the
                                   concurrency flags override its Task limits, and
                                   --merge-policy may only make each Repository's stricter
   job list [--json]               List Jobs, newest first

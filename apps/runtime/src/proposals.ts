@@ -141,9 +141,7 @@ const CHOOSE_REPOSITORIES = `No Repository was named for this Job: choose the Re
  */
 export const PROMPT_TEMPLATE_HASH = `sha256:${createHash('sha256')
   .update(
-    [TEMPLATE, ...PROPOSAL_STAGES.map((s) => s.ask), PROFILE_RULES, CHOOSE_REPOSITORIES].join(
-      '\0',
-    ),
+    [TEMPLATE, ...PROPOSAL_STAGES.map((s) => s.ask), PROFILE_RULES, CHOOSE_REPOSITORIES].join('\0'),
   )
   .digest('hex')}`;
 

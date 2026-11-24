@@ -49,7 +49,7 @@ describe('validateTriage', () => {
     const issues = validateTriage(triage(['api', 'billing', 'api']), PROJECT);
     expect(issues.map((i) => i.rule)).toEqual(['triage.repositories', 'triage.repositories']);
     expect(issues[0]?.message).toBe(
-      "billing is not a Repository of the Project (its Repositories: admin, api, web)",
+      'billing is not a Repository of the Project (its Repositories: admin, api, web)',
     );
     expect(issues[1]?.message).toBe('api is listed more than once');
   });
