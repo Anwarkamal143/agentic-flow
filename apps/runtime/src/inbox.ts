@@ -93,6 +93,7 @@ import {
   type StageRunStepper,
 } from './engine.js';
 import { ApiFailure } from './errors.js';
+import { startContractJob, type CreateJobIn } from './contract-job.js';
 import { parseProcess } from './execution.js';
 import { openQuestionItem } from './questions.js';
 import { stopIfAlive, worktreeStatus } from './recovery.js';
@@ -148,6 +149,10 @@ export class InboxService {
       GitHubPort,
       'listCheckRuns' | 'listWorkflowRuns' | 'rerunFailedJobs' | 'reopenPullRequest'
     > | null = null,
+    /** Job creation in a transaction, for a contract step's follow-up Job (#110). */
+    private readonly createJob: CreateJobIn = () => {
+      throw new Error('no Job creation configured');
+    },
   ) {}
 
   /** Open items not deferred, oldest first; `all` lists every item. */
@@ -268,6 +273,30 @@ export class InboxService {
       });
       await this.cancelFromItem(item);
       return this.get(item.id);
+    },
+    // The contract step's follow-up Job (#110, ADR-0052): `start_job` creates it with the
+    // decision, in one transaction; `decline` creates nothing.
+    contract_job: (item, input, actor) => {
+      changeJob(this.db, { jobId: item.jobId, expectedVersion: 'current', actor }, (tx) => {
+        const row = requireItem(tx, item.id);
+        refuseUnless(row, { actor, ...input });
+        const followUpJobId =
+          input.option === 'start_job'
+            ? startContractJob(tx, {
+                item: row,
+                actor,
+                readJson: (id) => this.artifacts.readJson(id),
+                createJob: this.createJob,
+              })
+            : undefined;
+        markDecided(tx, row, actor, {
+          option: input.option,
+          comment: input.comment ?? null,
+          ...(followUpJobId === undefined ? {} : { followUpJobId }),
+        });
+      });
+      this.onCommit();
+      return Promise.resolve(this.get(item.id));
     },
     cleanup: (item, input, actor) => {
       if (item.questionsJson !== null) {
@@ -1027,7 +1056,30 @@ export class InboxService {
           maxRetries: t.maxRetries,
         };
       });
-    const repoIds = [...new Set(tasks.map((t) => t.repositoryId))];
+    // The contract step (#110): in the stored Plan only, never Task rows.
+    const jobRepositories = this.db
+      .select({ id: schema.repositories.id, name: schema.repositories.name })
+      .from(schema.jobRepositories)
+      .innerJoin(
+        schema.repositories,
+        eq(schema.repositories.id, schema.jobRepositories.repositoryId),
+      )
+      .where(eq(schema.jobRepositories.jobId, jobId))
+      .all();
+    const deferredTasks = PlanProposalSchema.parse(this.artifacts.readJson(plan.id))
+      .tasks.filter((t) => t.deferred)
+      .map((t) => ({
+        key: t.key,
+        title: t.title,
+        objective: t.objective,
+        repositoryId:
+          jobRepositories.find((r) => r.id === t.repository || r.name === t.repository)?.id ??
+          t.repository,
+        dependsOn: t.dependsOn,
+        acceptance: t.acceptance,
+        writable: t.scope.writable,
+      }));
+    const repoIds = [...new Set([...tasks, ...deferredTasks].map((t) => t.repositoryId))];
     const repositories =
       repoIds.length === 0
         ? []
@@ -1079,6 +1131,7 @@ export class InboxService {
       repositorySetBy,
       tasks,
       integrationTasks,
+      deferredTasks,
       parallel: parallelWaves(tasks),
       decisionPoints: humanDecisionPoints(
         WorkflowSnapshotSchema.parse(JSON.parse(job.workflowSnapshotJson)),

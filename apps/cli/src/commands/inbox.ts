@@ -234,6 +234,16 @@ export async function planShow(jobId: string, opts: { json: boolean }): Promise<
               `  ${t.key.padEnd(14)} ${t.state.padEnd(10)} ${repoName(t.repositoryId)}  ${t.branch}`,
           ),
         ]),
+    ...(view.deferredTasks.length === 0
+      ? []
+      : [
+          'Deferred (the contract step, offered as a follow-up Job once every pull request has merged):',
+          ...view.deferredTasks.flatMap((t) => [
+            `  ${t.key.padEnd(14)} ${repoName(t.repositoryId)}  ${t.title}`,
+            `    after:    ${t.dependsOn.join(', ') || '(none)'}`,
+            `    writable: ${t.writable.join(', ')}`,
+          ]),
+        ]),
     'Run in parallel:',
     ...view.parallel.map((w, n) => `  wave ${String(n + 1)}: ${w.join(', ')}`),
     'Risks:',
@@ -304,6 +314,11 @@ function writeItem(i: Approval): void {
     lines.push(
       `  decided:    ${i.decision.option}${i.decision.grant === undefined ? '' : ` +${String(i.decision.grant)}`} by ${i.decidedBy ?? '?'} at ${i.decidedAt ?? '?'}` +
         (i.decision.comment === null ? '' : `: ${i.decision.comment}`),
+      ...(i.decision.followUpJobId === undefined
+        ? []
+        : [
+            `  follow-up Job: ${i.decision.followUpJobId} (factory job show ${i.decision.followUpJobId})`,
+          ]),
       ...(i.decision.answers ?? []).map(
         (a) =>
           `    ${a.questionId.padEnd(6)} ${a.option !== undefined ? `option ${a.option}` : `text ${a.text ?? ''}`}`,

@@ -21,6 +21,8 @@ interface TaskOver {
   dependsOn?: string[];
   repository?: string;
   maxAttempts?: number;
+  acceptance?: string[];
+  deferred?: boolean;
   verification?: { key: string; command: string; args?: string[]; criteria?: string[] }[];
 }
 
@@ -35,8 +37,11 @@ const plan = (...tasks: TaskOver[]): PlanProposal =>
       risk: 'low',
       scope: { writable: t.writable },
       dependsOn: t.dependsOn ?? [],
-      acceptance: ['AC-01'],
-      verification: t.verification ?? [{ key: 'test', command: 'pass', criteria: ['AC-01'] }],
+      acceptance: t.acceptance ?? ['AC-01'],
+      verification: t.verification ?? [
+        { key: 'test', command: 'pass', criteria: t.acceptance ?? ['AC-01'] },
+      ],
+      ...(t.deferred === undefined ? {} : { deferred: t.deferred }),
       ...(t.maxAttempts === undefined ? {} : { maxAttempts: t.maxAttempts }),
     })),
   });
@@ -466,5 +471,92 @@ describe('validatePlan: cross-repo dependency cycles (ADR-0052)', () => {
         ),
       ),
     ).toEqual(['plan.no_cycles']);
+  });
+});
+
+describe('validatePlan: deferred contract Tasks (ADR-0052, #110)', () => {
+  // expand (app) → migrate (web) → contract (app): the contract step removes the old interface.
+  const contract = (over: Partial<TaskOver> = {}) =>
+    plan(
+      { key: 'expand', writable: ['src/a/**'] },
+      { key: 'migrate', writable: ['src/**'], repository: 'web', dependsOn: ['expand'] },
+      { key: 'contract', writable: ['src/a/**'], dependsOn: ['migrate'], deferred: true, ...over },
+    );
+
+  it('defaults a Task to not deferred and keeps deferred: true', () => {
+    const parsed = contract();
+    expect(parsed.tasks.map((t) => [t.key, t.deferred])).toEqual([
+      ['expand', false],
+      ['migrate', false],
+      ['contract', true],
+    ]);
+  });
+
+  it('leaves a deferred Task out of the Delivery Order and the overlap check', () => {
+    // Without deferred, contract makes app → web → app a cycle.
+    expect(rules(contract())).toEqual([]);
+    expect(rules(contract({ deferred: false }))).toEqual(['plan.delivery_order_cycle']);
+    // Unordered with expand and on its paths: it never runs beside it.
+    expect(rules(contract({ dependsOn: [] }))).toEqual([]);
+    expect(rules(contract({ dependsOn: [], deferred: false }))).toEqual([
+      'plan.no_overlapping_writes',
+    ]);
+  });
+
+  it('refuses a Task that runs but depends on a deferred one', () => {
+    const found = issues(
+      plan(
+        { key: 'expand', writable: ['src/a/**'] },
+        { key: 'contract', writable: ['src/b/**'], dependsOn: ['expand'], deferred: true },
+        { key: 'after', writable: ['src/**'], repository: 'web', dependsOn: ['contract'] },
+      ),
+    );
+    expect(found).toEqual([
+      {
+        rule: 'plan.deferred_dependency',
+        message:
+          'Task after depends on deferred Task contract, which does not run in this Job; a deferred Task is the contract step, offered as a follow-up Job once every pull request has merged',
+      },
+    ]);
+  });
+
+  it('counts only Tasks that run toward a mandatory criterion', () => {
+    expect(
+      issues(
+        plan(
+          { key: 'expand', writable: ['src/a/**'], acceptance: [] },
+          { key: 'contract', writable: ['src/b/**'], dependsOn: ['expand'], deferred: true },
+        ),
+        ctx({ criteria: [{ code: 'AC-01', mandatory: true }] }),
+      ),
+    ).toEqual([
+      {
+        rule: 'plan.mandatory_criteria_covered',
+        message:
+          'mandatory AC-01 is covered by no Task that runs in this Job (deferred Tasks do not)',
+      },
+    ]);
+  });
+
+  it('refuses a Plan whose every Task is deferred', () => {
+    expect(rules(plan({ key: 'contract', writable: ['src/**'], deferred: true }))).toContain(
+      'plan.no_runnable_task',
+    );
+  });
+
+  it('refuses an upstream Task with a dependent in another Repository that covers no criterion: the contract is verified, not assumed (story 60)', () => {
+    const found = issues(
+      plan(
+        { key: 'expand', writable: ['src/a/**'], acceptance: [] },
+        { key: 'migrate', writable: ['src/**'], repository: 'web', dependsOn: ['expand'] },
+      ),
+    );
+    expect(found).toEqual([
+      {
+        rule: 'plan.contract_criteria',
+        message:
+          'Task expand: Task migrate of Repository web depends on it, so it must cover the Acceptance Criteria that state the contract (the interface migrate codes against)',
+      },
+    ]);
   });
 });

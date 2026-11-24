@@ -659,6 +659,13 @@ function writeDelivery(report: DeliveryReport): void {
       }
     }
   }
+  const contract = version >= 7 ? report.contractStep : null;
+  if (contract !== null) {
+    lines.push(
+      `  Contract step (pending): deferred by the Plan, never run in this Job`,
+      ...contract.tasks.map((t) => `    - ${t.key} (${t.repository}): ${t.title}`),
+    );
+  }
   lines.push(...report.notes.map((n) => `  ${n}`));
   if (report.knownLimitations.length > 0) {
     lines.push('Known limitations:', ...report.knownLimitations.map((l) => `  - ${l}`));

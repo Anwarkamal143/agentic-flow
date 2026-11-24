@@ -10,6 +10,8 @@ import { buildDeliveryReport } from './delivery.js';
 import { changeJob, stepWorktree, type JobState } from './engine.js';
 import { requireWorktree } from './worktree.js';
 import { heldRepositoryBlocker } from './writability.js';
+import { openContractJobItem } from './contract-job.js';
+import { DeliveryReportSchema, PlanProposalSchema } from '@factory/domain';
 
 /** The Task scheduler, which runs closure. */
 const ACTOR = 'system:scheduler';
@@ -80,7 +82,11 @@ export async function runClosure(
   // it is never written twice.
   const existing = deps.artifacts.listForJob(jobId).find((a) => a.kind === 'report');
   if (existing === undefined) {
-    const content = deps.artifacts.writeContent(await buildDeliveryReport(db, jobId));
+    const content = deps.artifacts.writeContent(
+      await buildDeliveryReport(db, jobId, (id) =>
+        PlanProposalSchema.parse(deps.artifacts.readJson(id)),
+      ),
+    );
     db.transaction(
       (tx) => {
         deps.artifacts.record(tx, { jobId, kind: 'report', content }, ACTOR);
@@ -143,13 +149,21 @@ export async function runClosure(
     deps.onCommit();
   }
 
+  const reportArtifact = deps.artifacts.listForJob(jobId).find((a) => a.kind === 'report');
+  if (reportArtifact === undefined) throw new Error(`Job ${jobId} has no Delivery Report`);
+  const report = DeliveryReportSchema.parse(deps.artifacts.readJson(reportArtifact.id));
   changeJob(db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx, state, step) => {
     const run = requireStageRun(state, stageRunId, 'running');
     // A Partial Completion (#108, ADR-0068): a Repository held by repository_not_writable
     // was not delivered, so the Job stays blocked on it until a human cancels.
     const held = heldRepositoryBlocker(tx, jobId);
-    if (held !== undefined) step(run, 'blocked', { blocker: held });
-    else step(run, 'succeeded');
+    if (held !== undefined) {
+      step(run, 'blocked', { blocker: held });
+      return;
+    }
+    step(run, 'succeeded');
+    // The contract step (#110, ADR-0052): every PR merged, so a follow-up Job is offered.
+    openContractJobItem(tx, { jobId, reportArtifactId: reportArtifact.id, report, actor: ACTOR });
   });
   deps.onCommit();
 }

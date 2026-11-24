@@ -391,6 +391,8 @@ const app = createApp({
     // A Blocker Approval's "cancel the Job" is the cancel operation itself (ADR-0026).
     (jobId, input) => jobs.cancel(jobId, input),
     githubPort,
+    // A contract step's follow-up Job (#110): created with the decision, by its decider.
+    (tx, input, opts) => jobs.createIn(tx, input, opts),
   ),
   artifacts,
   logs: (jobId) => jobLogs(database.db, artifacts, jobId),

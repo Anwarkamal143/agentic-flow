@@ -210,6 +210,27 @@ export function PlanViewCard({ plan }: { plan: PlanView }) {
             </ul>
           </Section>
         )}
+        {plan.deferredTasks.length > 0 && (
+          <Section title="Deferred: the contract step (a follow-up Job once every PR has merged)">
+            <ul className="space-y-2" data-testid="plan-deferred-tasks">
+              {plan.deferredTasks.map((t) => (
+                <li key={t.key} className="rounded-md border p-3 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-xs">{t.key}</span>
+                    <span className="font-medium">{t.title}</span>
+                    <Badge variant="outline">deferred</Badge>
+                    <span>{repoName.get(t.repositoryId) ?? t.repositoryId}</span>
+                  </div>
+                  <p className="mt-1">{t.objective}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    After {t.dependsOn.length === 0 ? 'nothing' : t.dependsOn.join(', ')}; never
+                    runs in this Job.
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
         <Section title="Affected repositories">
           <List items={plan.repositories.map((r) => r.name)} empty="None." />
           {plan.repositorySetBy === 'triage' && (

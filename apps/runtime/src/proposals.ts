@@ -109,9 +109,11 @@ export interface RepositoryPromptProfile {
  * unaffected work (ADR-0029); `@4` added the re-specification section
  * (ADR-0031); `@5` lists the planner's profile commands and Sensitive Paths (#102);
  * `@6` says a verification command that names no profile command is invalid (#104);
- * `@7` asks triage to choose the Repository set when none was named (#107).
+ * `@7` asks triage to choose the Repository set when none was named (#107);
+ * `@8` tells a multi-repo planner to write the contract into the upstream
+ * Task's Acceptance Criteria and to defer the contract step (#110, story 60).
  */
-export const PROMPT_TEMPLATE_ID = 'proposal-stage@7';
+export const PROMPT_TEMPLATE_ID = 'proposal-stage@8';
 
 const TEMPLATE = `You are the {{role}} for a software Job in an automated software factory.
 {{ask}}
@@ -120,7 +122,7 @@ Job {{jobId}}: {{title}}
 {{description}}
 
 Repositories: {{repositories}}
-{{choose}}{{profiles}}
+{{choose}}{{profiles}}{{contract}}
 Earlier outputs of this Job (JSON, by kind):
 {{inputs}}
 {{replan}}{{respec}}{{rejected}}
@@ -131,17 +133,32 @@ Reply with exactly one JSON object and nothing else. It must match this JSON Sch
 /** What the planner is told about verification commands and Sensitive Paths (#102, #104). */
 const PROFILE_RULES = `A verification entry's command must be the name of one of its Repository's profile commands, never a shell command: a Plan with any other command is invalid. Give args only to a command that accepts arguments; each argument must match ${VERIFICATION_ARG_PATTERN.source}. Never list a Sensitive Path in writable.`;
 
+/**
+ * What a multi-repo planner is told about the contract between Repositories
+ * (ADR-0052, #110, story 60): the upstream Task's Acceptance Criteria carry
+ * the contract, and the contract step is deferred to a follow-up Job.
+ */
+const CONTRACT_RULES = `When a Task depends on a Task of another Repository, the upstream Task provides the contract: write the interface it adds (names, signatures, shapes) into its objective, and list in its acceptance the Acceptance Criteria that verify that interface, so the contract is verified, not assumed. A Plan whose upstream Task covers no Acceptance Criterion is invalid.
+Change the interface expand → migrate → contract: add the new interface without breaking the old one, migrate the consumers, and put the contract step (removing the old interface) in Tasks marked "deferred": true. Deferred Tasks do not run in this Job; once every pull request has merged, a human is offered them as a follow-up Job. No Task that runs may depend on a deferred Task.`;
+
 /** What triage is told when it chooses the Job's Repository set (#107, ADR-0067). */
 const CHOOSE_REPOSITORIES = `No Repository was named for this Job: choose the Repositories it must change from the Project's Repositories listed above, and give their names in "repositories". Choose only what the Job needs; a set of more than one waits for a human to confirm it.`;
 
 /**
  * Hash of the template's fixed text (the template, each Stage's ask, the
- * planner's profile rules and triage's choice text; `@6` added the asks and
- * profile rules, `@7` the choice text), recorded with each Harness Run.
+ * planner's profile rules and contract rules and triage's choice text; `@6`
+ * added the asks and profile rules, `@7` the choice text, `@8` the contract
+ * rules), recorded with each Harness Run.
  */
 export const PROMPT_TEMPLATE_HASH = `sha256:${createHash('sha256')
   .update(
-    [TEMPLATE, ...PROPOSAL_STAGES.map((s) => s.ask), PROFILE_RULES, CHOOSE_REPOSITORIES].join('\0'),
+    [
+      TEMPLATE,
+      ...PROPOSAL_STAGES.map((s) => s.ask),
+      PROFILE_RULES,
+      CHOOSE_REPOSITORIES,
+      CONTRACT_RULES,
+    ].join('\0'),
   )
   .digest('hex')}`;
 
@@ -178,6 +195,8 @@ export function renderPrompt(stage: ProposalStage, input: PromptInput): string {
         ? '(none)'
         : input.inputs.map((i) => `${i.kind}: ${JSON.stringify(i.content)}`).join('\n'),
     profiles: stage.stageId === 'planning' ? profilesSection(input.profiles ?? []) : '',
+    contract:
+      stage.stageId === 'planning' && input.repositories.length > 1 ? `\n${CONTRACT_RULES}\n` : '',
     replan,
     respec,
     rejected,

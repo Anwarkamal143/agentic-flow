@@ -233,6 +233,17 @@ export const PlanTaskProposalSchema = z.object({
   priority: TaskPrioritySchema.default('normal'),
   /** Attempts this Task may take. It may only narrow the Effective Configuration's value. */
   maxAttempts: z.number().int().positive().optional(),
+  /**
+   * A contract Task (ADR-0052, #110): it removes the old interface once every
+   * consumer migrated, so it never runs in this Job. Once every pull request
+   * has merged, an Approval offers it as a follow-up Job.
+   */
+  deferred: z
+    .boolean()
+    .default(false)
+    .describe(
+      'true only for the contract step: a Task that removes or breaks the old interface. It does not run in this Job; it is offered as a follow-up Job once every pull request has merged.',
+    ),
 });
 export type PlanTaskProposal = z.infer<typeof PlanTaskProposalSchema>;
 
@@ -319,11 +330,18 @@ export interface PlanContext {
  * `maxAttempts` that only narrows, no `writable` entry that is literally a
  * Sensitive Path of the Task's Repository, no cycle between Repositories (the
  * Delivery Order, ADR-0052), and no overlapping writable paths
- * between Tasks that no dependency path orders.
+ * between Tasks that no dependency path orders. Deferred (contract) Tasks
+ * (#110) are checked as Tasks, but only the Tasks that run make the Delivery
+ * Order, the overlap check and mandatory coverage; none of those may depend
+ * on a deferred one, and an upstream of another Repository's Task must cover
+ * Acceptance Criteria (the contract, story 60).
  */
 export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] {
   const issues: RuleIssue[] = [];
   const keys = new Set(plan.tasks.map((t) => t.key));
+  const deferredKeys = new Set(plan.tasks.filter((t) => t.deferred).map((t) => t.key));
+  // What runs in this Job: deferred Tasks are the contract step's (ADR-0052).
+  const runnable: PlanProposal = { ...plan, tasks: plan.tasks.filter((t) => !t.deferred) };
   const criteria = new Set(ctx.criteria.map((c) => c.code));
 
   for (const dup of duplicates(plan.tasks.map((t) => t.key))) {
@@ -374,6 +392,11 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
           rule: 'plan.dependencies_exist',
           message: `${at} depends on unknown Task ${dep}`,
         });
+      } else if (!task.deferred && deferredKeys.has(dep)) {
+        issues.push({
+          rule: 'plan.deferred_dependency',
+          message: `${at} depends on deferred Task ${dep}, which does not run in this Job; a deferred Task is the contract step, offered as a follow-up Job once every pull request has merged`,
+        });
       }
     }
     for (const ac of task.acceptance) {
@@ -407,12 +430,20 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
       });
     }
   }
+  if (runnable.tasks.length === 0) {
+    issues.push({
+      rule: 'plan.no_runnable_task',
+      message:
+        'every Task is deferred: a Plan needs at least one Task that runs in this Job (only the contract step is deferred)',
+    });
+  }
   const cycle = findCycle(plan.tasks);
   if (cycle !== undefined) {
     issues.push({ rule: 'plan.no_cycles', message: `dependency cycle: ${cycle.join(' → ')}` });
   } else {
+    // The contract step comes after the consumers in another Job: its edges order nothing here.
     const order = deliveryOrder(
-      plan.tasks.map((t) => ({ ...t, repository: repositoryIdOf(ctx, t.repository) ?? '' })),
+      runnable.tasks.map((t) => ({ ...t, repository: repositoryIdOf(ctx, t.repository) ?? '' })),
       ctx.repositories,
     );
     if (!order.ok) {
@@ -422,14 +453,42 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
       });
     }
   }
-  issues.push(...overlapIssues(plan, ctx));
+  issues.push(...contractCriteriaIssues(runnable, ctx));
+  issues.push(...overlapIssues(runnable, ctx));
   for (const c of ctx.criteria) {
-    if (c.mandatory && !plan.tasks.some((t) => t.acceptance.includes(c.code))) {
+    if (c.mandatory && !runnable.tasks.some((t) => t.acceptance.includes(c.code))) {
+      const deferredOnly = plan.tasks.some((t) => t.acceptance.includes(c.code));
       issues.push({
         rule: 'plan.mandatory_criteria_covered',
-        message: `mandatory ${c.code} is covered by no Task`,
+        message: `mandatory ${c.code} is covered by no Task${deferredOnly ? ' that runs in this Job (deferred Tasks do not)' : ''}`,
       });
     }
+  }
+  return issues;
+}
+
+/**
+ * `plan.contract_criteria` (story 60, ADR-0052): a Task that a Task of
+ * another Repository depends on provides the contract, the interface its
+ * dependents code against, so it must cover Acceptance Criteria (the
+ * planner writes the contract into them): its review and Evidence then
+ * verify the interface instead of assuming it.
+ */
+function contractCriteriaIssues(plan: PlanProposal, ctx: PlanContext): RuleIssue[] {
+  const repoOf = (t: PlanTaskProposal) => repositoryIdOf(ctx, t.repository) ?? t.repository;
+  const issues: RuleIssue[] = [];
+  for (const upstream of plan.tasks) {
+    if (upstream.acceptance.length > 0) continue;
+    const dependent = plan.tasks.find(
+      (t) => t.dependsOn.includes(upstream.key) && repoOf(t) !== repoOf(upstream),
+    );
+    if (dependent === undefined) continue;
+    const name =
+      ctx.repositories.find((r) => r.id === repoOf(dependent))?.name ?? dependent.repository;
+    issues.push({
+      rule: 'plan.contract_criteria',
+      message: `Task ${upstream.key}: Task ${dependent.key} of Repository ${name} depends on it, so it must cover the Acceptance Criteria that state the contract (the interface ${dependent.key} codes against)`,
+    });
   }
   return issues;
 }
