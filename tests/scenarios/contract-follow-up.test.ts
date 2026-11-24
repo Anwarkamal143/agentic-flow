@@ -403,7 +403,7 @@ describe('the planner prompt: contract and deferred contract step (story 60)', (
       (e) => e.type === 'harness_run.started' && e.payload['stageId'] === 'planning',
     );
     expect((started?.payload['template'] as { id: string } | undefined)?.id).toBe(
-      'proposal-stage@8',
+      'proposal-stage@9',
     );
   });
 

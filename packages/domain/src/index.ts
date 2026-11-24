@@ -73,6 +73,7 @@ export * from './dependency-base.js';
 export * from './delivery-order.js';
 export * from './contract-step.js';
 export * from './questions.js';
+export * from './clarification.js';
 export * from './blocker-approvals.js';
 export * from './carry-over.js';
 export * from './keep-going.js';
@@ -942,6 +943,13 @@ export const ArtifactKindSchema = z.enum([
   'replan_request',
   /** A re-specification asked for by a `spec` Finding or a human (ADR-0031), never regenerated. */
   'respec_request',
+  /**
+   * A proposal Stage Run's output that stopped on its questions (ADR-0071):
+   * kept, never applied and never regenerated; the next Stage Run reads it.
+   */
+  'clarification',
+  /** The Technical decisions an agent made in a proposal Stage Run, ADR-style (ADR-0071). */
+  'decision_record',
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 

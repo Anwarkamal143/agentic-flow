@@ -30,6 +30,7 @@ import {
 import { and, desc, eq, sql } from 'drizzle-orm';
 import type { ArtifactStore } from './artifacts.js';
 import { openBlockerItem, replaceBlocker } from './blocker-approvals.js';
+import { isClarificationRerun } from './clarification.js';
 import { currentSpec } from './criteria.js';
 import { readJobState, stepTask, type JobState, type StageRunStepper } from './engine.js';
 import type { FaultRouteInput } from './fault-route.js';
@@ -218,6 +219,8 @@ export function respecRequestOf(
   readJson: (artifactId: string) => unknown,
 ): RespecRequest | undefined {
   if (run.stageId !== 'specification' || run.attempt <= 1) return undefined;
+  // A re-run after the Stage stopped on its questions answers them, not a Finding (ADR-0071).
+  if (isClarificationRerun(db, run)) return undefined;
   const request = newestRequest(db, run.jobId);
   if (request === undefined) throw new Error(`re-specification of Job ${run.jobId} has no request`);
   return {
