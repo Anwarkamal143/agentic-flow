@@ -90,6 +90,7 @@ export * from './factory-level.js';
 export * from './config-levels.js';
 export * from './scheduling.js';
 export * from './profile.js';
+export * from './writability.js';
 
 /** Operator-set Project configuration. Every field is optional: unset means inherit. */
 export const ProjectConfigSchema = z
