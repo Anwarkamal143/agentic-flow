@@ -107,6 +107,12 @@ export interface PullRequestBodyInput {
       pullRequest: { label: string; url: string; state: PullRequestState } | null;
     }[];
   } | null;
+  /**
+   * The issue an issue-sourced Job came from (#112, ADR-0072): `line` is
+   * `Closes #N` in the issue's own Repository's PR (`closes`) and `Refs
+   * owner/name#N` in the others (`issueReferenceLine`). `null`: no section.
+   */
+  issue: { line: string; closes: boolean; label: string } | null;
 }
 
 /** The PRs of a multi-repo Job are not atomic: said in each PR body and the Delivery Report. */
@@ -134,6 +140,14 @@ function multiRepositorySection(
     `Delivery Order: ${multi.order.map((r) => code(r.repository)).join(' → ')}. Merge them in this order: the Merge Gate of a later Repository waits until the pull requests it comes after have merged.`,
     list(entries),
   ].join('\n\n');
+}
+
+/** The `## Issue` section: the closing keyword in the issue's own Repository's PR only. */
+function issueSection(issue: NonNullable<PullRequestBodyInput['issue']>): string {
+  const why = issue.closes
+    ? `The Job came from issue ${issue.label}; merging this pull request closes it.`
+    : `The Job came from issue ${issue.label}, which belongs to another Repository of the Job: only the pull request of that Repository will close the issue, so merging this one leaves it open.`;
+  return `## Issue\n\n${issue.line}. ${why}`;
 }
 
 /**
@@ -179,6 +193,7 @@ export function renderPullRequestBody(input: PullRequestBodyInput, redact: Redac
     ...(input.changedFiles === 0
       ? [`## No changes\n\n**${emptyDeliveryNote(input.headSha, input.baseSha)}**`]
       : []),
+    ...(input.issue === null ? [] : [issueSection(input.issue)]),
     ...(input.multiRepository === null
       ? []
       : [multiRepositorySection(input.jobId, input.multiRepository)]),

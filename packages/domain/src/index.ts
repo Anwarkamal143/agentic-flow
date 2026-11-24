@@ -72,6 +72,7 @@ export * from './capacity.js';
 export * from './dependency-base.js';
 export * from './delivery-order.js';
 export * from './contract-step.js';
+export * from './issue-intake.js';
 export * from './questions.js';
 export * from './clarification.js';
 export * from './blocker-approvals.js';

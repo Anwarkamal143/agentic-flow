@@ -77,6 +77,7 @@ function input(overrides: Partial<PullRequestBodyInput> = {}): PullRequestBodyIn
     droppedCommits: [],
     changedFiles: 2,
     multiRepository: null,
+    issue: null,
     ...overrides,
   };
 }

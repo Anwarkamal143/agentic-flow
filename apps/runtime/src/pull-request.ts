@@ -1466,6 +1466,7 @@ export function pullRequestBodyInput(
     })),
     changedFiles,
     multiRepository: multiRepositoryOf(db, job.id, task.repositoryId),
+    issue: null,
   };
 }
 
