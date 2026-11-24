@@ -648,6 +648,7 @@ function writeDelivery(report: DeliveryReport): void {
     for (const r of repositories) {
       lines.push(
         `    ${r.name}: ${r.status.replaceAll('_', ' ')}` +
+          (r.blocker === null ? '' : ` (${r.blocker.reason})`) +
           (r.after.length === 0 ? '' : ` (after ${r.after.join(', ')})`) +
           (r.pullRequest === null ? '' : `, ${r.pullRequest}`) +
           (r.integration === null ? '' : `, ${r.integration.branch} (${r.integration.state})`) +

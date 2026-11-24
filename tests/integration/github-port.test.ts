@@ -391,3 +391,39 @@ describe('GitHub port: the rate-limit gate (#66, ADR-0045)', () => {
     expect(head.ok).toBe(true);
   });
 });
+
+describe('GitHub port: push permission (#108, ADR-0068)', () => {
+  it("reads the token's push permission; the fake can deny it", async () => {
+    const { gh, port } = await setup();
+    expect(await port.getPushPermission(REPO)).toEqual({ ok: true, value: { push: true } });
+
+    gh.denyPush('acme/tiny-ts');
+    expect(await port.getPushPermission(REPO)).toEqual({ ok: true, value: { push: false } });
+
+    gh.allowPush('acme/tiny-ts');
+    expect(await port.getPushPermission(REPO)).toEqual({ ok: true, value: { push: true } });
+  });
+
+  it('a repository the token cannot see is a refusal', async () => {
+    const { port } = await setup();
+    expect(failureOf(await port.getPushPermission({ owner: 'acme', name: 'missing' }))).toEqual({
+      kind: 'refused',
+      status: 404,
+      reason: 'Not Found',
+    });
+  });
+
+  it('the fake refuses a git push to a repository it denies, as GitHub does', async () => {
+    const { gh, remote } = await setup();
+    const work = tinyTsRepo();
+    // The REST API still says push: the git side alone refuses (a permission lost mid-Job).
+    gh.denyPush('acme/tiny-ts', { apiStillAllows: true });
+    expect(() => git(work, ['push', '--quiet', remote.bareDir, 'HEAD:refs/heads/denied'])).toThrow(
+      /Permission to acme\/tiny-ts\.git denied/,
+    );
+    expect(gh.branchHead('acme/tiny-ts', 'denied')).toBeUndefined();
+    gh.allowPush('acme/tiny-ts');
+    git(work, ['push', '--quiet', remote.bareDir, 'HEAD:refs/heads/allowed']);
+    expect(gh.branchHead('acme/tiny-ts', 'allowed')).toBeDefined();
+  });
+});

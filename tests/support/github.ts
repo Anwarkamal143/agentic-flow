@@ -17,7 +17,7 @@
  * a reopen, and simulate a 304, a rate limit, a 5xx or a dropped connection.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -157,6 +157,8 @@ interface Repo {
   appSuites: Map<string, number>;
   statuses: (StatusInput & { id: number; sha: string; createdAt: string })[];
   refusedMethods: Set<MergeMethod>;
+  /** What `GET /repos/:owner/:name` reports as `permissions.push` for the token. */
+  push: boolean;
 }
 
 /** The newest check run of each job (name) of a workflow run. */
@@ -245,6 +247,15 @@ export interface FakeGitHub {
   /** The repository's settings allow `method` again. */
   allowMergeMethod(fullName: string, method: MergeMethod): void;
   refuseReopen(fullName: string, number: number): void;
+  /**
+   * The token loses push permission (#108): the repository's `permissions.push`
+   * reads false and a git push to it is refused as GitHub refuses it
+   * ("Permission to owner/name.git denied"). `apiStillAllows`: only git refuses,
+   * the REST API still reports push (a permission lost between two reads).
+   */
+  denyPush(fullName: string, opts?: { apiStillAllows?: boolean }): void;
+  /** The token may push again, through the API and git. */
+  allowPush(fullName: string): void;
   /** Queues a one-shot fault for the next API request (matching `path`, when given). */
   simulate(fault: Fault, opts?: { path?: RegExp }): void;
 }
@@ -409,6 +420,16 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
     >;
     let r: RegExpExecArray | null;
 
+    if (rest === '' && method === 'GET') {
+      return {
+        status: 200,
+        body: {
+          full_name: repo.remote.fullName,
+          default_branch: defaultBranch(repo),
+          permissions: { admin: false, maintain: false, push: repo.push, triage: true, pull: true },
+        },
+      };
+    }
     if (rest === '/pulls' && method === 'GET') {
       const state = query.get('state') ?? 'open';
       const headQ = query.get('head');
@@ -816,6 +837,7 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
         appSuites: new Map(),
         statuses: [],
         refusedMethods: new Set(),
+        push: true,
       });
       return remote;
     },
@@ -953,6 +975,23 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
     },
     refuseReopen(fullName, number) {
       prOf(fullName, number).refuseReopen = true;
+    },
+    denyPush(fullName, opts) {
+      const repo = repoOf(fullName);
+      repo.push = opts?.apiStillAllows === true;
+      // git's receive-pack runs the hook: the push is refused with GitHub's own words.
+      const hook = join(repo.remote.bareDir, 'hooks', 'pre-receive');
+      mkdirSync(dirname(hook), { recursive: true });
+      writeFileSync(
+        hook,
+        `#!/bin/sh\necho "Permission to ${repo.remote.fullName}.git denied to factory-bot." >&2\nexit 1\n`,
+        { mode: 0o755 },
+      );
+    },
+    allowPush(fullName) {
+      const repo = repoOf(fullName);
+      repo.push = true;
+      rmSync(join(repo.remote.bareDir, 'hooks', 'pre-receive'), { force: true });
     },
     simulate(fault, opts) {
       faults.push({ fault, ...(opts?.path === undefined ? {} : { path: opts.path }) });

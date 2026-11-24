@@ -223,6 +223,10 @@ const commentWire = z.object({
 });
 const reviewCommentWire = commentWire.extend({ path: z.string().nullable().optional() });
 const branchWire = z.object({ commit: z.object({ sha: z.string() }) });
+/** `permissions` is present only for an authenticated request; absent reads as no push. */
+const repositoryWire = z.object({
+  permissions: z.object({ push: z.boolean().optional() }).nullable().optional(),
+});
 const mergeWire = z.object({ sha: z.string() });
 const messageWire = z.object({ message: z.string() });
 
@@ -475,6 +479,18 @@ export class GitHubPort {
       body,
     });
     return mapResult(res, commentWire, toComment);
+  }
+
+  // ---- the repository ----
+
+  /**
+   * Whether the token may push to `repo` (#108, ADR-0068): GitHub's
+   * `permissions.push` on the repository. A repository the token can't see is
+   * a refusal (GitHub answers 404). Never polled, so it takes no ETag.
+   */
+  async getPushPermission(repo: GitHubCoordinates): Promise<GitHubResult<{ push: boolean }>> {
+    const res = await this.send('GET', repoPath(repo));
+    return mapResult(res, repositoryWire, (r) => ({ push: r.permissions?.push === true }));
   }
 
   // ---- branches ----
