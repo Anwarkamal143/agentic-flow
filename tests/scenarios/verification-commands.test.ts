@@ -212,8 +212,8 @@ describe('verification by profile command name', () => {
       (e) => e.type === 'harness_run.started' && e.payload['stageId'] === 'planning',
     );
     expect(planning.map((e) => (e.payload['template'] as { id: string }).id)).toEqual([
-      'proposal-stage@6',
-      'proposal-stage@6',
+      'proposal-stage@7',
+      'proposal-stage@7',
     ]);
     // The free shell never ran: every verification run names a profile command.
     const attempt = await onlyAttempt<AttemptBody>(rt, job.id);

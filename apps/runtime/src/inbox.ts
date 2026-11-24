@@ -1027,6 +1027,7 @@ export class InboxService {
             .select({ id: schema.repositories.id, name: schema.repositories.name })
             .from(schema.repositories)
             .where(inArray(schema.repositories.id, repoIds))
+            .orderBy(asc(schema.repositories.name), asc(schema.repositories.id))
             .all();
     // Who chose the Job's Repository set: a triage-chosen one of several waits for a human (ADR-0067).
     const repositorySetBy = RepositorySetBySchema.parse(job.repositorySetBy);
