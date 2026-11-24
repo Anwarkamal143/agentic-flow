@@ -32,6 +32,7 @@ import {
   checkMergeChangeRequest,
   EffectiveConfigSchema,
   humanDecisionPoints,
+  RepositorySetBySchema,
   InboxDecisionSchema,
   JobStatusSchema,
   TERMINAL_JOB_STATUSES,
@@ -1027,6 +1028,13 @@ export class InboxService {
             .from(schema.repositories)
             .where(inArray(schema.repositories.id, repoIds))
             .all();
+    // Who chose the Job's Repository set: a triage-chosen one of several waits for a human (ADR-0067).
+    const repositorySetBy = RepositorySetBySchema.parse(job.repositorySetBy);
+    const jobRepositoryCount = this.db
+      .select({ id: schema.jobRepositories.repositoryId })
+      .from(schema.jobRepositories)
+      .where(eq(schema.jobRepositories.jobId, jobId))
+      .all().length;
     const item = this.db
       .select()
       .from(schema.approvals)
@@ -1059,12 +1067,16 @@ export class InboxService {
       specificationArtifactId: spec?.id ?? null,
       triageRisk,
       repositories,
+      repositorySetBy,
       tasks,
       integrationTasks,
       parallel: parallelWaves(tasks),
       decisionPoints: humanDecisionPoints(
         WorkflowSnapshotSchema.parse(JSON.parse(job.workflowSnapshotJson)),
-        { planApproval: config.planApproval.value },
+        {
+          planApproval: config.planApproval.value,
+          confirmRepositorySet: repositorySetBy === 'triage' && jobRepositoryCount > 1,
+        },
       ),
       estimate: planEstimate(tasks, {
         maxQuestions: config.maxQuestions.value,

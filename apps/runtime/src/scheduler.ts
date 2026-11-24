@@ -17,6 +17,7 @@ import {
   PlanProposalSchema,
   schemaIssues,
   SpecificationProposalSchema,
+  TriageProposalSchema,
   type ArtifactKind,
   type PlanContext,
   type RuleIssue,
@@ -40,6 +41,7 @@ import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
 import { currentSpec } from './criteria.js';
 import { queueNextStage } from './plan-approval.js';
+import { applyTriageRepositorySet, repositoryCandidatesOf } from './repository-set.js';
 import {
   commandsOf,
   persistPlanTasks,
@@ -230,7 +232,11 @@ export class StageScheduler {
     const stage = proposalStage(run.stageId);
     if (stage === undefined) throw new Error(`Stage ${run.stageId} is not a proposal Stage`);
     const { job } = readJobState(this.opts.db, run.jobId);
-    const repositories = this.repositoriesOf(job.id);
+    // Triage chooses the set of a Job created with none named (ADR-0067): it sees the
+    // Project's Repositories, and reads in the first one's Factory Clone.
+    const candidates =
+      stage.stageId === 'triage' ? repositoryCandidatesOf(this.opts.db, job.id) : null;
+    const repositories = candidates ?? this.repositoriesOf(job.id);
     const [cwd] = repositories.map((r) => r.clonePath);
     if (cwd === undefined) throw new Error(`Job ${job.id} has no Repository`);
     // A replan or re-specification request reaches its Stage as a section below, not as an
@@ -271,6 +277,7 @@ export class StageScheduler {
       const prompt = renderPrompt(stage, {
         job,
         repositories,
+        ...(candidates === null ? {} : { chooseRepositories: true }),
         ...(profiles === undefined ? {} : { profiles }),
         inputs,
         ...(rejected === undefined ? {} : { rejected }),
@@ -283,6 +290,7 @@ export class StageScheduler {
         cwd,
         policy: toolPolicyOf(job.configSnapshotJson, stage.role),
         repositories,
+        candidates,
         context: { rejected, replan, respec },
       });
       if (this.closed) return; // shutdown: left running, resumed at the next start
@@ -315,6 +323,8 @@ export class StageScheduler {
       cwd: string;
       policy: ToolPolicy;
       repositories: readonly JobRepository[];
+      /** The Project's Repositories triage chooses from; `null`: the set is fixed. */
+      candidates: readonly JobRepository[] | null;
       context: StageRunContext;
     },
   ): Promise<Outcome> {
@@ -371,11 +381,10 @@ export class StageScheduler {
     const eventCount = await drained;
     this.current = undefined;
     rmSync(spool, { recursive: true, force: true });
-    const outcome = this.evaluate(
-      stage,
-      result,
-      await this.planContext(stage, run, input.repositories),
-    );
+    const outcome = this.evaluate(stage, result, {
+      ...(await this.planContext(stage, run, input.repositories)),
+      repositoryCandidates: input.candidates,
+    });
     this.event(run, started.executionId, 'harness_run.finished', {
       stageRunId: run.id,
       stageId: run.stageId,
@@ -513,6 +522,14 @@ export class StageScheduler {
           })),
         )
         .run();
+    }
+    if (kind === 'triage') {
+      applyTriageRepositorySet(tx, {
+        jobId: ctx.jobId,
+        proposal: TriageProposalSchema.parse(value),
+        artifactId: ctx.artifactId,
+        actor: ACTOR,
+      });
     }
     if (kind === 'plan') {
       persistPlanTasks(tx, PlanProposalSchema.parse(value), {

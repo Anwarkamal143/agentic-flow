@@ -215,7 +215,9 @@ export async function planShow(jobId: string, opts: { json: boolean }): Promise<
             (c) => `  ${c.code} ${c.mandatory ? 'mandatory' : 'optional '} ${c.text}`,
           ),
         ]),
-    `Repositories: ${view.repositories.map((r) => r.name).join(', ') || '(none)'}`,
+    `Repositories: ${view.repositories.map((r) => r.name).join(', ') || '(none)'}${
+      view.repositorySetBy === 'triage' ? ' (chosen by triage)' : ''
+    }`,
     'Tasks (DAG):',
     ...view.tasks.flatMap((t) => [
       `  ${t.key.padEnd(14)} ${t.risk.padEnd(6)} ${repoName(t.repositoryId)}  ${t.title}`,

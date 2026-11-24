@@ -120,6 +120,12 @@ export const jobs = sqliteTable(
      * persisted Plan, upstream first. `null` until a Plan's Tasks are written.
      */
     deliveryOrderJson: text('delivery_order_json'),
+    /**
+     * Who chose the Job's Repository set (ADR-0067): `operator` (named at
+     * creation, or the Project's only one) or `triage` (written to
+     * `job_repositories` when triage succeeds; none before).
+     */
+    repositorySetBy: text('repository_set_by').notNull().default('operator'),
   },
   (t) => [index('jobs_project').on(t.projectId), index('jobs_status').on(t.status)],
 );

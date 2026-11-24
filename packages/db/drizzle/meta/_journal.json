@@ -239,6 +239,13 @@
       "when": 1795359011002,
       "tag": "0033_volatile_major_mapleleaf",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1795442235947,
+      "tag": "0034_luxuriant_george_stacy",
+      "breakpoints": true
     }
   ]
 }

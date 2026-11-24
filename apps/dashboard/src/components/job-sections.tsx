@@ -7,6 +7,7 @@ import type {
   Finding,
   Job,
   JobRepository,
+  RepositorySetBy,
   PullRequestRecord,
   Review,
   Task,
@@ -45,8 +46,20 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
-/** A Job's Repositories by name, each titled with its id. */
-export function Repositories({ repositories }: { repositories: JobRepository[] }) {
+/**
+ * A Job's Repositories by name, each titled with its id. A set triage chose,
+ * or has yet to choose, says so (ADR-0067).
+ */
+export function Repositories({
+  repositories,
+  setBy,
+}: {
+  repositories: JobRepository[];
+  setBy: RepositorySetBy;
+}) {
+  if (repositories.length === 0) {
+    return <span className="text-muted-foreground">To be chosen by triage</span>;
+  }
   return (
     <span className="flex flex-wrap gap-x-2">
       {repositories.map((r) => (
@@ -54,6 +67,7 @@ export function Repositories({ repositories }: { repositories: JobRepository[] }
           {r.name}
         </code>
       ))}
+      {setBy === 'triage' && <span className="text-muted-foreground">(chosen by triage)</span>}
     </span>
   );
 }
@@ -97,7 +111,7 @@ export function JobOverview({ job }: { job: Job }) {
           <Field label="Current stage">{job.currentStage}</Field>
           <Field label="Type">{job.type}</Field>
           <Field label="Repositories">
-            <Repositories repositories={job.repositories} />
+            <Repositories repositories={job.repositories} setBy={job.repositorySetBy} />
           </Field>
           {job.deliveryOrder !== null && job.deliveryOrder.length > 1 ? (
             <Field label="Delivery order">{job.deliveryOrder.map((e) => e.name).join(' → ')}</Field>

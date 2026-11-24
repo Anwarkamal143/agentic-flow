@@ -212,6 +212,11 @@ export function PlanViewCard({ plan }: { plan: PlanView }) {
         )}
         <Section title="Affected repositories">
           <List items={plan.repositories.map((r) => r.name)} empty="None." />
+          {plan.repositorySetBy === 'triage' && (
+            <p className="text-sm text-muted-foreground">
+              Chosen by triage; approving the Plan confirms them.
+            </p>
+          )}
         </Section>
         <Section title="Runs in parallel">
           <List

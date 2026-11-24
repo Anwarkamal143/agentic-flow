@@ -24,6 +24,8 @@ import {
   JobTypeSchema,
   resolveMergePolicy,
   MergePolicySchema,
+  RepositorySetBySchema,
+  type RepositorySetBy,
   StageFailureSchema,
   StageIdSchema,
   StageRunStateSchema,
@@ -121,14 +123,24 @@ export class JobService {
   create(input: CreateJobInput): Job {
     const id = this.db.transaction(
       (tx) => {
-        const { project, repos } = jobTarget(tx, input);
+        const { project, repos, setBy } = jobTarget(tx, input);
+        // A set triage chooses may be any of the Project's Repositories (ADR-0067).
+        const candidates =
+          setBy === 'triage'
+            ? tx
+                .select()
+                .from(schema.repositories)
+                .where(eq(schema.repositories.projectId, project.id))
+                .all()
+            : repos;
 
         // Copies, never references: later edits to the Recipe or config can't reach the Job.
         const snapshot: WorkflowSnapshot = WorkflowSnapshotSchema.parse(
           structuredClone(featureRecipe(this.recipeVersion)),
         );
-        // The Job's Merge Policy override must be at least as strict as every Repository's.
-        for (const repo of repos) {
+        // The Job's Merge Policy override must be at least as strict as every Repository's
+        // it may touch: for a set triage chooses, every one of the Project's.
+        for (const repo of candidates) {
           const mergePolicy = resolveMergePolicy(
             MergePolicySchema.parse(repo.mergePolicy),
             input.mergePolicy,
@@ -159,6 +171,7 @@ export class JobService {
             createdBy: OPERATOR,
             createdAt: now,
             version: 0,
+            repositorySetBy: setBy,
           })
           .run();
         for (const repo of repos) {
@@ -194,6 +207,7 @@ export class JobService {
             // The first by name, as before multi-repo Jobs; `repositoryIds` lists them all.
             repositoryId: repos[0]?.id,
             repositoryIds: repos.map((r) => r.id),
+            repositorySetBy: setBy,
             title: input.title,
             recipe: { id: snapshot.recipeId, version: snapshot.recipeVersion },
           },
@@ -572,11 +586,16 @@ function toStageRun(row: JobState['stageRuns'][number]): StageRun {
 
 function toSummary(state: JobState, repositories: JobRepository[]): JobSummary {
   const { job } = state;
-  if (repositories.length === 0) throw new Error(`Job ${job.id} has no Repository`);
+  const repositorySetBy = RepositorySetBySchema.parse(job.repositorySetBy);
+  // Only a set triage has yet to choose is empty (ADR-0067).
+  if (repositories.length === 0 && repositorySetBy !== 'triage') {
+    throw new Error(`Job ${job.id} has no Repository`);
+  }
   return {
     id: job.id,
     projectId: job.projectId,
     repositories,
+    repositorySetBy,
     title: job.title,
     type: JobTypeSchema.parse(job.type),
     status: JobStatusSchema.parse(job.status),
@@ -606,10 +625,11 @@ function toJob(state: JobState, repositories: JobRepository[]): Job {
 
 /**
  * The Project and Repositories a new Job is for (PRODUCT_SPEC §5, ADR-0055,
- * ADR-0065). Named Repositories give their Project and must all be of one
- * Project (the named one, if any); otherwise the named Project, or the only
- * one, and then its only Repository, until triage may propose a set (#107).
- * The Repositories are ordered by name, then id.
+ * ADR-0065, ADR-0067). Named Repositories give their Project and must all be
+ * of one Project (the named one, if any); otherwise the named Project, or the
+ * only one, and then its only Repository, or, with several, none yet: triage
+ * chooses the set (`setBy: 'triage'`). The Repositories are ordered by name,
+ * then id.
  */
 function jobTarget(
   tx: Tx,
@@ -617,6 +637,7 @@ function jobTarget(
 ): {
   project: typeof schema.projects.$inferSelect;
   repos: (typeof schema.repositories.$inferSelect)[];
+  setBy: RepositorySetBy;
 } {
   const projects = tx.select().from(schema.projects).all();
   const named =
@@ -654,7 +675,7 @@ function jobTarget(
       }
     }
     repos.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-    return { project: projectOf(first), repos };
+    return { project: projectOf(first), repos, setBy: 'operator' };
   }
   const choice = chooseProject(projects, input.project);
   if (!choice.ok) {
@@ -679,12 +700,6 @@ function jobTarget(
       `Project '${project.name}' has no Repositories. Register one with: factory repo add <path> --project ${project.name}`,
     );
   }
-  if (others.length > 0) {
-    throw new ApiFailure(
-      409,
-      'repository_required',
-      `Project '${project.name}' has several Repositories (${repos.map((r) => r.name).join(', ')}); name one with --repo`,
-    );
-  }
-  return { project, repos: [only] };
+  if (others.length > 0) return { project, repos: [], setBy: 'triage' };
+  return { project, repos: [only], setBy: 'operator' };
 }
