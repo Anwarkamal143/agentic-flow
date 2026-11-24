@@ -250,6 +250,10 @@ _Avoid_: Notification, ticket, request
 An Inbox Item asking for information the factory lacks. It is answered with content.
 _Avoid_: Clarification request, prompt
 
+**Decision Record**:
+An ADR-style Artifact holding the Technical decisions an agent made in a triage or specification Stage Run instead of asking a human (ADR-0071). It is agent output, recorded, never a permission.
+_Avoid_: Agent ADR, technical answer
+
 **Approval**:
 An Inbox Item asking for authorization of a protected action, such as accepting a plan, merging or expanding scope. It is decided as approve, reject or request changes. An Approval may also be decided per question, each question with fixed options and a default: the cleanup Approval a cancel opens asks separately whether to discard the preserved Worktrees, close the PR and delete the remote branch, each defaulting to keep. Answering its questions is how it is decided; it is never a Question.
 _Avoid_: Sign-off, permission request
