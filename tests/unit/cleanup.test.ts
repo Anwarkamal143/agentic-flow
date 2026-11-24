@@ -2,12 +2,16 @@
  * The cancel cleanup questions (PRODUCT_SPEC §12, ADR-0027 extended by
  * ADR-0043): one item asks, separately and each defaulting to keep, whether to
  * discard the preserved Worktrees, close the PR and delete the remote branch.
- * Only an explicit answer does anything. Pure; tested through `@factory/domain`.
+ * Only an explicit answer does anything. A multi-repo Job asks them per
+ * Repository, keyed `<repo>.<question>` (ADR-0052, #109). Pure; tested through
+ * `@factory/domain`.
  */
 import {
   checkCleanupAnswers,
   cleanupChoices,
+  cleanupItemText,
   cleanupQuestions,
+  jobCleanupQuestions,
   untrackedComment,
   carriesFactoryMarker,
   type CleanupScope,
@@ -147,5 +151,121 @@ describe('the comment on a PR the factory stops tracking', () => {
     expect(closed).toMatch(/stopped tracking/);
     expect(closed).toMatch(/closed/);
     expect(kept).toMatch(/left open/);
+  });
+});
+
+describe('a multi-repo Job (ADR-0052): one item, its questions per Repository', () => {
+  const API_SCOPE: CleanupScope = {
+    preservedWorktrees: 1,
+    openPullRequests: ['acme/api#1'],
+    remoteBranches: ['factory/job_1/integration'],
+  };
+  const WEB_SCOPE: CleanupScope = {
+    preservedWorktrees: 0,
+    openPullRequests: ['acme/web#4'],
+    remoteBranches: ['factory/job_1/integration'],
+  };
+  const repos = [
+    { repository: 'api', scope: API_SCOPE },
+    { repository: 'web', scope: WEB_SCOPE },
+  ];
+
+  it('asks each Repository its own questions, keyed <repo>.<question>, each defaulting to keep', () => {
+    const questions = jobCleanupQuestions(repos);
+    expect(questions.map((q) => [q.id, q.options, q.recommended])).toEqual([
+      ['api.worktrees', ['keep', 'discard'], 'keep'],
+      ['api.pull_request', ['keep', 'close'], 'keep'],
+      ['api.remote_branch', ['keep', 'delete'], 'keep'],
+      ['web.pull_request', ['keep', 'close'], 'keep'],
+      ['web.remote_branch', ['keep', 'delete'], 'keep'],
+    ]);
+    expect(questions[0]?.text).toBe('api: Discard the 1 preserved Worktree?');
+    expect(questions[3]?.text).toBe('web: Close acme/web#4 on GitHub?');
+  });
+
+  it('a single-repo Job keeps the unprefixed keys', () => {
+    expect(jobCleanupQuestions([{ repository: 'tiny-ts', scope: WITH_PR }])).toEqual(
+      cleanupQuestions(WITH_PR),
+    );
+  });
+
+  it('a Repository with nothing to ask is left out; the others stay prefixed', () => {
+    const nothing = { preservedWorktrees: 0, openPullRequests: [], remoteBranches: [] };
+    const questions = jobCleanupQuestions([
+      { repository: 'api', scope: nothing },
+      { repository: 'web', scope: WEB_SCOPE },
+    ]);
+    expect(questions.map((q) => q.id)).toEqual(['web.pull_request', 'web.remote_branch']);
+  });
+
+  it('refuses deleting the branch of a PR kept open per Repository, not across them', () => {
+    const questions = jobCleanupQuestions(repos);
+    expect(
+      checkCleanupAnswers(questions, [
+        { questionId: 'web.pull_request', option: 'close' },
+        { questionId: 'web.remote_branch', option: 'delete' },
+      ]),
+    ).toBeUndefined();
+    expect(
+      checkCleanupAnswers(questions, [
+        { questionId: 'web.pull_request', option: 'close' },
+        { questionId: 'api.remote_branch', option: 'delete' },
+      ]),
+    ).toMatchObject({
+      code: 'invalid_answer',
+      message: expect.stringMatching(/api\.pull_request=close/) as string,
+    });
+    expect(
+      checkCleanupAnswers(questions, [{ questionId: 'pull_request', option: 'close' }]),
+    ).toMatchObject({ code: 'unknown_question' });
+  });
+
+  it("each Repository's choices are its own answers only", () => {
+    const decision = {
+      option: 'answer',
+      comment: null,
+      answers: [
+        { questionId: 'web.pull_request', option: 'close' },
+        { questionId: 'web.remote_branch', option: 'delete' },
+        { questionId: 'api.worktrees', option: 'discard' },
+      ],
+    };
+    expect(cleanupChoices(decision, 'web')).toEqual({
+      discardWorktrees: false,
+      closePullRequests: true,
+      deleteRemoteBranches: true,
+    });
+    expect(cleanupChoices(decision, 'api')).toEqual({
+      discardWorktrees: true,
+      closePullRequests: false,
+      deleteRemoteBranches: false,
+    });
+  });
+
+  it('a Repository name with a dot still reads its own keys', () => {
+    const questions = jobCleanupQuestions([
+      { repository: 'my.site', scope: WEB_SCOPE },
+      { repository: 'api', scope: API_SCOPE },
+    ]);
+    expect(questions.map((q) => q.id).slice(0, 2)).toEqual([
+      'my.site.pull_request',
+      'my.site.remote_branch',
+    ]);
+    expect(
+      checkCleanupAnswers(questions, [{ questionId: 'my.site.remote_branch', option: 'delete' }]),
+    ).toMatchObject({ code: 'invalid_answer' });
+  });
+
+  it('the title counts every question; the reason names each Repository', () => {
+    const text = cleanupItemText(repos);
+    expect(text.question).toBe('Clean up after the cancel (5 questions, each defaulting to keep)');
+    expect(text.why).toContain('api: 1 preserved Worktree is left on disk');
+    expect(text.why).toContain('web: acme/web#4 is still open on GitHub');
+  });
+
+  it('a single-repo reason is unchanged', () => {
+    expect(cleanupItemText([{ repository: 'tiny-ts', scope: WITH_PR }]).why).toContain(
+      'The Job was cancelled: every Attempt is stopped and its leases released. 2 preserved Worktrees are left on disk; acme/tiny-ts#1 is still open on GitHub',
+    );
   });
 });

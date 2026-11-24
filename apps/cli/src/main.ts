@@ -98,6 +98,8 @@ Commands:
                                   a fresh Attempt continues the Task with the answers.
                                   A cleanup Approval: --answer worktrees=discard|keep,
                                   pull_request=close|keep, remote_branch=delete|keep
+                                  (a multi-repo Job's keys start with the Repository:
+                                  web.pull_request=close)
   inbox defer <id> | undefer <id> Hide an item from the default view, or show it again
   activity [--lines <n>] [--json] What is running now: each running Attempt with its
                                   Harness, model, Repository, tier, heartbeat, ports and

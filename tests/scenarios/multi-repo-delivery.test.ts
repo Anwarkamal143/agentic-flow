@@ -528,3 +528,103 @@ describe('multi-repo delivery (D1, #106)', { timeout: 150_000 }, () => {
     expect(report.pullRequests.map((p) => p.mergedBefore)).toEqual([[], []]);
   });
 });
+
+interface CleanupItemBody {
+  id: string;
+  jobId: string;
+  kind: string;
+  subjectRef: string;
+  version: number;
+  questions: { id: string; text: string; options: string[]; recommended: string | null }[] | null;
+}
+
+describe('cancelling a multi-repo Job (#109, ADR-0052)', { timeout: 150_000 }, () => {
+  it('opens one cleanup Approval asking each Repository its own questions, and carries out each answer in its own Repository only', async () => {
+    const d = await deliver();
+    const { rt, gh, job } = d;
+    const opened = await pullRequests(d);
+    const branch = `factory/${job.id}/integration`;
+
+    const cancelled = await rt.home.cli(['job', 'cancel', job.id]);
+    expect(cancelled.code, cancelled.stderr).toBe(0);
+    await waitForJob(rt, job.id, (j) => j.status === 'cancelled', 10_000);
+    const items = (await json<CleanupItemBody[]>(rt.request('/v1/inbox?all=true'))).filter(
+      (i) => i.jobId === job.id && i.kind === 'cleanup',
+    );
+    expect(items, 'one cleanup Approval for the whole Job').toHaveLength(1);
+    const [item] = items as [CleanupItemBody];
+    const questions = item.questions ?? [];
+
+    // Per Repository, keyed <repo>.<question>, each defaulting to keep.
+    expect(
+      questions
+        .filter((q) => !q.id.endsWith('.worktrees'))
+        .map((q) => [q.id, q.options, q.recommended]),
+    ).toEqual([
+      ['api.pull_request', ['keep', 'close'], 'keep'],
+      ['api.remote_branch', ['keep', 'delete'], 'keep'],
+      ['web.pull_request', ['keep', 'close'], 'keep'],
+      ['web.remote_branch', ['keep', 'delete'], 'keep'],
+    ]);
+    expect(questions.every((q) => /^(api|web)\./.test(q.id) && q.recommended === 'keep')).toBe(
+      true,
+    );
+    expect(questions.find((q) => q.id === 'web.pull_request')?.text).toBe(
+      `web: Close acme/web#${String(opened.web.number)} on GitHub?`,
+    );
+    // The CLI prints the prefixed keys, ready to answer.
+    expect(cancelled.stdout).toContain('  web.pull_request: web: Close acme/web#');
+    expect(cancelled.stdout).toContain('--answer api.remote_branch=delete');
+
+    // A bare key names no question of a multi-repo Job; the PR/branch pair is checked per Repository.
+    const answer = (answers: object[]) =>
+      post(rt, `/v1/inbox/${item.id}/answer`, {
+        expectedVersion: item.version,
+        subjectRef: item.subjectRef,
+        answers,
+      });
+    const bare = await answer([{ questionId: 'pull_request', option: 'close' }]);
+    expect(bare.status).toBe(400);
+    expect(((await bare.json()) as { error: string }).error).toBe('unknown_question');
+    const crossed = await answer([
+      { questionId: 'web.pull_request', option: 'close' },
+      { questionId: 'api.remote_branch', option: 'delete' },
+    ]);
+    expect(crossed.status).toBe(400);
+    expect(((await crossed.json()) as { message: string }).message).toContain(
+      'api.pull_request=close',
+    );
+
+    // Close web's PR and delete its branch; api is kept as it is.
+    const res = await rt.home.cli([
+      'inbox',
+      'answer',
+      item.id,
+      '--answer',
+      'web.pull_request=close',
+      '--answer',
+      'web.remote_branch=delete',
+      '--expect-version',
+      String(item.version),
+    ]);
+    expect(res.code, res.stderr).toBe(0);
+    await until(
+      () => json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events?limit=1000`)),
+      (log) => log.some((e) => e.type === 'cleanup.completed' && e.entityId === item.id),
+      'cleanup.completed',
+    );
+    const state = (full: string) => gh.pullRequests(full).map((p) => p.state);
+    expect(state(WEB)).toEqual(['closed']);
+    expect(state(API)).toEqual(['open']);
+    expect(gh.branchHead(WEB, branch)).toBeUndefined();
+    expect(gh.branchHead(API, branch)).toBe(opened.api.headSha);
+    // Kept open or closed, each PR is told the factory stopped tracking it.
+    const marker = `<!-- factory:${job.id}:untracked -->`;
+    for (const [full, number] of [
+      [API, opened.api.number],
+      [WEB, opened.web.number],
+    ] as const) {
+      expect(gh.comments(full, number).filter((c) => c.body.includes(marker))).toHaveLength(1);
+    }
+  });
+});
