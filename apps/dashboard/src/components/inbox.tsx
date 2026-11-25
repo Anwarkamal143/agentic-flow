@@ -44,9 +44,14 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
           {item.deferred && <Badge variant="secondary">Deferred</Badge>}
         </CardTitle>
         <CardDescription>
-          <Link href={`/jobs/${item.jobId}`} className="underline-offset-4 hover:underline">
-            {item.jobTitle}
-          </Link>{' '}
+          {item.jobId === null ? (
+            // An issue_job item comes before its Job (#112).
+            <span>No Job yet: Start the Job creates one</span>
+          ) : (
+            <Link href={`/jobs/${item.jobId}`} className="underline-offset-4 hover:underline">
+              {item.jobTitle}
+            </Link>
+          )}{' '}
           · <span className="font-mono text-xs">{item.id}</span>
         </CardDescription>
       </CardHeader>

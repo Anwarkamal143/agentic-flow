@@ -40,6 +40,7 @@ import {
   type ProfileUpdate,
   type RepositoryProfile,
   type SetProfileFieldInput,
+  type SetIntakeLabelInput,
 } from '@factory/domain';
 import {
   clone,
@@ -55,6 +56,7 @@ import { and, eq, or } from 'drizzle-orm';
 import { assertNarrowing } from './config-tree.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
+import { cancelOpenOffers } from './issue-intake.js';
 import { previewOf, toProject } from './projects.js';
 
 const ACTOR = 'user:local';
@@ -109,6 +111,8 @@ export class RepositoryService {
 
     // Checked again inside the transaction; refused before the clone, so nothing is made.
     const target = findProject(this.db, input.project);
+    const intakeLabel = input.intakeLabel ?? null;
+    if (intakeLabel !== null && github === null) throw noCoordinatesForIntake(name);
     const mergePolicy = input.mergePolicy ?? 'never_auto';
     assertNarrowing(this.db, { repository: { projectId: target.id, name, mergePolicy } });
 
@@ -175,6 +179,7 @@ export class RepositoryService {
             githubName: github?.name ?? null,
             mergePolicy,
             mergeMethod,
+            intakeLabel,
             createdAt: now,
           })
           .run();
@@ -191,6 +196,7 @@ export class RepositoryService {
             github: github === null ? null : formatCoordinates(github),
             mergePolicy,
             mergeMethod,
+            intakeLabel,
             // The command itself: a human set it, and it is shown before confirming.
             setup: profile.setup ?? null,
           },
@@ -209,6 +215,7 @@ export class RepositoryService {
         github,
         mergePolicy,
         mergeMethod,
+        intakeLabel,
         createdAt: now,
       };
       return { project, repository, cloneMethod };
@@ -279,6 +286,53 @@ export class RepositoryService {
       }
       return applyDetection(current, input.detected, ACTOR, new Date().toISOString());
     });
+  }
+
+  /**
+   * `repo intake set <repo> <label>` / `repo intake off <repo>` (#112,
+   * ADR-0072): the label that opts the Repository into GitHub Issues intake.
+   * Turning it off cancels the open intake items. Audited.
+   */
+  setIntakeLabel(ref: string, input: SetIntakeLabelInput): Repository {
+    const repository = this.db.transaction(
+      (tx) => {
+        const row = findRepository(tx, ref);
+        if (input.label !== null && (row.githubOwner === null || row.githubName === null)) {
+          throw noCoordinatesForIntake(row.name);
+        }
+        if (row.intakeLabel === input.label) return toRepository(row);
+        tx.update(schema.repositories)
+          .set({ intakeLabel: input.label })
+          .where(eq(schema.repositories.id, row.id))
+          .run();
+        if (input.label === null) cancelOpenOffers(tx, row.id, ACTOR);
+        tx.insert(schema.auditLog)
+          .values({
+            id: newId('aud'),
+            ts: new Date().toISOString(),
+            actor: ACTOR,
+            action: 'repository.intake_label_set',
+            target: `repository:${row.id}`,
+            jobId: null,
+            beforeJson: JSON.stringify({ intakeLabel: row.intakeLabel }),
+            afterJson: JSON.stringify({ intakeLabel: input.label }),
+            policyRef: null,
+            correlationId: null,
+          })
+          .run();
+        appendEvent(tx, {
+          entityKind: 'repository',
+          entityId: row.id,
+          type: 'repository.intake_label_set',
+          actor: ACTOR,
+          payload: { before: row.intakeLabel, after: input.label },
+        });
+        return toRepository({ ...row, intakeLabel: input.label });
+      },
+      { behavior: 'immediate' },
+    );
+    this.onCommit();
+    return repository;
   }
 
   /** `repo profile set`: one field, validated by the profile schema. */
@@ -392,8 +446,17 @@ export function toRepository(row: typeof schema.repositories.$inferSelect): Repo
         : { owner: row.githubOwner, name: row.githubName },
     mergePolicy: MergePolicySchema.parse(row.mergePolicy),
     mergeMethod: MergeMethodSchema.parse(row.mergeMethod),
+    intakeLabel: row.intakeLabel,
     createdAt: row.createdAt,
   };
+}
+
+function noCoordinatesForIntake(name: string): ApiFailure {
+  return new ApiFailure(
+    409,
+    'no_github_coordinates',
+    `Repository ${name} has no GitHub coordinates, so it has no issues to take in: register it with --github owner/name`,
+  );
 }
 
 /** The named Project; an unknown one is refused, never created (ADR-0055). */

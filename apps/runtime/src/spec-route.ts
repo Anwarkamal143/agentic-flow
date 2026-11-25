@@ -305,7 +305,7 @@ export function respecificationFailed(
 export function applySpecChangeDecision(
   tx: Tx,
   input: {
-    item: typeof schema.approvals.$inferSelect;
+    item: typeof schema.approvals.$inferSelect & { jobId: string };
     option: string;
     comment: string | undefined;
     actor: string;

@@ -11,7 +11,14 @@
  * stopped tracking it; the remote branch is deleted only on an explicit yes.
  * The Task Branches are never deleted locally, and no uncommitted work is lost.
  */
-import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
+import {
+  appendEvent,
+  jobBound,
+  schema,
+  type FactoryDb,
+  type JobApprovalRow,
+  type Tx,
+} from '@factory/db';
 import {
   checkCleanupAnswers,
   cleanupChoices,
@@ -44,7 +51,7 @@ import { PassLoop } from './pass-loop.js';
 import { repositoriesOf } from './plans.js';
 import { commitLeftovers, requireWorktree } from './worktree.js';
 
-type ApprovalRow = typeof schema.approvals.$inferSelect;
+type ApprovalRow = JobApprovalRow;
 type PullRequestRow = typeof schema.pullRequests.$inferSelect;
 
 /** What the worker needs of GitHub: close a PR, comment on it, delete its branch. */
@@ -384,6 +391,7 @@ export class CleanupWorker {
         ),
       )
       .all()
+      .map(jobBound)
       .filter((row) => {
         const choices = choicesOf(this.db, row);
         const discards = jobRepositories(this.db, row.jobId).some(

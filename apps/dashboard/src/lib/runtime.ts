@@ -296,7 +296,9 @@ export interface InboxContext {
 }
 
 export async function inboxContext(items: readonly Approval[]): Promise<InboxContext> {
-  const planJobs = [...new Set(items.filter((i) => i.kind === 'plan').map((i) => i.jobId))];
+  const planJobs = [
+    ...new Set(items.flatMap((i) => (i.kind === 'plan' && i.jobId !== null ? [i.jobId] : []))),
+  ];
   const [ps, rs, plans] = await Promise.all([
     projects(),
     repositories(),

@@ -7,7 +7,14 @@
  */
 import { approveForeignRewrite } from './foreign-push.js';
 import { approveIntegrationRewrite } from './pull-request.js';
-import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
+import {
+  appendEvent,
+  jobBound,
+  schema,
+  type FactoryDb,
+  type JobApprovalRow,
+  type Tx,
+} from '@factory/db';
 import { rmSync } from 'node:fs';
 import {
   ApprovalKindSchema,
@@ -95,6 +102,7 @@ import {
 } from './engine.js';
 import { ApiFailure } from './errors.js';
 import { startContractJob, type CreateJobIn } from './contract-job.js';
+import { decideIssueJob, intakeOfItem } from './issue-intake.js';
 import { parseProcess } from './execution.js';
 import { openQuestionItem } from './questions.js';
 import { stopIfAlive, worktreeStatus } from './recovery.js';
@@ -105,7 +113,10 @@ import { grantReplanIn, requestReplanIn } from './replan.js';
 import { applySpecChangeDecision, grantRespecificationIn } from './spec-route.js';
 import { stageIdOfTask } from './task-stage.js';
 
-type ApprovalRow = typeof schema.approvals.$inferSelect;
+/** An item of a Job: every kind but `issue_job` (#112). */
+type ApprovalRow = JobApprovalRow;
+/** Any item, an `issue_job` item (no Job yet) included. */
+type AnyApprovalRow = typeof schema.approvals.$inferSelect;
 type Decider = (
   item: ApprovalRow,
   input: DecideInput,
@@ -172,7 +183,7 @@ export class InboxService {
   }
 
   get(id: string): Approval {
-    return this.toApproval(requireItem(this.db, id));
+    return this.toApproval(requireAnyItem(this.db, id));
   }
 
   /** The Job's audit log, oldest first (cap raises by Blocker Approvals, ADR-0026). */
@@ -201,16 +212,45 @@ export class InboxService {
 
   /** Decides an item, refused unless it names the open item's version and subject. */
   async decide(id: string, input: DecideInput, actor: string): Promise<Approval> {
-    const item = requireItem(this.db, id);
+    const item = requireAnyItem(this.db, id);
     const kind = ApprovalKindSchema.parse(item.kind);
     if (kind !== 'blocker' && input.grant !== undefined) {
       throw new ApiFailure(400, 'invalid_grant', `a ${kind} item takes no grant size`);
     }
-    return this.deciders[kind](item, input, actor);
+    if (kind === 'issue_job') return this.decideIssueJob(item, input, actor);
+    return this.deciders[kind](jobBound(item), input, actor);
   }
 
-  /** How each kind of item is decided. */
-  private readonly deciders: Readonly<Record<ApprovalKind, Decider>> = {
+  /**
+   * An `issue_job` item (#112, ADR-0072): `start_job` creates the Job from
+   * the issue, in the decision's transaction, by the human who decided;
+   * `decline` creates none. Either way the issue is never offered again.
+   */
+  private decideIssueJob(item: AnyApprovalRow, input: DecideInput, actor: string): Approval {
+    this.db.transaction(
+      (tx) => {
+        const row = requireAnyItem(tx, item.id);
+        refuseUnless(row, { actor, ...input });
+        const jobId = decideIssueJob(tx, {
+          approvalId: row.id,
+          option: input.option,
+          actor,
+          createJob: this.createJob,
+        });
+        markDecided(tx, row, actor, {
+          option: input.option,
+          comment: input.comment ?? null,
+          ...(jobId === undefined ? {} : { jobId }),
+        });
+      },
+      { behavior: 'immediate' },
+    );
+    this.onCommit();
+    return this.get(item.id);
+  }
+
+  /** How each kind of item of a Job is decided (`issue_job` has no Job yet: `decideIssueJob`). */
+  private readonly deciders: Readonly<Record<Exclude<ApprovalKind, 'issue_job'>, Decider>> = {
     blocker: (item, input, actor) => this.decideBlocker(item, input, actor),
     question: (item, input, actor) => {
       if (input.option === 'replan') return this.replanFromItem(item, input, actor);
@@ -325,7 +365,15 @@ export class InboxService {
    * nothing here changes a scope, a cap or a policy.
    */
   answer(id: string, input: AnswerQuestionInput, actor: string): Approval {
-    const item = requireItem(this.db, id);
+    const any = requireAnyItem(this.db, id);
+    if (any.jobId === null) {
+      throw new ApiFailure(
+        409,
+        'decision_required',
+        'this item has no questions: decide it with POST /v1/inbox/:id/decide (factory inbox decide)',
+      );
+    }
+    const item = jobBound(any);
     changeJob(
       this.db,
       { jobId: item.jobId, expectedVersion: 'current', actor },
@@ -869,7 +917,7 @@ export class InboxService {
   defer(id: string, input: DeferInput, actor: string, deferred: boolean): Approval {
     this.db.transaction(
       (tx) => {
-        const row = requireItem(tx, id);
+        const row = requireAnyItem(tx, id);
         refuseUnless(row, { actor, expectedVersion: input.expectedVersion });
         if (row.deferred === deferred) {
           throw new ApiFailure(
@@ -882,7 +930,7 @@ export class InboxService {
         appendEvent(tx, {
           entityKind: 'approval',
           entityId: id,
-          jobId: row.jobId,
+          ...(row.jobId === null ? {} : { jobId: row.jobId }),
           type: deferred ? 'approval.deferred' : 'approval.undeferred',
           actor,
           payload: { kind: row.kind },
@@ -1016,7 +1064,7 @@ export class InboxService {
         `Job ${jobId} has no Plan waiting for approval`,
       );
     }
-    return item;
+    return jobBound(item);
   }
 
   /** The plan approval view of the Job's newest Plan (PRODUCT_SPEC §7). */
@@ -1154,13 +1202,18 @@ export class InboxService {
     };
   }
 
-  private toApproval(row: ApprovalRow): Approval {
-    const job = requireJob(this.db, row.jobId);
-    const link = this.db
-      .select()
-      .from(schema.jobRepositories)
-      .where(eq(schema.jobRepositories.jobId, row.jobId))
-      .get();
+  private toApproval(row: AnyApprovalRow): Approval {
+    const job = row.jobId === null ? undefined : requireJob(this.db, row.jobId);
+    // An issue_job item has no Job yet: its Repository is the issue's (#112).
+    const intake = row.jobId === null ? intakeOfItem(this.db, row.id) : undefined;
+    const link =
+      row.jobId === null
+        ? undefined
+        : this.db
+            .select()
+            .from(schema.jobRepositories)
+            .where(eq(schema.jobRepositories.jobId, row.jobId))
+            .get();
     const stage =
       row.stageRunId === null
         ? undefined
@@ -1172,9 +1225,9 @@ export class InboxService {
     return ApprovalSchema.parse({
       id: row.id,
       jobId: row.jobId,
-      jobTitle: job.title,
-      projectId: job.projectId,
-      repositoryId: link?.repositoryId ?? '',
+      jobTitle: job?.title ?? null,
+      projectId: job?.projectId ?? intake?.projectId ?? '',
+      repositoryId: link?.repositoryId ?? intake?.repositoryId ?? '',
       taskId: row.taskId,
       stageId: stage?.stageId ?? null,
       kind: row.kind,
@@ -1571,7 +1624,7 @@ export function cancelOpenItems(tx: Tx, jobId: string, actor: string): void {
 }
 
 function refuseUnless(
-  row: ApprovalRow,
+  row: AnyApprovalRow,
   change: { actor: string; expectedVersion: number; subjectRef?: string; option?: string },
 ): void {
   const refusal = checkInboxChange(
@@ -1592,7 +1645,7 @@ function refuseUnless(
 /** Marks the open item `row` decided by `actor`, with its `approval.decided` event. */
 function markDecided(
   tx: Tx,
-  row: ApprovalRow,
+  row: AnyApprovalRow,
   actor: string,
   input: z.input<typeof InboxDecisionSchema>,
 ): void {
@@ -1606,7 +1659,7 @@ function markDecided(
   appendEvent(tx, {
     entityKind: 'approval',
     entityId: row.id,
-    jobId: row.jobId,
+    ...(row.jobId === null ? {} : { jobId: row.jobId }),
     type: 'approval.decided',
     actor,
     payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
@@ -1615,7 +1668,7 @@ function markDecided(
 
 function bumpItem(
   tx: Tx,
-  row: ApprovalRow,
+  row: AnyApprovalRow,
   values: Partial<typeof schema.approvals.$inferInsert>,
 ): void {
   const updated = tx
@@ -1626,10 +1679,15 @@ function bumpItem(
   if (updated.changes !== 1) throw new Error(`Inbox Item ${row.id} changed under its own update`);
 }
 
-function requireItem(db: FactoryDb | Tx, id: string): ApprovalRow {
+function requireAnyItem(db: FactoryDb | Tx, id: string): AnyApprovalRow {
   const row = db.select().from(schema.approvals).where(eq(schema.approvals.id, id)).get();
   if (row === undefined) throw new ApiFailure(404, 'item_not_found', `no Inbox Item ${id}`);
   return row;
+}
+
+/** An item of a Job (never an `issue_job` item). */
+function requireItem(db: FactoryDb | Tx, id: string): ApprovalRow {
+  return jobBound(requireAnyItem(db, id));
 }
 
 function requireJob(db: FactoryDb | Tx, id: string): typeof schema.jobs.$inferSelect {

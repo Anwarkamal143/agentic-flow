@@ -307,7 +307,7 @@ function closeItem(
   appendEvent(tx, {
     entityKind: 'approval',
     entityId: row.id,
-    jobId: row.jobId,
+    ...(row.jobId === null ? {} : { jobId: row.jobId }),
     type: event.type,
     actor,
     payload: { kind: row.kind, subjectRef: row.subjectRef, ...event.payload },
@@ -379,7 +379,7 @@ function syncMergeItemOptions(
     appendEvent(tx, {
       entityKind: 'approval',
       entityId: item.id,
-      jobId: item.jobId,
+      ...(item.jobId === null ? {} : { jobId: item.jobId }),
       type: 'approval.options_changed',
       actor: POLLER,
       payload: {

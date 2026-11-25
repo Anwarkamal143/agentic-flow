@@ -54,7 +54,7 @@ export default async function InboxPage({
             context={{
               projectName: context.projects.get(item.projectId),
               repositoryName: context.repositories.get(item.repositoryId),
-              plan: context.plans.get(item.jobId) ?? null,
+              plan: item.jobId === null ? null : (context.plans.get(item.jobId) ?? null),
               returnTo,
             }}
           />

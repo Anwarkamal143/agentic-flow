@@ -14,6 +14,7 @@ import {
   type CreateJobInput,
   type DeliveryReport,
   type ExpiresPolicy,
+  type SourceIssue,
 } from '@factory/domain';
 import { and, eq } from 'drizzle-orm';
 import { currentCriteria } from './criteria.js';
@@ -26,7 +27,7 @@ const KIND = 'contract_job';
 export type CreateJobIn = (
   tx: Tx,
   input: CreateJobInput,
-  opts: { actor: string; followUpOf: string },
+  opts: { actor: string; followUpOf?: string; sourceIssue?: SourceIssue },
 ) => string;
 
 /**

@@ -11,6 +11,7 @@ import { TaskKindSchema } from './integration.js';
 import { ReviewRerunOnBaseChangeSchema, type ReviewRerunOnBaseChange } from './base-change.js';
 import { SetupCommandSchema } from './setup.js';
 import { DeliveryOrderSchema } from './delivery-order.js';
+import { IntakeLabelSchema, parseIssueRef, SourceIssueSchema } from './issue-intake.js';
 import {
   DEFAULT_SENSITIVE_PATHS,
   DetectedProfileSchema,
@@ -171,9 +172,15 @@ export const RepositorySchema = z.object({
   mergePolicy: MergePolicySchema,
   /** How the factory merges under `human_approval` (default `merge`, a merge commit; ADR-0038). */
   mergeMethod: MergeMethodSchema,
+  /** The GitHub label that opts it into issue intake (#112, ADR-0072); `null`: none. */
+  intakeLabel: z.string().nullable(),
   createdAt: z.string(),
 });
 export type Repository = z.infer<typeof RepositorySchema>;
+
+/** `POST /v1/repositories/:ref/intake` (`repo intake set|off`): the intake label, or none. */
+export const SetIntakeLabelInputSchema = z.object({ label: IntakeLabelSchema.nullable() });
+export type SetIntakeLabelInput = z.infer<typeof SetIntakeLabelInputSchema>;
 
 /** `GET /v1/projects/:ref` (`project show`): the Project, its Repositories in full and its active Jobs. */
 export const ProjectDetailSchema = ProjectSchema.extend({
@@ -231,6 +238,8 @@ export const RegisterRepositoryInputSchema = z.object({
   mergePolicy: MergePolicySchema.optional(),
   /** `repo add --merge-method`; default `merge`. */
   mergeMethod: MergeMethodSchema.optional(),
+  /** `repo add --intake-label`: opts the Repository into issue intake (#112); needs GitHub coordinates. */
+  intakeLabel: IntakeLabelSchema.optional(),
 });
 export type RegisterRepositoryInput = z.infer<typeof RegisterRepositoryInputSchema>;
 
@@ -862,8 +871,30 @@ export const JobSchema = JobSummarySchema.extend({
    * Repositories upstream first. `null` before a Plan's Tasks exist.
    */
   deliveryOrder: DeliveryOrderSchema.nullable(),
+  /**
+   * The GitHub issue the Job came from (#112, ADR-0072): an approved intake
+   * item, or `job create --from-issue`. `null` for any other Job.
+   */
+  sourceIssue: SourceIssueSchema.nullable(),
 });
 export type Job = z.infer<typeof JobSchema>;
+
+/**
+ * `POST /v1/jobs/from-issue` (`job create --from-issue owner/name#N`, #112):
+ * a Job from a GitHub issue of a registered Repository, its title and
+ * untrusted description from the issue. Its Repository set is the issue's
+ * Repository and any others named, all of one Project.
+ */
+export const CreateJobFromIssueInputSchema = z.object({
+  issue: z.string().refine((text) => parseIssueRef(text).ok, {
+    message: 'must be a GitHub issue as owner/name#N (for example acme/widgets#12)',
+  }),
+  /** More Repositories (ids) of the issue's Repository's Project. */
+  repositoryIds: z.array(z.string().min(1)).max(20).optional(),
+  concurrency: ConcurrencyOverrideSchema.optional(),
+  mergePolicy: MergePolicySchema.optional(),
+});
+export type CreateJobFromIssueInput = z.infer<typeof CreateJobFromIssueInputSchema>;
 
 /** `POST /v1/jobs/:id/replan` (`requestReplan`, ADR-0029). */
 export const RequestReplanInputSchema = z.object({

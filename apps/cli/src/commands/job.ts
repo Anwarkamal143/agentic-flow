@@ -8,6 +8,7 @@ import type {
   Worktree,
   CancelJobInput,
   CreateJobInput,
+  CreateJobFromIssueInput,
   Job,
   RequestReplanInput,
   JobSummary,
@@ -55,27 +56,8 @@ export interface JobCreateOptions {
 export async function jobCreate(opts: JobCreateOptions): Promise<number> {
   const api = client();
   if (api === undefined) return EXIT_NOT_RUNNING;
-  const chosen: Repository[] = [];
-  if (opts.repos.length > 0) {
-    const repos = await api.json<Repository[]>('GET', '/v1/repositories');
-    for (const ref of opts.repos) {
-      const matches = repos.filter((r) => r.id === ref || r.name === ref);
-      const [only] = matches;
-      if (only === undefined || matches.length > 1) {
-        process.stderr.write(
-          matches.length === 0
-            ? `factory: no Repository '${ref}'. Registered: ${repos.map((r) => `${r.name} (${r.id})`).join(', ') || 'none'}\n`
-            : `factory: '${ref}' names several Repositories; use its id: ${matches.map((r) => r.id).join(', ')}\n`,
-        );
-        return 1;
-      }
-      if (chosen.some((r) => r.id === only.id)) {
-        process.stderr.write(`factory: Repository '${ref}' is named more than once\n`);
-        return 1;
-      }
-      chosen.push(only);
-    }
-  }
+  const chosen = await chooseRepositories(api, opts.repos);
+  if (chosen === undefined) return 1;
   const input: CreateJobInput = {
     ...(opts.project === undefined ? {} : { project: opts.project }),
     ...(chosen.length === 0 ? {} : { repositoryIds: chosen.map((r) => r.id) }),
@@ -91,6 +73,64 @@ export async function jobCreate(opts: JobCreateOptions): Promise<number> {
     job.repositories.length === 0
       ? `Created Job ${job.id}; triage will choose its Repositories from the Project's\n`
       : `Created Job ${job.id} for ${job.repositories.map((r) => r.name).join(', ')}\n`,
+  );
+  writeJob(job);
+  return 0;
+}
+
+/** The Repositories `refs` name (ids or names), each once; `undefined` after a refusal. */
+async function chooseRepositories(
+  api: RuntimeClient,
+  refs: readonly string[],
+): Promise<Repository[] | undefined> {
+  const chosen: Repository[] = [];
+  if (refs.length === 0) return chosen;
+  const repos = await api.json<Repository[]>('GET', '/v1/repositories');
+  for (const ref of refs) {
+    const matches = repos.filter((r) => r.id === ref || r.name === ref);
+    const [only] = matches;
+    if (only === undefined || matches.length > 1) {
+      process.stderr.write(
+        matches.length === 0
+          ? `factory: no Repository '${ref}'. Registered: ${repos.map((r) => `${r.name} (${r.id})`).join(', ') || 'none'}\n`
+          : `factory: '${ref}' names several Repositories; use its id: ${matches.map((r) => r.id).join(', ')}\n`,
+      );
+      return undefined;
+    }
+    if (chosen.some((r) => r.id === only.id)) {
+      process.stderr.write(`factory: Repository '${ref}' is named more than once\n`);
+      return undefined;
+    }
+    chosen.push(only);
+  }
+  return chosen;
+}
+
+/**
+ * `factory job create --from-issue owner/name#N` (#112): the runtime reads
+ * the issue and creates its Job, the issue's text as an untrusted description.
+ */
+export async function jobCreateFromIssue(opts: {
+  issue: string;
+  repos: readonly string[];
+  concurrency: CreateJobInput['concurrency'];
+  mergePolicy?: CreateJobInput['mergePolicy'];
+}): Promise<number> {
+  const api = client();
+  if (api === undefined) return EXIT_NOT_RUNNING;
+  const chosen = await chooseRepositories(api, opts.repos);
+  if (chosen === undefined) return 1;
+  const input: CreateJobFromIssueInput = {
+    issue: opts.issue,
+    ...(chosen.length === 0 ? {} : { repositoryIds: chosen.map((r) => r.id) }),
+    ...(opts.concurrency === undefined || Object.keys(opts.concurrency).length === 0
+      ? {}
+      : { concurrency: opts.concurrency }),
+    ...(opts.mergePolicy === undefined ? {} : { mergePolicy: opts.mergePolicy }),
+  };
+  const job = await api.json<Job>('POST', '/v1/jobs/from-issue', { body: input });
+  process.stdout.write(
+    `Created Job ${job.id} from ${opts.issue} for ${job.repositories.map((r) => r.name).join(', ')}\n`,
   );
   writeJob(job);
   return 0;
@@ -365,6 +405,11 @@ function writeJob(job: Job): void {
     `  status:       ${job.status}`,
     `  stage:        ${job.currentStage}`,
     `  repositories: ${repositoryLine(job)}`,
+    ...(job.sourceIssue === null
+      ? []
+      : [
+          `  from issue:   ${job.sourceIssue.owner}/${job.sourceIssue.name}#${String(job.sourceIssue.number)} (${job.sourceIssue.url}), ${job.sourceIssue.via === 'intake' ? 'an approved intake item' : 'job create --from-issue'}`,
+        ]),
     ...deliveryOrderLines(job),
     `  recipe:       ${job.workflowSnapshot.recipeId} v${String(job.workflowSnapshot.recipeVersion)}`,
     `  replans:      ${String(job.replans.used)} of ${String(job.replans.max)} used${job.replanRequested ? '; replan requested, waiting for the Attempts in flight' : ''}`,

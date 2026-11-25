@@ -16,6 +16,8 @@ import {
   type ProfileUpdate,
   type SetProfileFieldInput,
   type RepositoryInspection,
+  type Repository,
+  type SetIntakeLabelInput,
 } from '@factory/domain';
 import { resolveHome } from '@factory/home';
 import { findRuntime } from '../client.js';
@@ -45,6 +47,8 @@ export interface RepoAddOptions {
   /** `--merge-policy` (default `never_auto`) and `--merge-method` (default `merge`); the runtime validates them. */
   mergePolicy: string | undefined;
   mergeMethod: string | undefined;
+  /** `--intake-label`: opts the Repository into GitHub Issues intake (#112). */
+  intakeLabel: string | undefined;
   /** Confirms the shown commands without prompting. */
   yes: boolean;
 }
@@ -175,6 +179,7 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
     ...(setup === undefined ? {} : { setup: setup.data }),
     mergePolicy: mergePolicy.data,
     mergeMethod: mergeMethod.data,
+    ...(opts.intakeLabel === undefined ? {} : { intakeLabel: opts.intakeLabel }),
   };
   const result = await client.json<RegisterRepositoryResult>('POST', '/v1/repositories', {
     body: input,
@@ -191,6 +196,7 @@ export async function repoAdd(opts: RepoAddOptions): Promise<number> {
       }\n` +
       `  default branch: ${repository.defaultBranch}\n` +
       `  GitHub:         ${repository.github === null ? 'none' : formatCoordinates(repository.github)}\n` +
+      `  issue intake:   ${intakeLine(repository)}\n` +
       `Your checkout was not modified.\n`,
   );
   return 0;
@@ -292,6 +298,30 @@ export async function repoProfileDetect(ref: string, opts: { yes: boolean }): Pr
 }
 
 /** `factory repo profile set <repo> <key> <value>`: one field; the runtime validates it. */
+/** Whether, and with which label, the Repository takes in GitHub issues. */
+function intakeLine(repository: Repository): string {
+  return repository.intakeLabel === null
+    ? 'off'
+    : `open issues labeled '${repository.intakeLabel}' become Inbox items "Start a Job from ${repository.github === null ? '?' : formatCoordinates(repository.github)}#N?"`;
+}
+
+/** `factory repo intake set <repo> <label>` / `repo intake off <repo>` (#112). */
+export async function repoIntakeSet(ref: string, label: string | null): Promise<number> {
+  const api = client();
+  if (api === undefined) return EXIT_NOT_RUNNING;
+  const body: SetIntakeLabelInput = { label };
+  const repository = await api.json<Repository>(
+    'POST',
+    `/v1/repositories/${encodeURIComponent(ref)}/intake`,
+    { body },
+  );
+  process.stdout.write(
+    `Repository ${repository.name}: issue intake ${intakeLine(repository)}` +
+      (label === null ? '; its open intake items were cancelled\n' : '\n'),
+  );
+  return 0;
+}
+
 export async function repoProfileSet(ref: string, key: string, value: string): Promise<number> {
   const api = client();
   if (api === undefined) return EXIT_NOT_RUNNING;
