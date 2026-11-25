@@ -46,6 +46,8 @@ import {
   type Task,
   type WorkflowSnapshot,
   type PullRequestRecord,
+  SourceIssueSchema,
+  type SourceIssue,
 } from '@factory/domain';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { pullRequestsOf } from './pull-request.js';
@@ -129,12 +131,13 @@ export class JobService {
   /**
    * {@link create} inside the caller's transaction, returning the new Job's id.
    * A contract step's follow-up Job (#110) is created by the human who
-   * approved it, and names the Job it follows up.
+   * approved it, and names the Job it follows up. A Job from a GitHub issue
+   * (#112) is linked to it.
    */
   createIn(
     tx: Tx,
     input: CreateJobInput,
-    opts: { actor: string; followUpOf?: string } = { actor: OPERATOR },
+    opts: { actor: string; followUpOf?: string; sourceIssue?: SourceIssue } = { actor: OPERATOR },
   ): string {
     const actor = opts.actor;
     const { project, repos, setBy } = jobTarget(tx, input);
@@ -186,6 +189,7 @@ export class JobService {
         createdAt: now,
         version: 0,
         repositorySetBy: setBy,
+        sourceIssueJson: opts.sourceIssue === undefined ? null : JSON.stringify(opts.sourceIssue),
       })
       .run();
     for (const repo of repos) {
@@ -218,6 +222,7 @@ export class JobService {
       actor,
       payload: {
         ...(opts.followUpOf === undefined ? {} : { followUpOf: opts.followUpOf }),
+        ...(opts.sourceIssue === undefined ? {} : { sourceIssue: opts.sourceIssue }),
         projectId: project.id,
         // The first by name, as before multi-repo Jobs; `repositoryIds` lists them all.
         repositoryId: repos[0]?.id,
@@ -626,6 +631,10 @@ function toJob(state: JobState, repositories: JobRepository[]): Job {
       state.job.deliveryOrderJson === null
         ? null
         : DeliveryOrderSchema.parse(JSON.parse(state.job.deliveryOrderJson)),
+    sourceIssue:
+      state.job.sourceIssueJson === null
+        ? null
+        : SourceIssueSchema.parse(JSON.parse(state.job.sourceIssueJson)),
   };
 }
 

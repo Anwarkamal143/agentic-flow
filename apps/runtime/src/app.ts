@@ -17,6 +17,9 @@ import {
   RegisterRepositoryInputSchema,
   ApplyProfileDetectionInputSchema,
   SetProfileFieldInputSchema,
+  SetIntakeLabelInputSchema,
+  CreateJobFromIssueInputSchema,
+  type CreateJobFromIssueInput,
   type ApiError,
   type Billing,
   type GitHubState,
@@ -74,6 +77,8 @@ export interface AppDeps {
   projects: ProjectService;
   repositories: RepositoryService;
   jobs: JobService;
+  /** `job create --from-issue` (#112): reads the issue, creates its Job, returns the Job's id. */
+  createJobFromIssue(input: CreateJobFromIssueInput): Promise<string>;
   inbox: InboxService;
   artifacts: ArtifactStore;
   /** The (redacted) Harness and verification output of a Job's Attempts. */
@@ -149,6 +154,10 @@ export function createApp(deps: AppDeps): Hono {
     const input = await parseBody(c, SetProfileFieldInputSchema);
     return c.json(deps.repositories.setProfileField(c.req.param('ref'), input));
   });
+  app.post('/v1/repositories/:ref/intake', async (c) => {
+    const input = await parseBody(c, SetIntakeLabelInputSchema);
+    return c.json(deps.repositories.setIntakeLabel(c.req.param('ref'), input));
+  });
   app.post('/v1/repositories', async (c) => {
     const input = await parseBody(c, RegisterRepositoryInputSchema);
     return c.json(await deps.repositories.register(input), 201);
@@ -158,6 +167,10 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/v1/jobs', async (c) => {
     const input = await parseBody(c, CreateJobInputSchema);
     return c.json(deps.jobs.create(input), 201);
+  });
+  app.post('/v1/jobs/from-issue', async (c) => {
+    const input = await parseBody(c, CreateJobFromIssueInputSchema);
+    return c.json(deps.jobs.get(await deps.createJobFromIssue(input)), 201);
   });
   app.get('/v1/jobs/:id', (c) => c.json(deps.jobs.get(c.req.param('id'))));
   app.get('/v1/jobs/:id/artifacts', (c) => {

@@ -33,7 +33,7 @@ export async function inboxList(opts: { all: boolean; json: boolean }): Promise<
   for (const i of items) {
     const state = i.deferred ? `${i.state} (deferred)` : i.state;
     process.stdout.write(
-      `${i.id}  ${i.kind.padEnd(11)} ${state.padEnd(18)} v${String(i.version)}  ${i.jobId}  ${i.question}\n`,
+      `${i.id}  ${i.kind.padEnd(11)} ${state.padEnd(18)} v${String(i.version)}  ${i.jobId ?? '(no Job yet)'}  ${i.question}\n`,
     );
   }
   return 0;
@@ -279,7 +279,9 @@ function writeItem(i: Approval): void {
     `Inbox Item ${i.id} (${i.kind})`,
     `  state:      ${i.state}${i.deferred ? ' (deferred)' : ''}`,
     `  version:    ${String(i.version)}`,
-    `  job:        ${i.jobId}: ${i.jobTitle}`,
+    i.jobId === null
+      ? '  job:        (none yet: start_job creates one)'
+      : `  job:        ${i.jobId}: ${i.jobTitle ?? ''}`,
     `  project:    ${i.projectId}`,
     `  repository: ${i.repositoryId}`,
     `  stage:      ${i.stageId ?? '(none)'}`,
@@ -325,11 +327,17 @@ function writeItem(i: Approval): void {
         : [
             `  follow-up Job: ${i.decision.followUpJobId} (factory job show ${i.decision.followUpJobId})`,
           ]),
+      ...(i.decision.jobId === undefined
+        ? []
+        : [`  started Job: ${i.decision.jobId} (factory job show ${i.decision.jobId})`]),
       ...(i.decision.answers ?? []).map(
         (a) =>
           `    ${a.questionId.padEnd(6)} ${a.option !== undefined ? `option ${a.option}` : `text ${a.text ?? ''}`}`,
       ),
     );
+  } else if (i.state === 'cancelled' && i.decidedBy !== null) {
+    // Cancelled, never decided: an issue_job item whose issue was closed or unlabeled (#112).
+    lines.push(`  cancelled:  by ${i.decidedBy} at ${i.decidedAt ?? '?'} (not a decision)`);
   } else if (i.state === 'open' && i.kind === 'cleanup' && i.questions !== null) {
     lines.push(
       `  answer:     factory inbox answer ${i.id} --answer <question>=<option> ... --expect-version ${String(i.version)} (unanswered: keep)`,

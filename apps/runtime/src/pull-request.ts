@@ -42,6 +42,9 @@ import {
   type PullRequestBodyInput,
   type PullRequestRecord,
   type Redactor,
+  issueLabel,
+  issueReferenceLine,
+  SourceIssueSchema,
 } from '@factory/domain';
 import { changedPaths, git, GitError } from '@factory/git';
 import type { GitHubFailure, GitHubPort, PullRequest } from '@factory/github';
@@ -1466,7 +1469,29 @@ export function pullRequestBodyInput(
     })),
     changedFiles,
     multiRepository: multiRepositoryOf(db, job.id, task.repositoryId),
+    issue: issueOf(db, job, task.repositoryId),
   };
+}
+
+/**
+ * The issue line of an issue-sourced Job's PR (#112, ADR-0072): `Closes #N`
+ * in the issue's own Repository's PR, `Refs owner/name#N` in the others.
+ */
+function issueOf(
+  db: FactoryDb,
+  job: typeof schema.jobs.$inferSelect,
+  repositoryId: string,
+): PullRequestBodyInput['issue'] {
+  if (job.sourceIssueJson === null) return null;
+  const issue = SourceIssueSchema.parse(JSON.parse(job.sourceIssueJson));
+  const repo = db
+    .select()
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .get();
+  if (repo?.githubOwner == null || repo.githubName === null) return null;
+  const line = issueReferenceLine(issue, { owner: repo.githubOwner, name: repo.githubName });
+  return { line, closes: line.startsWith('Closes '), label: issueLabel(issue) };
 }
 
 /** The files `attempt`'s head changes against its base, in the Factory Clone: 0 is an empty delivery. */

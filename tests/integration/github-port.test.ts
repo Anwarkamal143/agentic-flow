@@ -427,3 +427,74 @@ describe('GitHub port: push permission (#108, ADR-0068)', () => {
     expect(gh.branchHead('acme/tiny-ts', 'allowed')).toBeDefined();
   });
 });
+
+describe('GitHub port: issues (#112, ADR-0072)', () => {
+  it('lists the open issues with a label, never a PR, with conditional requests', async () => {
+    const { gh, port } = await setup();
+    const one = gh.addIssue('acme/tiny-ts', {
+      title: 'Add sum()',
+      body: 'Please.',
+      labels: ['factory', 'bug'],
+    });
+    gh.addIssue('acme/tiny-ts', { title: 'Unlabeled', labels: ['bug'] });
+    await openPr(port, gh);
+    const listed = await port.listIssues(REPO, 'factory');
+    expect(listed).toMatchObject({
+      ok: true,
+      notModified: false,
+      value: [
+        {
+          number: one,
+          title: 'Add sum()',
+          body: 'Please.',
+          state: 'open',
+          labels: ['factory', 'bug'],
+          htmlUrl: expect.stringContaining(`/acme/tiny-ts/issues/${String(one)}`) as string,
+        },
+      ],
+    });
+    // Issues and PRs share numbers, as on GitHub.
+    expect(gh.pullRequests('acme/tiny-ts')[0]?.number).toBe(3);
+    expect(gh.requests.at(-1)?.path).toBe(
+      '/repos/acme/tiny-ts/issues?state=open&labels=factory&per_page=100',
+    );
+
+    const etag = listed.ok ? listed.etag : null;
+    if (etag === null) throw new Error('no ETag');
+    expect(await port.listIssues(REPO, 'factory', { etag })).toEqual({
+      ok: true,
+      notModified: true,
+      etag,
+    });
+    expect(gh.requests.at(-1)?.headers['if-none-match']).toBe(etag);
+
+    gh.setIssueLabels('acme/tiny-ts', one, ['bug']);
+    expect(await port.listIssues(REPO, 'factory', { etag })).toMatchObject({
+      ok: true,
+      notModified: false,
+      value: [],
+    });
+  });
+
+  it('reads one issue, closed or open; a PR number or a missing one is refused', async () => {
+    const { gh, port } = await setup();
+    const n = gh.addIssue('acme/tiny-ts', { title: 'Fix it', labels: ['factory'] });
+    gh.closeIssue('acme/tiny-ts', n);
+    expect(await port.getIssue(REPO, n)).toMatchObject({
+      ok: true,
+      value: { number: n, title: 'Fix it', body: null, state: 'closed', labels: ['factory'] },
+    });
+    gh.reopenIssue('acme/tiny-ts', n);
+    expect(await port.getIssue(REPO, n)).toMatchObject({ ok: true, value: { state: 'open' } });
+
+    const pr = await openPr(port, gh);
+    expect(failureOf(await port.getIssue(REPO, pr.number))).toMatchObject({
+      kind: 'refused',
+      reason: expect.stringMatching(/is a pull request/) as string,
+    });
+    expect(failureOf(await port.getIssue(REPO, 99))).toMatchObject({
+      kind: 'refused',
+      status: 404,
+    });
+  });
+});

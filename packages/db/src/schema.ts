@@ -78,6 +78,11 @@ export const repositories = sqliteTable(
     mergePolicy: text('merge_policy').notNull().default('never_auto'),
     /** `merge | squash | rebase`: how the factory merges under `human_approval` (ADR-0038). */
     mergeMethod: text('merge_method').notNull().default('merge'),
+    /**
+     * The GitHub label that opts the Repository into issue intake (#112,
+     * ADR-0072); null: no intake. Only with GitHub coordinates.
+     */
+    intakeLabel: text('intake_label'),
     createdAt: text('created_at').notNull(),
   },
   (t) => [
@@ -126,6 +131,11 @@ export const jobs = sqliteTable(
      * `job_repositories` when triage succeeds; none before).
      */
     repositorySetBy: text('repository_set_by').notNull().default('operator'),
+    /**
+     * JSON `SourceIssue` (#112, ADR-0072): the GitHub issue the Job came from,
+     * by an approved intake item or `job create --from-issue`; null otherwise.
+     */
+    sourceIssueJson: text('source_issue_json'),
   },
   (t) => [index('jobs_project').on(t.projectId), index('jobs_status').on(t.status)],
 );
@@ -586,13 +596,12 @@ export const approvals = sqliteTable(
   'approvals',
   {
     id: text('id').primaryKey(),
-    jobId: text('job_id')
-      .notNull()
-      .references(() => jobs.id),
+    /** Null only for an `issue_job` item (#112): it comes before the Job its decision creates. */
+    jobId: text('job_id').references(() => jobs.id),
     taskId: text('task_id').references(() => tasks.id),
     /** The Stage Run it holds, when it holds one (`plan_approval` for a plan). */
     stageRunId: text('stage_run_id').references(() => stageRuns.id),
-    /** `question | plan | spec_change | blocker | cleanup | merge | contract_job`. */
+    /** `question | plan | spec_change | blocker | cleanup | merge | contract_job | issue_job`. */
     kind: text('kind').notNull(),
     subjectRef: text('subject_ref').notNull(),
     question: text('question').notNull(),
@@ -617,6 +626,41 @@ export const approvals = sqliteTable(
     version: integer('version').notNull(),
   },
   (t) => [index('approvals_job').on(t.jobId), index('approvals_state').on(t.state)],
+);
+
+/**
+ * GitHub Issues intake (#112, ADR-0072): what the factory did with each issue
+ * of a Repository, at most one row per issue. An intake Repository's labeled
+ * issue is `offered` (its `issue_job` item open), then `job_created`,
+ * `declined` or `cancelled` (closed or unlabeled first; offered again if it is
+ * listed again). `job create --from-issue` records `job_created` too, so an
+ * issue starts at most one Job. The title, body and URL are the issue as it
+ * was when offered (GitHub content, untrusted, redacted); later edits are
+ * never picked up.
+ */
+export const issueIntakes = sqliteTable(
+  'issue_intakes',
+  {
+    id: text('id').primaryKey(),
+    repositoryId: text('repository_id')
+      .notNull()
+      .references(() => repositories.id),
+    number: integer('number').notNull(),
+    title: text('title').notNull(),
+    body: text('body'),
+    url: text('url').notNull(),
+    /** `offered | job_created | declined | cancelled`. */
+    state: text('state').notNull(),
+    /** The current `issue_job` item; null for a `--from-issue` Job. */
+    approvalId: text('approval_id').references(() => approvals.id),
+    jobId: text('job_id').references(() => jobs.id),
+    createdAt: text('created_at').notNull(),
+    version: integer('version').notNull(),
+  },
+  (t) => [
+    uniqueIndex('issue_intakes_issue').on(t.repositoryId, t.number),
+    uniqueIndex('issue_intakes_job').on(t.jobId),
+  ],
 );
 
 /**

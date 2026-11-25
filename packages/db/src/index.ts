@@ -56,6 +56,16 @@ export function openDatabase(path: string, opts: OpenOptions = {}): DatabaseHand
   };
 }
 
+/** An Inbox Item of a Job: every kind but `issue_job`, which comes before its Job (#112). */
+export type JobApprovalRow = typeof schema.approvals.$inferSelect & { jobId: string };
+
+/** `row` as an item of a Job; an item with none here is a bug in the caller. */
+export function jobBound(row: typeof schema.approvals.$inferSelect): JobApprovalRow {
+  const { jobId } = row;
+  if (jobId === null) throw new Error(`Inbox Item ${row.id} (${row.kind}) belongs to no Job`);
+  return { ...row, jobId };
+}
+
 export interface NewEvent {
   entityKind: string;
   entityId: string;

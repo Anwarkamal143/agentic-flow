@@ -13,11 +13,18 @@ import {
   planShow,
 } from './commands/inbox.js';
 import { init } from './commands/init.js';
-import { jobCancel, jobCreate, jobList, jobReplan, jobShow } from './commands/job.js';
+import {
+  jobCancel,
+  jobCreate,
+  jobCreateFromIssue,
+  jobList,
+  jobReplan,
+  jobShow,
+} from './commands/job.js';
 import { logs } from './commands/logs.js';
 import { planEdit, planRaw, planRequestChanges } from './commands/plan.js';
 import { projectConfigSet, projectCreate, projectList, projectShow } from './commands/project.js';
-import { repoAdd, repoProfileDetect, repoProfileSet } from './commands/repo.js';
+import { repoAdd, repoIntakeSet, repoProfileDetect, repoProfileSet } from './commands/repo.js';
 import { start, status, stop } from './commands/lifecycle.js';
 
 const USAGE = `Usage: factory <command> [options]
@@ -44,7 +51,8 @@ Commands:
   repo add <path> [--project <name>] [--test-command <cmd>]
            [--typecheck-command <cmd>] [--github <owner/name>]
            [--required-check <name>]... [--merge-policy never_auto|human_approval]
-           [--merge-method merge|squash|rebase] [--setup <cmd>] [--yes]
+           [--merge-method merge|squash|rebase] [--setup <cmd>]
+           [--intake-label <label>] [--yes]
                                   Register a Repository in an existing Project (unset:
                                   the only Project; an unknown one is refused): make its
                                   Factory Clone and save its confirmed commands (your
@@ -52,7 +60,12 @@ Commands:
                                   --setup runs in each Worktree before the Harness and
                                   verification (for example "npm ci"); every field of the
                                   detected Repository Profile is shown first (--yes
-                                  accepts them); setup is never detected
+                                  accepts them); setup is never detected;
+                                  --intake-label opts it into GitHub Issues intake
+  repo intake set <repo> <label> | repo intake off <repo>
+                                  GitHub Issues intake: each open issue with the label
+                                  becomes an Inbox item "Start a Job from owner/name#N?"
+                                  (needs GitHub coordinates); off cancels the open ones
   repo profile detect <repo> [--yes]
                                   Re-run Profile Detection on the source's HEAD and show
                                   the diff against the saved profile; saved once confirmed
@@ -70,6 +83,12 @@ Commands:
                                   multi-repo Job, all of one Project); the
                                   concurrency flags override its Task limits, and
                                   --merge-policy may only make each Repository's stricter
+  job create --from-issue <owner/name#N> [--repo <id|name>]... [--per-repository <n>]
+             [--per-job <n>] [--merge-policy <policy>]
+                                  Create a Job from a GitHub issue of a registered
+                                  Repository: its title, and its text as an untrusted
+                                  description; the issue's Repository plus any --repo;
+                                  an issue starts at most one Job
   job list [--json]               List Jobs, newest first
   job show <id> [--json]          Show a Job: status, Stages, Workflow Snapshot, config
   job cancel <id> [--reason <text>]
@@ -137,6 +156,7 @@ async function main(argv: string[]): Promise<number> {
     case 'repo': {
       const [sub, ...subArgs] = rest;
       if (sub === 'profile') return repoProfile(subArgs);
+      if (sub === 'intake') return repoIntake(subArgs);
       if (sub !== 'add') {
         process.stderr.write(`factory: unknown repo command '${sub ?? ''}'\n\n${USAGE}`);
         return 2;
@@ -153,6 +173,7 @@ async function main(argv: string[]): Promise<number> {
           'merge-policy': { type: 'string' },
           'merge-method': { type: 'string' },
           setup: { type: 'string' },
+          'intake-label': { type: 'string' },
           yes: { type: 'boolean', short: 'y' },
         },
       });
@@ -171,6 +192,7 @@ async function main(argv: string[]): Promise<number> {
         mergePolicy: values['merge-policy'],
         mergeMethod: values['merge-method'],
         setup: values.setup,
+        intakeLabel: values['intake-label'],
         yes: values.yes === true,
       });
     }
@@ -253,6 +275,19 @@ function config(argv: string[]): Promise<number> | number {
       process.stderr.write(`factory: unknown config command '${sub ?? ''}'\n\n${USAGE}`);
       return 2;
   }
+}
+
+function repoIntake(argv: string[]): Promise<number> | number {
+  const [action, ...args] = argv;
+  const { positionals } = parseArgs({ args, allowPositionals: true, options: {} });
+  if (action === 'set' && positionals.length === 2) {
+    const [ref = '', label = ''] = positionals;
+    return repoIntakeSet(ref, label);
+  }
+  if (action === 'off' && positionals.length === 1)
+    return repoIntakeSet(positionals[0] ?? '', null);
+  process.stderr.write(`factory: repo intake takes set <repo> <label> or off <repo>\n\n${USAGE}`);
+  return 2;
 }
 
 function repoProfile(argv: string[]): Promise<number> | number {
@@ -339,13 +374,26 @@ function job(argv: string[]): Promise<number> | number {
           repo: { type: 'string', multiple: true },
           title: { type: 'string' },
           description: { type: 'string' },
+          'from-issue': { type: 'string' },
           'per-repository': { type: 'string' },
           'per-job': { type: 'string' },
           'merge-policy': { type: 'string' },
         },
       });
-      if (values.title === undefined) {
-        process.stderr.write(`factory: job create needs --title\n\n${USAGE}`);
+      const fromIssue = values['from-issue'];
+      if (
+        fromIssue !== undefined &&
+        (values.title !== undefined ||
+          values.description !== undefined ||
+          values.project !== undefined)
+      ) {
+        process.stderr.write(
+          `factory: job create --from-issue takes its title, description and Project from the issue: drop --title, --description and --project\n\n${USAGE}`,
+        );
+        return 2;
+      }
+      if (fromIssue === undefined && values.title === undefined) {
+        process.stderr.write(`factory: job create needs --title (or --from-issue)\n\n${USAGE}`);
         return 2;
       }
       const perRepository = limitFlag('--per-repository', values['per-repository']);
@@ -361,16 +409,25 @@ function job(argv: string[]): Promise<number> | number {
         );
         return 2;
       }
+      const concurrency = {
+        ...(perRepository === undefined ? {} : { perRepository }),
+        ...(perJob === undefined ? {} : { perJob }),
+      };
+      if (fromIssue !== undefined) {
+        return jobCreateFromIssue({
+          ...(mergePolicy === undefined ? {} : { mergePolicy: mergePolicy.data }),
+          issue: fromIssue,
+          repos: values.repo ?? [],
+          concurrency,
+        });
+      }
       return jobCreate({
         ...(mergePolicy === undefined ? {} : { mergePolicy: mergePolicy.data }),
         project: values.project,
         repos: values.repo ?? [],
-        title: values.title,
+        title: values.title ?? '',
         description: values.description,
-        concurrency: {
-          ...(perRepository === undefined ? {} : { perRepository }),
-          ...(perJob === undefined ? {} : { perJob }),
-        },
+        concurrency,
       });
     }
     case 'list': {

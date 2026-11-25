@@ -57,6 +57,7 @@ import { CleanupWorker, openMissingCleanupItems } from './cleanup.js';
 import { Merger } from './merger.js';
 import { GitHubPauseGate } from './github-pause.js';
 import { GitHubPoller } from './poller.js';
+import { createFromIssue, IssueIntakePoller } from './issue-intake.js';
 import { applyLeaseKnobs, parseLeaseKnobs } from './sweeper.js';
 
 const ACTOR = 'system:runtime';
@@ -263,6 +264,7 @@ const githubPause = new GitHubPauseGate({
   onChange: () => {
     notify();
     poller.wake();
+    intake.wake();
   },
   log,
 });
@@ -310,6 +312,17 @@ const poller = new GitHubPoller({
   redact,
   pollIntervalMs: github.pollIntervalMs,
   checksGraceMs: github.checksGraceMs,
+  onCommit: () => {
+    notify();
+  },
+  log,
+});
+// Offers each newly labeled issue of an intake Repository as an issue_job item (#112, ADR-0072).
+const intake = new IssueIntakePoller({
+  db: database.db,
+  github: githubPort,
+  pause: githubPause,
+  pollIntervalMs: github.pollIntervalMs,
   onCommit: () => {
     notify();
   },
@@ -383,6 +396,18 @@ const app = createApp({
   projects: new ProjectService(database.db, notify),
   repositories,
   jobs,
+  createJobFromIssue: async (input) => {
+    const id = await createFromIssue(
+      {
+        db: database.db,
+        github: githubPort,
+        createJob: (tx, job, opts) => jobs.createIn(tx, job, opts),
+      },
+      input,
+    );
+    notify();
+    return id;
+  },
   inbox: new InboxService(
     database.db,
     artifacts,
@@ -421,6 +446,7 @@ const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requested
   cleanup.start();
   githubPause.start();
   poller.start();
+  intake.start();
   merger.start();
   writeRuntimeRecord(home, {
     pid: process.pid,
@@ -457,6 +483,7 @@ function shutdown(reason: string): void {
     tasks.close(),
     cleanup.close(),
     poller.close(),
+    intake.close(),
     merger.close(),
   ]);
   server.close(() => {

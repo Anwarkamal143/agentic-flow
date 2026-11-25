@@ -116,6 +116,16 @@ export function JobOverview({ job }: { job: Job }) {
           {job.deliveryOrder !== null && job.deliveryOrder.length > 1 ? (
             <Field label="Delivery order">{job.deliveryOrder.map((e) => e.name).join(' → ')}</Field>
           ) : null}
+          {job.sourceIssue !== null ? (
+            <Field label="From issue">
+              {/* The issue's text is untrusted GitHub input; the description says so (#112). */}
+              {job.sourceIssue.owner}/{job.sourceIssue.name}#{job.sourceIssue.number} (
+              {job.sourceIssue.via === 'intake'
+                ? 'an approved intake item'
+                : 'job create --from-issue'}
+              )
+            </Field>
+          ) : null}
           <Field label="Created">
             {formatTime(job.createdAt)} by {job.createdBy}
           </Field>

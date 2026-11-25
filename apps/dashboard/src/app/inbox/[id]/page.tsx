@@ -28,7 +28,7 @@ export default async function InboxItemPage({ params }: { params: Promise<{ id: 
       return <RuntimeUnavailableNotice message={err.message} />;
     throw err;
   }
-  const plan = context.plans.get(item.jobId) ?? null;
+  const plan = item.jobId === null ? null : (context.plans.get(item.jobId) ?? null);
 
   return (
     <div className="space-y-4">
