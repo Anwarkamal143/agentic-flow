@@ -162,6 +162,10 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 <!-- owner → globs; clear when the workstream is merged -->
 
+- 2026-11-25, Phase D (spec #93), two parallel workstreams:
+  - **#113 config export/import** → everything except the paths below (it owns `packages/domain`, `packages/db`, `apps/**`).
+  - **flaky-test fix** → `tests/scenarios/ci-failure.test.ts`, `tests/scenarios/plan-validation.test.ts`, `tests/scenarios/fair-scheduling.test.ts`, `tests/support/**`. It does not edit `packages/**` or `apps/**`; a needed runtime fix is reported, not made.
+
 ## Human decisions (outside CLAUDE.md §7)
 
 - 2026-11-22, **Spec issue 48 (D2 measurement), answered by the user directly in this session:** keep what #99 built. A Job holds a Project slot only while it has work in flight (story 81); between proposal Stages it holds none. D2's "each Project has a Job in flight before any starts its second" is measured at each Job's first Task claim (ADR-0058). No slot is held for queued proposal work.
