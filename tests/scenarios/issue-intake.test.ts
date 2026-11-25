@@ -342,7 +342,7 @@ describe('GitHub Issues intake (#112)', { timeout: 150_000 }, () => {
 
     const again = await rt.home.cli(['job', 'create', '--from-issue', `${FULL_NAME}#${String(n)}`]);
     expect(again.code).not.toBe(0);
-    expect(again.stderr).toContain('issue_has_job');
+    expect(again.stderr).toContain('already started Job');
 
     // Turned on later, intake never offers an issue that already started a Job.
     const on = await rt.home.cli(['repo', 'intake', 'set', 'tiny-ts', 'factory']);
@@ -356,7 +356,7 @@ describe('GitHub Issues intake (#112)', { timeout: 150_000 }, () => {
 
     // Refusals: an unregistered repository, a PR's number, a bad reference, --title beside it.
     const unknown = await rt.home.cli(['job', 'create', '--from-issue', 'acme/other#1']);
-    expect(unknown.stderr).toContain('repository_not_found');
+    expect(unknown.stderr).toContain('no registered Repository is on GitHub as acme/other');
     const malformed = await post(rt, '/v1/jobs/from-issue', { issue: 'acme/tiny-ts' });
     expect(malformed.status).toBe(400);
     const both = await rt.home.cli([
@@ -396,7 +396,7 @@ describe('GitHub Issues intake (#112)', { timeout: 150_000 }, () => {
     ]);
     expect(created.code, created.stderr).toBe(0);
     const prompt = await until(
-      () => Promise.resolve(stub.invocations().find((r) => r.role === 'triage')?.prompt),
+      () => Promise.resolve(stub.invocations().find((r) => r.role === 'triager')?.prompt),
       (p) => p !== undefined,
       'the triage Run',
     );

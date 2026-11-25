@@ -126,7 +126,7 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
               ))}
             </ul>
           )}
-          {item.kind === 'plan' && (
+          {item.kind === 'plan' && item.jobId !== null && (
             <p className="mt-1">
               <Link href={`/jobs/${item.jobId}#plan`} className="underline underline-offset-4">
                 Review the Plan

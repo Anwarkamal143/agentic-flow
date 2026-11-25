@@ -199,7 +199,7 @@ review_findings(id, review_id, severity, fault_origin, location, problem, why,
                 recommendation, blocking)
 approvals(id, job_id, task_id?, kind, subject_ref, question, options_json, recommended,
           state, deferred, decided_by, decided_at, decision_json, expires_policy, version)
-         -- kind: question | plan | spec_change | blocker | cleanup | merge [Phase C] | contract_job [Phase D]   (an "Inbox Item")
+         -- kind: question | plan | spec_change | blocker | cleanup | merge [Phase C] | contract_job | issue_job [Phase D]   (an "Inbox Item"; job_id null only for issue_job, ADR-0072)
          --   a PR closed without merging: the `pr_closed` Blocker Approval [Phase C, ADR-0043]
          --   cleanup: questions worktrees | pull_request | remote_branch, each default keep [ADR-0043]
          -- state: open | decided | cancelled | superseded;  expires_policy: remain_pending
