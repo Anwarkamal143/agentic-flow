@@ -48,6 +48,18 @@ export const factoryLevel = sqliteTable('factory_level', {
   configVersion: integer('config_version').notNull().default(1),
 });
 
+/**
+ * The onboarding wizard (#114, ADR-0053, ADR-0074): one row, created on the
+ * runtime's first start. Its only state is the last step completed (null
+ * before the first); resume opens the step after it.
+ */
+export const onboarding = sqliteTable('onboarding', {
+  id: text('id').primaryKey(),
+  lastCompletedStep: text('last_completed_step'),
+  version: integer('version').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 /** A product or initiative that owns Repositories and Jobs. ARCHITECTURE §5. */
 export const projects = sqliteTable(
   'projects',

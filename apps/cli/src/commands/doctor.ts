@@ -18,7 +18,7 @@ interface DoctorBody {
     fix?: string;
     notes?: string[];
   }[];
-  credentials: { name: string; source: string; present: boolean }[];
+  credentials: { name: string; source: string; present: boolean; detected?: false }[];
   billing:
     | { mode: 'subscription' }
     | { mode: 'api_key'; credential: string; present: boolean; exposure: string }
@@ -78,7 +78,8 @@ export async function doctor(opts: { json: boolean }): Promise<number> {
   }
   lines.push('', 'Credentials (presence only; values are never shown):');
   for (const cred of body.credentials) {
-    lines.push(`  ${(cred.present ? 'present' : 'absent').padEnd(9)}${cred.name} (${cred.source})`);
+    const shown = cred.detected === false ? 'unknown' : cred.present ? 'present' : 'absent';
+    lines.push(`  ${shown.padEnd(9)}${cred.name} (${cred.source})`);
   }
   const gh = body.github;
   lines.push(

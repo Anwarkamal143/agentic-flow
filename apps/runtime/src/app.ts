@@ -20,11 +20,15 @@ import {
   SetProfileFieldInputSchema,
   SetIntakeLabelInputSchema,
   CreateJobFromIssueInputSchema,
+  SetFactoryConfigManyInputSchema,
+  ApplyPresetInputSchema,
+  CompleteOnboardingStepInputSchema,
   type CreateJobFromIssueInput,
   type ApiError,
   type Billing,
   type GitHubState,
   type JobLogEntry,
+  type Onboarding,
 } from '@factory/domain';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
@@ -41,6 +45,7 @@ import type { JobService } from './jobs.js';
 import type { ProjectService } from './projects.js';
 import type { ConfigImportService } from './config-import.js';
 import type { FactoryLevelService } from './factory-level.js';
+import type { OnboardingService } from './onboarding.js';
 import type { RepositoryService } from './repositories.js';
 
 export interface RuntimeStatus {
@@ -65,6 +70,8 @@ export interface RuntimeStatus {
   } | null;
   /** The GitHub-wide state: the rate-limit pause in force, if any (ADR-0045). */
   github: GitHubState;
+  /** The onboarding wizard's progress (ADR-0074). */
+  onboarding: Onboarding;
 }
 
 export interface AppDeps {
@@ -76,6 +83,8 @@ export interface AppDeps {
   doctor(): Promise<DoctorReport>;
   /** The Factory Level: factory-wide configuration (ADR-0056). */
   factoryLevel: FactoryLevelService;
+  /** The onboarding wizard's record and finish checks (ADR-0074). */
+  onboarding: OnboardingService;
   /** `config export | import` (ADR-0073). */
   configImport: ConfigImportService;
   projects: ProjectService;
@@ -120,7 +129,22 @@ export function createApp(deps: AppDeps): Hono {
     const input = await parseBody(c, SetFactoryConfigInputSchema);
     return c.json(deps.factoryLevel.setKey(input, OPERATOR));
   });
+  app.post('/v1/factory/config/set-many', async (c) => {
+    const input = await parseBody(c, SetFactoryConfigManyInputSchema);
+    return c.json(deps.factoryLevel.setMany(input, OPERATOR));
+  });
+  app.post('/v1/factory/config/preset', async (c) => {
+    const input = await parseBody(c, ApplyPresetInputSchema);
+    return c.json(deps.factoryLevel.applyPreset(input, OPERATOR));
+  });
   app.get('/v1/factory/config/audit', (c) => c.json(deps.factoryLevel.audit()));
+
+  app.get('/v1/onboarding', (c) => c.json(deps.onboarding.show()));
+  app.get('/v1/onboarding/checks', async (c) => c.json(await deps.onboarding.checks()));
+  app.post('/v1/onboarding/complete', async (c) => {
+    const input = await parseBody(c, CompleteOnboardingStepInputSchema);
+    return c.json(await deps.onboarding.complete(input, OPERATOR));
+  });
 
   app.get('/v1/config/export', (c) => c.json(deps.configImport.export()));
   app.post('/v1/config/import', async (c) => {
