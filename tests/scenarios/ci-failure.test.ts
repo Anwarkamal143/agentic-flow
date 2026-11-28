@@ -397,45 +397,40 @@ describe('a CI failure', { timeout: 180_000 }, () => {
     expect((await integrationAttempts(rt, job.id)).attempts).toHaveLength(1);
   });
 
-  // KNOWN RUNTIME RACE (it.fails until fixed): a poll whose GitHub reads predate a rerun_checks
-  // decision records the old failure after it, and `ciBlockerStep` raises a new ci_failed Blocker
-  // Approval (no item is open any more) that the next poll supersedes. It is what makes C4 above
-  // flaky under load. The rerun decision leaves the pull_requests row's version alone, so the
-  // poller's "row changed while GitHub was read" guard does not drop the stale poll. Once the
-  // runtime drops it, this test fails: turn `it.fails` back into `it`.
-  it.fails(
-    'a poll that read the failed check before rerun_checks raises no new Blocker Approval when it records after the decision',
-    async () => {
-      const { gh, rt, job, pr } = await start();
-      failBuild(gh, pr.headSha);
-      const item = await openCiItem(rt, job.id);
+  // A poll whose GitHub reads predate a rerun_checks decision would record the old failure after
+  // it, and `ciBlockerStep` would raise a new ci_failed Blocker Approval that the next poll
+  // supersedes (what made C4 above flaky under load). The decision bumps the pull_requests row's
+  // version, so the poller's "row changed while GitHub was read" guard drops the stale poll.
+  it('a poll that read the failed check before rerun_checks raises no new Blocker Approval when it records after the decision', async () => {
+    const { gh, rt, job, pr } = await start();
+    failBuild(gh, pr.headSha);
+    const item = await openCiItem(rt, job.id);
 
-      // Hold the next poll between its check-run read (still `failure`) and its write.
-      let release = () => {};
-      const held = new Promise<void>((r) => (release = r));
-      const statuses = /\/commits\/[^/]+\/statuses$/;
-      const from = gh.requests.length;
-      gh.simulate({ kind: 'held', release: held }, { path: statuses });
-      const isHeld = (r: RecordedRequest) =>
-        statuses.test(r.path.split('?')[0] ?? '') && r.status === undefined;
-      await until(
-        () => Promise.resolve(gh.requests.slice(from).some(isHeld)),
-        (seen) => seen,
-        'a poll to hold its statuses read',
-      );
-      const res = await decide(rt, item, 'rerun_checks');
-      expect(res.status, await res.clone().text()).toBe(200);
-      release();
+    // Hold the next poll between its check-run read (still `failure`) and its write.
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const statuses = /\/commits\/[^/]+\/statuses$/;
+    const from = gh.requests.length;
+    gh.simulate({ kind: 'held', release: held }, { path: statuses });
+    const isHeld = (r: RecordedRequest) =>
+      statuses.test(r.path.split('?')[0] ?? '') && r.status === undefined;
+    await until(
+      () => Promise.resolve(gh.requests.slice(from).some(isHeld)),
+      (seen) => seen,
+      'a poll to hold its statuses read',
+    );
+    const res = await decide(rt, item, 'rerun_checks');
+    expect(res.status, await res.clone().text()).toBe(200);
+    release();
 
-      // The re-run is queued: the Blocker clears, and the only Blocker Approval is the decided one.
-      await until(
-        () => readJob(rt, job.id),
-        (j) => mergeApprovalBlocker(j)?.reason === 'awaiting_merge',
-        'the Blocker to clear',
-      );
-      expect((await itemsOf(rt, job.id, 'blocker')).map((i) => i.state)).toEqual(['decided']);
-    },
-  );
+    // The re-run is queued: the Blocker clears, and the only Blocker Approval is the decided one.
+    await until(
+      () => readJob(rt, job.id),
+      (j) => mergeApprovalBlocker(j)?.reason === 'awaiting_merge',
+      'the Blocker to clear',
+    );
+    expect((await itemsOf(rt, job.id, 'blocker')).map((i) => i.state)).toEqual(['decided']);
+  });
 
   it('rework sends the failed check to a Rework Attempt as labelled untrusted context and updates the PR in place', async () => {
     const { gh, rt, repo, job, pr } = await start();

@@ -724,6 +724,17 @@ export class InboxService {
     try {
       this.decideOnly(item, input, actor, null, (tx) => {
         recordRerun(tx);
+        // A poll that read GitHub before this decision would record the old failure after it
+        // and raise a new ci_failed item: the bump makes the poller drop it, unrecorded.
+        tx.update(schema.pullRequests)
+          .set({ version: sql`${schema.pullRequests.version} + 1` })
+          .where(
+            inArray(
+              schema.pullRequests.id,
+              prs.map((p) => p.id),
+            ),
+          )
+          .run();
       });
     } catch (err) {
       // A poll may have seen the re-run queued and superseded the item meanwhile: the re-run
