@@ -166,9 +166,6 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 <!-- owner → globs; clear when the workstream is merged -->
 
-- 2026-11-28, Phase D (spec #93), one parallel workstream (#114 merged):
-  - **C4 race fix** → `apps/runtime/src/inbox.ts`, `apps/runtime/src/poller.ts`, `tests/scenarios/ci-failure.test.ts`, `tests/support/github.ts`.
-
 ## Human decisions (outside CLAUDE.md §7)
 
 - 2026-11-28, **Spec issue 49 (D2 ready-wait measure), answered by the user directly in this session:** measure a claim's ready-wait as the number of other Projects' claims committed (event `seq`) while the work was ready, not in wall-clock milliseconds; the bound stays 2× (the longest mean ready-wait of any Project at most twice the shortest). ADR-0058 and ROADMAP D2 amended.
