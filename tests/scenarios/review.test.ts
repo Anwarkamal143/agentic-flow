@@ -9,14 +9,16 @@ import {
 } from '../support/factory.js';
 import {
   capAttempts,
+  createProject,
+  declareCommands,
   expectStoppedAtCap,
   json,
   onlyAttempt,
   post,
+  skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  skipPlanApproval,
 } from '../support/api.js';
 import {
   scriptWith,
@@ -80,11 +82,13 @@ async function runWith(script: string, opts: { maxAttempts?: number } = {}) {
   const home = await initializedHome();
   useFakeHarness(home, script);
   const rt = await startRuntime(home);
+  await createProject(rt, 'demo');
   const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   if (opts.maxAttempts !== undefined) await capAttempts(rt, repo.projectId, opts.maxAttempts);
   const created = await post(rt, '/v1/jobs', {

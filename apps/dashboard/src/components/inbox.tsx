@@ -44,9 +44,14 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
           {item.deferred && <Badge variant="secondary">Deferred</Badge>}
         </CardTitle>
         <CardDescription>
-          <Link href={`/jobs/${item.jobId}`} className="underline-offset-4 hover:underline">
-            {item.jobTitle}
-          </Link>{' '}
+          {item.jobId === null ? (
+            // An issue_job item comes before its Job (#112).
+            <span>No Job yet: Start the Job creates one</span>
+          ) : (
+            <Link href={`/jobs/${item.jobId}`} className="underline-offset-4 hover:underline">
+              {item.jobTitle}
+            </Link>
+          )}{' '}
           · <span className="font-mono text-xs">{item.id}</span>
         </CardDescription>
       </CardHeader>
@@ -121,7 +126,7 @@ export function InboxItemCard({ item, context }: { item: Approval; context: Item
               ))}
             </ul>
           )}
-          {item.kind === 'plan' && (
+          {item.kind === 'plan' && item.jobId !== null && (
             <p className="mt-1">
               <Link href={`/jobs/${item.jobId}#plan`} className="underline underline-offset-4">
                 Review the Plan
@@ -189,8 +194,8 @@ function Questions({ item }: { item: Approval }) {
                 <Badge variant="outline" className="ml-1">
                   scope change request
                 </Badge>
-              )}{' '}
-              {q.text}
+              )}
+              <CategoryBadge question={q} /> {q.text}
               {q.paths.length > 0 && (
                 <span className="block text-muted-foreground">
                   Paths asked for (never granted): {q.paths.join(', ')}
@@ -225,6 +230,17 @@ function Questions({ item }: { item: Approval }) {
   );
 }
 
+/** A proposal Stage question's category (ADR-0071); Security needs approver rights. */
+function CategoryBadge({ question }: { question: NonNullable<Approval['questions']>[number] }) {
+  if (question.category === undefined) return null;
+  return (
+    <Badge variant={question.requiresApprover === true ? 'warning' : 'outline'} className="ml-1">
+      {question.category}
+      {question.requiresApprover === true ? ' · needs approver rights' : ''}
+    </Badge>
+  );
+}
+
 /**
  * A `question` item's answer form: per question, its offered options (the
  * agent's) or your own words, then one submit (`answerQuestion`). It carries
@@ -246,7 +262,8 @@ function AnswerForm({ item, returnTo }: { item: Approval; returnTo: string }) {
         {(item.questions ?? []).map((q) => (
           <fieldset key={q.id} className="space-y-1 text-sm">
             <legend className="font-medium">
-              {q.id}: {q.text} {q.blocking ? '(required)' : '(optional)'}
+              {q.id}: <CategoryBadge question={q} /> {q.text}{' '}
+              {q.blocking ? '(required)' : '(optional)'}
             </legend>
             {q.options.map((o) => (
               <label key={o} className="mr-4 inline-flex items-center gap-1">
@@ -280,8 +297,9 @@ function AnswerForm({ item, returnTo }: { item: Approval; returnTo: string }) {
           </fieldset>
         ))}
         <p className="text-xs text-muted-foreground">
-          Your answers are guidance for a fresh Attempt on the same Task Branch. They never widen
-          the Task’s scope or grant a permission.
+          {item.taskId === null
+            ? 'Your answers start a new Stage Run; the output that asked stays an Artifact. They never grant a permission.'
+            : 'Your answers are guidance for a fresh Attempt on the same Task Branch. They never widen the Task’s scope or grant a permission.'}
         </p>
         <button type="submit" className={`${button} bg-primary text-primary-foreground`}>
           Send answers

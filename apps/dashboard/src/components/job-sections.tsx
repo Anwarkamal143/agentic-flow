@@ -6,6 +6,8 @@ import type {
   Evidence,
   Finding,
   Job,
+  JobRepository,
+  RepositorySetBy,
   PullRequestRecord,
   Review,
   Task,
@@ -41,6 +43,32 @@ export function Field({ label, children }: { label: string; children: ReactNode 
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="text-sm break-words">{children}</dd>
     </div>
+  );
+}
+
+/**
+ * A Job's Repositories by name, each titled with its id. A set triage chose,
+ * or has yet to choose, says so (ADR-0067).
+ */
+export function Repositories({
+  repositories,
+  setBy,
+}: {
+  repositories: JobRepository[];
+  setBy: RepositorySetBy;
+}) {
+  if (repositories.length === 0) {
+    return <span className="text-muted-foreground">To be chosen by triage</span>;
+  }
+  return (
+    <span className="flex flex-wrap gap-x-2">
+      {repositories.map((r) => (
+        <code key={r.id} title={r.id} className="font-mono text-xs">
+          {r.name}
+        </code>
+      ))}
+      {setBy === 'triage' && <span className="text-muted-foreground">(chosen by triage)</span>}
+    </span>
   );
 }
 
@@ -82,9 +110,22 @@ export function JobOverview({ job }: { job: Job }) {
         <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Field label="Current stage">{job.currentStage}</Field>
           <Field label="Type">{job.type}</Field>
-          <Field label="Repository">
-            <code className="font-mono text-xs">{job.repositoryId}</code>
+          <Field label="Repositories">
+            <Repositories repositories={job.repositories} setBy={job.repositorySetBy} />
           </Field>
+          {job.deliveryOrder !== null && job.deliveryOrder.length > 1 ? (
+            <Field label="Delivery order">{job.deliveryOrder.map((e) => e.name).join(' → ')}</Field>
+          ) : null}
+          {job.sourceIssue !== null ? (
+            <Field label="From issue">
+              {/* The issue's text is untrusted GitHub input; the description says so (#112). */}
+              {job.sourceIssue.owner}/{job.sourceIssue.name}#{job.sourceIssue.number} (
+              {job.sourceIssue.via === 'intake'
+                ? 'an approved intake item'
+                : 'job create --from-issue'}
+              )
+            </Field>
+          ) : null}
           <Field label="Created">
             {formatTime(job.createdAt)} by {job.createdBy}
           </Field>
@@ -558,6 +599,14 @@ function VerificationRuns({ attempt }: { attempt: Attempt }) {
               <TableRow key={r.id}>
                 <TableCell className="font-mono text-xs">{r.key}</TableCell>
                 <TableCell>
+                  {r.profileCommand === null ? null : (
+                    <div className="text-muted-foreground text-xs">
+                      profile command{' '}
+                      <code className="font-mono">
+                        {[r.profileCommand.name, ...r.profileCommand.args].join(' ')}
+                      </code>
+                    </div>
+                  )}
                   <code className="font-mono text-xs">{r.command}</code>
                 </TableCell>
                 <TableCell>{r.required ? 'yes' : 'no'}</TableCell>

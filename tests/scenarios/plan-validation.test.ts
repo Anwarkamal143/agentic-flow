@@ -55,7 +55,7 @@ describe('Plan validation in the planning Stage', () => {
           title: 'Tidy every source file',
           scope: { writable: ['src/**'], forbidden: [] },
           acceptance: [],
-          verification: [{ key: 'ls', command: 'ls src' }],
+          verification: [{ key: 'ls', command: 'dir-exists', args: ['src'] }],
         },
       ],
     };
@@ -108,7 +108,9 @@ describe('Plan validation in the planning Stage', () => {
       priority,
       scope: { writable: [`docs/${key}.md`], forbidden: [] },
       acceptance: ['AC-01'],
-      verification: [{ key: 'test', command: `test -f docs/${key}.md`, criteria: ['AC-01'] }],
+      verification: [
+        { key: 'test', command: 'exists', args: [`docs/${key}.md`], criteria: ['AC-01'] },
+      ],
       ...extra,
     });
     const taskRun = (key: string) => [
@@ -163,11 +165,19 @@ describe('Plan validation in the planning Stage', () => {
       ['integration', 3],
     ]);
     const keyOf = new Map(tasks.map((t) => [t.id, t.key]));
+    // Dispatch is the claim: both plan Tasks fit under `perJob` 2, so one pass claims both, in
+    // the fair order (`task.claimed` by `seq`, the commit order). Their Attempts start after
+    // each Worktree is set up, concurrently, so the Attempts' start order says nothing of it.
+    const events = await json<EventBody[]>(rt.request(`/v1/jobs/${job.id}/events?limit=1000`));
+    const claimed = events
+      .filter((e) => e.type === 'task.claimed')
+      .sort((a, b) => a.seq - b.seq)
+      .map((e) => keyOf.get(e.entityId));
+    expect(claimed).toEqual(['high-later', 'low-first', 'integration']);
     const attempts = await json<AttemptBody[]>(rt.request(`/v1/jobs/${job.id}/attempts`));
-    expect(attempts.map((a) => keyOf.get(a.taskId))).toEqual([
-      'high-later',
-      'low-first',
-      'integration',
-    ]);
+    // One first Attempt each.
+    expect(
+      attempts.map((a) => `${keyOf.get(a.taskId) ?? a.taskId} #${String(a.n)}`).sort(),
+    ).toEqual(['high-later #1', 'integration #1', 'low-first #1']);
   });
 });

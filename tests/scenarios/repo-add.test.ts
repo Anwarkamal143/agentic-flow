@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { json } from '../support/api.js';
+import { createProject, json } from '../support/api.js';
 import { git, startRuntime, tinyTsRepo } from '../support/factory.js';
 import { fakeGitHub } from '../support/github.js';
 
@@ -14,13 +14,23 @@ interface RepositoryBody {
   remoteUrl: string | null;
   clonePath: string;
   defaultBranch: string;
-  profile: { commands: { test: string | null; typecheck: string | null } };
+  profile: {
+    version: number;
+    detection: string;
+    packageManager: string | null;
+    commands: Record<string, { run: string; acceptsArgs: boolean }>;
+    ciFiles: { path: string; checks: string[] }[];
+    instructionFiles: string[];
+    sensitivePaths: string[];
+    setup?: string;
+  };
   github: { owner: string; name: string } | null;
 }
 
 describe('factory repo add', () => {
-  it('registers a Project and a Repository, with a Factory Clone made from the path', async () => {
+  it('registers a Repository in an existing Project, with a Factory Clone made from the path', async () => {
     const rt = await startRuntime();
+    await createProject(rt);
     const repo = tinyTsRepo();
 
     const res = await rt.home.cli(['repo', 'add', repo, '--project', 'demo'], { input: 'y\n' });
@@ -44,7 +54,14 @@ describe('factory repo add', () => {
       source: repo,
       remoteUrl: null,
       defaultBranch: 'main',
-      profile: { commands: { test: 'npm test', typecheck: 'npm run typecheck' } },
+      profile: {
+        version: 2,
+        detection: 'detected',
+        commands: {
+          test: { run: 'npm test', acceptsArgs: false },
+          typecheck: { run: 'npm run typecheck', acceptsArgs: false },
+        },
+      },
     });
     expect(registered.clonePath).toBe(join(rt.home.workspaceRoot, 'clones', registered.id));
     expect(git(registered.clonePath, ['rev-parse', 'HEAD'])).toBe(git(repo, ['rev-parse', 'HEAD']));
@@ -53,6 +70,7 @@ describe('factory repo add', () => {
 
   it('clones from origin, reusing local objects, and never writes to the source checkout', async () => {
     const rt = await startRuntime();
+    await createProject(rt);
     const repo = tinyTsRepo();
     const instructions = {
       'CLAUDE.md': '# Rules\n\nKeep it small.\n',
@@ -102,10 +120,65 @@ describe('factory repo add', () => {
     for (const [file, text] of Object.entries(instructions)) {
       expect(readFileSync(join(repo, file), 'utf8'), `${file} byte-identical`).toBe(text);
     }
+    // D4: the instruction files are listed, never written, and are Sensitive Paths.
+    expect(res.stdout).toContain('instruction files: AGENTS.md, CLAUDE.md (listed, never written)');
+    expect(registered.profile.instructionFiles).toEqual(['AGENTS.md', 'CLAUDE.md']);
+    expect(registered.profile.sensitivePaths).toEqual(
+      expect.arrayContaining(['AGENTS.md', 'CLAUDE.md', '.env*', '.github/workflows/**']),
+    );
+    expect(
+      readFileSync(join(registered.clonePath, 'CLAUDE.md'), 'utf8'),
+      'nor in the Factory Clone',
+    ).toBe(instructions['CLAUDE.md']);
+  });
+
+  it('presents every detected field, saves them with --yes and never detects setup', async () => {
+    const rt = await startRuntime();
+    await createProject(rt);
+    const repo = tinyTsRepo();
+    const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    manifest.scripts = { ...manifest.scripts, lint: 'eslint .', setup: 'npm ci' };
+    writeFileSync(join(repo, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
+    mkdirSync(join(repo, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(repo, '.github', 'workflows', 'ci.yml'),
+      'on: [push]\njobs:\n  test:\n    name: Unit tests\n    runs-on: ubuntu-latest\n',
+    );
+    git(repo, ['add', '--all']);
+    git(repo, ['commit', '--quiet', '--no-gpg-sign', '-m', 'lint and CI']);
+    // Uncommitted changes are not what the Factory Clone gets, so detection ignores them.
+    writeFileSync(join(repo, 'AGENTS.md'), 'untracked\n');
+
+    const res = await rt.home.cli(['repo', 'add', repo, '--yes']);
+
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).toMatch(/package manager: npm/);
+    expect(res.stdout).toMatch(/lint: +npm run lint \(detected\)/);
+    expect(res.stdout).toContain('.github/workflows/ci.yml (candidate checks: Unit tests)');
+    expect(res.stdout).toContain('instruction files: none');
+    expect(res.stdout).toMatch(/Sensitive Paths \(no Task may write them\): \.env\*/);
+    expect(res.stdout).toMatch(/setup: +none/);
+    const [registered] = await json<[RepositoryBody]>(rt.request('/v1/repositories'));
+    expect(registered.profile).toMatchObject({
+      detection: 'detected',
+      packageManager: 'npm',
+      commands: {
+        lint: { run: 'npm run lint', acceptsArgs: false },
+        test: { run: 'npm test', acceptsArgs: false },
+        typecheck: { run: 'npm run typecheck', acceptsArgs: false },
+      },
+      ciFiles: [{ path: '.github/workflows/ci.yml', checks: ['Unit tests'] }],
+      instructionFiles: [],
+    });
+    expect(registered.profile.setup).toBeUndefined();
+    expect(Object.keys(registered.profile.commands)).not.toContain('setup');
   });
 
   it('refuses an origin URL with embedded credentials, never showing them', async () => {
     const rt = await startRuntime();
+    await createProject(rt);
     const repo = tinyTsRepo();
     const token = 'ghp_DUMMY' + 'z'.repeat(30);
     git(repo, ['remote', 'add', 'origin', `https://${token}@example.invalid/acme/tiny-ts.git`]);
@@ -121,6 +194,7 @@ describe('factory repo add', () => {
 
   it('saves a relative origin as the absolute location it was cloned from', async () => {
     const rt = await startRuntime();
+    await createProject(rt);
     const repo = tinyTsRepo();
     const origin = join(dirname(repo), 'upstream.git');
     git(dirname(repo), ['clone', '--quiet', '--bare', repo, origin]);
@@ -136,6 +210,7 @@ describe('factory repo add', () => {
 
   it('saves nothing when the detected commands are not confirmed', async () => {
     const rt = await startRuntime();
+    await createProject(rt);
     const repo = tinyTsRepo();
 
     const res = await rt.home.cli(['repo', 'add', repo], { input: 'n\n' });
@@ -143,12 +218,17 @@ describe('factory repo add', () => {
     expect(res.code).toBe(1);
     expect(res.stderr).toContain('Nothing registered');
     expect(await (await rt.request('/v1/repositories')).json()).toEqual([]);
-    expect(await (await rt.request('/v1/projects')).json()).toEqual([]);
+    expect(
+      (await json<{ repositories: unknown[] }[]>(rt.request('/v1/projects'))).map(
+        (p) => p.repositories,
+      ),
+    ).toEqual([[]]);
     expect(existsSync(join(rt.home.workspaceRoot, 'clones'))).toBe(false);
   });
 
   it('saves operator-supplied commands in place of the detected ones', async () => {
     const rt = await startRuntime();
+    await createProject(rt);
     const res = await rt.home.cli([
       'repo',
       'add',
@@ -162,11 +242,14 @@ describe('factory repo add', () => {
     expect(res.code, res.stderr).toBe(0);
     expect(res.stdout).toMatch(/typecheck: +npx tsc -p \. \(from --typecheck-command\)/);
     const [registered] = (await (await rt.request('/v1/repositories')).json()) as [RepositoryBody];
-    expect(registered.profile.commands).toEqual({ test: null, typecheck: 'npx tsc -p .' });
+    expect(registered.profile.commands).toEqual({
+      typecheck: { run: 'npx tsc -p .', acceptsArgs: false },
+    });
   });
 
   it('refuses a path that is not a git repository, and a second registration', async () => {
     const rt = await startRuntime();
+    await createProject(rt);
     const notRepo = await rt.home.cli(['repo', 'add', rt.home.workspaceRoot, '--yes']);
     expect(notRepo.code).toBe(1);
     expect(notRepo.stderr).toContain('is not inside a git working tree');
@@ -191,6 +274,7 @@ describe('factory repo add: GitHub coordinates', () => {
     git(repo, ['remote', 'add', 'origin', remote.remoteUrl]);
     // The runtime's git reaches the fake GitHub's bare remote for that github.com URL.
     const rt = await startRuntime(undefined, { env: gh.gitEnv() });
+    await createProject(rt);
 
     const res = await rt.home.cli(['repo', 'add', repo, '--yes']);
 
@@ -211,6 +295,7 @@ describe('factory repo add: GitHub coordinates', () => {
 
   it('stores them from --github, which wins over the origin URL', async () => {
     const rt = await startRuntime();
+    await createProject(rt);
     const repo = tinyTsRepo();
 
     const res = await rt.home.cli(['repo', 'add', repo, '--github', 'acme/widgets', '--yes']);
@@ -223,6 +308,7 @@ describe('factory repo add: GitHub coordinates', () => {
 
   it('has none without a github.com remote, and says so', async () => {
     const rt = await startRuntime();
+    await createProject(rt);
     const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--yes']);
     expect(res.code, res.stderr).toBe(0);
     expect(res.stdout).toMatch(/GitHub: +none/);
@@ -232,6 +318,7 @@ describe('factory repo add: GitHub coordinates', () => {
 
   it('refuses a --github value that is not owner/name, registering nothing', async () => {
     const rt = await startRuntime();
+    await createProject(rt);
     const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--github', 'widgets', '--yes']);
     expect(res.code).not.toBe(0);
     expect(res.stderr).toContain('owner/name');

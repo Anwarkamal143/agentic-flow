@@ -23,6 +23,8 @@ import {
 } from '../support/factory.js';
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
@@ -134,7 +136,9 @@ function task(key: string) {
     scope: { writable: [`src/${key}.ts`], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: `test-${key}`, command: `test -f src/${key}.ts`, criteria: ['AC-01'] }],
+    verification: [
+      { key: `test-${key}`, command: 'exists', args: [`src/${key}.ts`], criteria: ['AC-01'] },
+    ],
   };
 }
 
@@ -171,10 +175,12 @@ async function start(reviews: Record<string, unknown>[]) {
     github: { token: 'env:GH_ACCESS', apiBaseUrl: gh.url, pollIntervalMs: 250, checksGraceMs: 0 },
   });
   const rt = await startRuntime(home, { env: { ...gh.gitEnv(), GH_ACCESS } });
+  await createProject(rt, 'demo');
   const added = await rt.home.cli(['repo', 'add', src, '--project', 'demo', '--yes']);
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId, {});
   const res = await post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add the files' });
   expect(res.status, 'create Job').toBe(201);

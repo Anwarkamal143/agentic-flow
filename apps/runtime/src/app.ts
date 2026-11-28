@@ -10,12 +10,25 @@ import {
   EditPlanInputSchema,
   RequestPlanChangesInputSchema,
   InspectRepositoryInputSchema,
+  CreateProjectInputSchema,
   ProjectConfigSchema,
+  SetFactoryConfigInputSchema,
+  ImportConfigInputSchema,
+  SetProjectConfigInputSchema,
   RegisterRepositoryInputSchema,
+  ApplyProfileDetectionInputSchema,
+  SetProfileFieldInputSchema,
+  SetIntakeLabelInputSchema,
+  CreateJobFromIssueInputSchema,
+  SetFactoryConfigManyInputSchema,
+  ApplyPresetInputSchema,
+  CompleteOnboardingStepInputSchema,
+  type CreateJobFromIssueInput,
   type ApiError,
   type Billing,
   type GitHubState,
   type JobLogEntry,
+  type Onboarding,
 } from '@factory/domain';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
@@ -29,6 +42,10 @@ import { MAX_EVENT_PAGE } from './events.js';
 import { ApiFailure } from './errors.js';
 import type { InboxService } from './inbox.js';
 import type { JobService } from './jobs.js';
+import type { ProjectService } from './projects.js';
+import type { ConfigImportService } from './config-import.js';
+import type { FactoryLevelService } from './factory-level.js';
+import type { OnboardingService } from './onboarding.js';
 import type { RepositoryService } from './repositories.js';
 
 export interface RuntimeStatus {
@@ -53,6 +70,8 @@ export interface RuntimeStatus {
   } | null;
   /** The GitHub-wide state: the rate-limit pause in force, if any (ADR-0045). */
   github: GitHubState;
+  /** The onboarding wizard's progress (ADR-0074). */
+  onboarding: Onboarding;
 }
 
 export interface AppDeps {
@@ -62,8 +81,17 @@ export interface AppDeps {
   github(): GitHubState;
   /** Runs the environment checks (tools, credential presence). */
   doctor(): Promise<DoctorReport>;
+  /** The Factory Level: factory-wide configuration (ADR-0056). */
+  factoryLevel: FactoryLevelService;
+  /** The onboarding wizard's record and finish checks (ADR-0074). */
+  onboarding: OnboardingService;
+  /** `config export | import` (ADR-0073). */
+  configImport: ConfigImportService;
+  projects: ProjectService;
   repositories: RepositoryService;
   jobs: JobService;
+  /** `job create --from-issue` (#112): reads the issue, creates its Job, returns the Job's id. */
+  createJobFromIssue(input: CreateJobFromIssueInput): Promise<string>;
   inbox: InboxService;
   artifacts: ArtifactStore;
   /** The (redacted) Harness and verification output of a Job's Attempts. */
@@ -96,15 +124,74 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get('/v1/doctor', async (c) => c.json(await deps.doctor()));
 
-  app.get('/v1/projects', (c) => c.json(deps.repositories.listProjects()));
+  app.get('/v1/factory/config', (c) => c.json(deps.factoryLevel.show()));
+  app.post('/v1/factory/config/set', async (c) => {
+    const input = await parseBody(c, SetFactoryConfigInputSchema);
+    return c.json(deps.factoryLevel.setKey(input, OPERATOR));
+  });
+  app.post('/v1/factory/config/set-many', async (c) => {
+    const input = await parseBody(c, SetFactoryConfigManyInputSchema);
+    return c.json(deps.factoryLevel.setMany(input, OPERATOR));
+  });
+  app.post('/v1/factory/config/preset', async (c) => {
+    const input = await parseBody(c, ApplyPresetInputSchema);
+    return c.json(deps.factoryLevel.applyPreset(input, OPERATOR));
+  });
+  app.get('/v1/factory/config/audit', (c) => c.json(deps.factoryLevel.audit()));
+
+  app.get('/v1/onboarding', (c) => c.json(deps.onboarding.show()));
+  app.get('/v1/onboarding/checks', async (c) => c.json(await deps.onboarding.checks()));
+  app.post('/v1/onboarding/complete', async (c) => {
+    const input = await parseBody(c, CompleteOnboardingStepInputSchema);
+    return c.json(await deps.onboarding.complete(input, OPERATOR));
+  });
+
+  app.get('/v1/config/export', (c) => c.json(deps.configImport.export()));
+  app.post('/v1/config/import', async (c) => {
+    const input = await parseBody(c, ImportConfigInputSchema);
+    return c.json(deps.configImport.import(input));
+  });
+  app.get('/v1/config/audit', (c) => c.json(deps.configImport.audit()));
+
+  app.get('/v1/projects', (c) => c.json(deps.projects.list()));
+  app.post('/v1/projects', async (c) => {
+    const input = await parseBody(c, CreateProjectInputSchema);
+    return c.json(deps.projects.create(input), 201);
+  });
+  app.get('/v1/projects/:ref', (c) => c.json(deps.projects.show(c.req.param('ref'))));
+  app.get('/v1/projects/:ref/effective-config', (c) =>
+    c.json(deps.projects.effectiveConfig(c.req.param('ref'))),
+  );
   app.post('/v1/projects/:id/config', async (c) => {
     const config = await parseBody(c, ProjectConfigSchema);
-    return c.json(deps.repositories.updateProjectConfig(c.req.param('id'), config));
+    return c.json(deps.projects.replaceConfig(c.req.param('id'), config));
+  });
+  app.post('/v1/projects/:ref/config/set', async (c) => {
+    const input = await parseBody(c, SetProjectConfigInputSchema);
+    return c.json(deps.projects.setConfigKey(c.req.param('ref'), input));
   });
   app.get('/v1/repositories', (c) => c.json(deps.repositories.listRepositories()));
+  app.get('/v1/repositories/:id/effective-config', (c) =>
+    c.json(deps.repositories.effectiveConfig(c.req.param('id'))),
+  );
   app.post('/v1/repositories/inspect', async (c) => {
     const input = await parseBody(c, InspectRepositoryInputSchema);
     return c.json(await deps.repositories.inspect(input.path));
+  });
+  app.post('/v1/repositories/:ref/profile/detect', async (c) =>
+    c.json(await deps.repositories.detectProfile(c.req.param('ref'))),
+  );
+  app.post('/v1/repositories/:ref/profile/apply', async (c) => {
+    const input = await parseBody(c, ApplyProfileDetectionInputSchema);
+    return c.json(deps.repositories.applyDetection(c.req.param('ref'), input));
+  });
+  app.post('/v1/repositories/:ref/profile/set', async (c) => {
+    const input = await parseBody(c, SetProfileFieldInputSchema);
+    return c.json(deps.repositories.setProfileField(c.req.param('ref'), input));
+  });
+  app.post('/v1/repositories/:ref/intake', async (c) => {
+    const input = await parseBody(c, SetIntakeLabelInputSchema);
+    return c.json(deps.repositories.setIntakeLabel(c.req.param('ref'), input));
   });
   app.post('/v1/repositories', async (c) => {
     const input = await parseBody(c, RegisterRepositoryInputSchema);
@@ -115,6 +202,10 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/v1/jobs', async (c) => {
     const input = await parseBody(c, CreateJobInputSchema);
     return c.json(deps.jobs.create(input), 201);
+  });
+  app.post('/v1/jobs/from-issue', async (c) => {
+    const input = await parseBody(c, CreateJobFromIssueInputSchema);
+    return c.json(deps.jobs.get(await deps.createJobFromIssue(input)), 201);
   });
   app.get('/v1/jobs/:id', (c) => c.json(deps.jobs.get(c.req.param('id'))));
   app.get('/v1/jobs/:id/artifacts', (c) => {

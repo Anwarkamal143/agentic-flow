@@ -68,7 +68,13 @@ pnpm test:integration # only the integration tests (tests/integration); builds f
 pnpm test:real     # on demand only, never CI: [real] tests with the real Claude Code (needs `claude` logged in; minutes, uses your usage)
 pnpm format        # Prettier --write
 pnpm --filter @factory/db db:generate   # write a migration after editing packages/db/src/schema.ts
-pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | repo add [--github owner/name] [--required-check <name>]... [--merge-policy never_auto|human_approval] [--merge-method merge|squash|rebase] [--setup <cmd>] | job create [--merge-policy <stricter>]|list|show|cancel | job replan <job> --feedback <text> | logs | activity
+pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | config show | config set <key> <value> [--expect-version <n>]
+                   #   | config export | config import <file> [--apply --expect-version <n>]   (YAML of every level by name; diff first, then one audited apply)
+                   #   | project create <name> | project list | project show <project> | project config set <project> <key> <value>
+                   #   | repo add [--project <existing>] [--github owner/name] [--required-check <name>]... [--merge-policy never_auto|human_approval] [--merge-method merge|squash|rebase] [--setup <cmd>] [--intake-label <label>] [--yes] | repo profile detect <repo> [--yes] | repo profile set <repo> <key> <value>
+                   #   | repo intake set <repo> <label> | repo intake off <repo>   (GitHub Issues intake: labeled issues become issue_job Inbox items)
+                   #   | job create --title <t> [--project <p>] [--repo <r>]... [--merge-policy <stricter>]|list|show|cancel | job replan <job> --feedback <text> | logs | activity
+                   #   | job create --from-issue owner/name#N [--repo <r>]... [--merge-policy <stricter>]   (title and untrusted description from the issue)
                    #   | plan show <job> [--raw] | plan edit <job> --file <plan.json>
                    #   | plan request-changes <job> --feedback <text> | inbox [--all] | inbox show|defer|undefer <id> | inbox decide <id> <option> --expect-version <n>
                    #   | inbox answer <id> --answer [<q>=]<text>... | --file <answers.json> [--expect-version <n>]
@@ -77,6 +83,7 @@ pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | 
                    #   a multi-repo Job prefixes each key with the repo: --answer web.pull_request=close)
 pnpm fixtures      # generate fixtures/repos/tiny-ts (gitignored; tests make their own)
 pnpm dev           # factory start + the dashboard (next dev) on http://127.0.0.1:7421 (FACTORY_DASHBOARD_PORT); needs `factory init`
+                   #   the onboarding wizard is the dashboard's /setup (resumes at the first step not completed; `factory status` shows its progress)
 ```
 
 Scenario tests spawn the built runtime and CLI as child processes against a temporary `FACTORY_HOME`

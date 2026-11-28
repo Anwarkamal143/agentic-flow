@@ -144,6 +144,26 @@ export const BlockerReasonSchema = z.enum([
    * cancel). The factory never force-pushes on its own judgment.
    */
   'integration_rewrite',
+  /**
+   * The factory can't deliver to the Task's Repository (#108, ADR-0052,
+   * ADR-0068): before its first Attempt, the Factory Clone is not writable or
+   * the GitHub token has no push permission; or GitHub refused the push of the
+   * Integration Branch for lack of permission. The detail names the exact
+   * reason. Dependent Tasks wait; other Repositories go on. A human fixes the
+   * permission and checks again, or cancels.
+   */
+  'repository_not_writable',
+  /**
+   * A proposal Stage (triage, specification) still has a Discoverable question
+   * after its one discovery re-run (ADR-0071): a human is never asked one, so
+   * the Stage Run blocks with no Question. Held by the Stage Run only.
+   */
+  'discoverable_unresolved',
+  /**
+   * A proposal Stage asked humans again after `maxQuestions` Question batches
+   * (ADR-0071): no Question is opened and the Stage Run blocks.
+   */
+  'clarification_cap_reached',
 ]);
 
 /**

@@ -7,6 +7,8 @@ const DOCTOR_TIMEOUT_MS = 30_000;
 /** The `GET /v1/doctor` body, as far as the CLI renders it. */
 interface DoctorBody {
   checkedAt: string;
+  staleConfigKeys: { key: string; message: string }[];
+  undetectedProfiles: { repositoryId: string; name: string; message: string }[];
   tools: {
     name: string;
     command: string;
@@ -16,7 +18,7 @@ interface DoctorBody {
     fix?: string;
     notes?: string[];
   }[];
-  credentials: { name: string; source: string; present: boolean }[];
+  credentials: { name: string; source: string; present: boolean; detected?: false }[];
   billing:
     | { mode: 'subscription' }
     | { mode: 'api_key'; credential: string; present: boolean; exposure: string }
@@ -76,7 +78,8 @@ export async function doctor(opts: { json: boolean }): Promise<number> {
   }
   lines.push('', 'Credentials (presence only; values are never shown):');
   for (const cred of body.credentials) {
-    lines.push(`  ${(cred.present ? 'present' : 'absent').padEnd(9)}${cred.name} (${cred.source})`);
+    const shown = cred.detected === false ? 'unknown' : cred.present ? 'present' : 'absent';
+    lines.push(`  ${shown.padEnd(9)}${cred.name} (${cred.source})`);
   }
   const gh = body.github;
   lines.push(
@@ -94,6 +97,14 @@ export async function doctor(opts: { json: boolean }): Promise<number> {
         ? `Billing: Claude Code is billed to an API key (${b.credential}, ${b.present ? 'present' : 'absent'}): the key is ${b.exposure}.`
         : 'Billing: Claude Code is billed to your subscription login (no credential is passed to it).',
     );
+  }
+  if (body.staleConfigKeys.length > 0) {
+    lines.push('', 'Config (stale config.json keys; the runtime ignores them):');
+    for (const stale of body.staleConfigKeys) lines.push(`  warning  ${stale.message}`);
+  }
+  if (body.undetectedProfiles.length > 0) {
+    lines.push('', 'Repository Profiles (never detected; re-detection recommended):');
+    for (const p of body.undetectedProfiles) lines.push(`  warning  ${p.message}`);
   }
   process.stdout.write(lines.join('\n') + '\n');
   return 0;

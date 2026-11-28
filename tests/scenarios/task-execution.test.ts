@@ -14,14 +14,16 @@ import {
 } from '../support/factory.js';
 import {
   capAttempts,
+  createProject,
+  declareCommands,
   expectStoppedAtCap,
   json,
   onlyAttempt,
   post,
+  skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  skipPlanApproval,
 } from '../support/api.js';
 import { scriptWith, SUM_SOURCE, validTaskResponse, VALID_SCRIPT } from '../support/scripts.js';
 
@@ -129,11 +131,13 @@ async function executionRuntime(script: string, env?: NodeJS.ProcessEnv) {
   useFakeHarness(home, script);
   const rt = await startRuntime(home, env === undefined ? undefined : { env });
   const source = tinyTsRepo();
+  await createProject(rt, 'demo');
   const res = await rt.home.cli(['repo', 'add', source, '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   return { rt, repo, source };
 }
@@ -211,7 +215,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       usage: { tag: 'unknown' },
       worktreeId: worktree.id,
     });
-    expect(attempt.promptTemplate.id).toBe('task-packet@6');
+    expect(attempt.promptTemplate.id).toBe('task-packet@9');
     expect(attempt.promptTemplate.hash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(git(repo.clonePath, ['show', `${head}:src/math.ts`])).toBe(SUM_SOURCE);
 
@@ -255,7 +259,7 @@ describe('Task execution in a Worktree, verified by the factory, delivered local
       rt.request(`/v1/artifacts/${String(reportArtifact?.id)}/content`),
     );
     expect(report.repository).toMatchObject({ name: 'tiny-ts', clonePath: repo.clonePath });
-    expect(report).toMatchObject({ reportVersion: 6, outcome: 'completed' });
+    expect(report).toMatchObject({ reportVersion: 7, outcome: 'completed' });
     expect(report.statement).toMatch(/^The Job completed/);
     // The one Task is the one leaf; what is offered is the Integration Branch holding it.
     expect(report.branches).toMatchObject([

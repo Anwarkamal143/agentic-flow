@@ -64,6 +64,7 @@ export const MergeGateConditionIdSchema = z.enum([
   'checks',
   'reviews',
   'mergeable',
+  'delivery_order',
   'policy',
 ]);
 export type MergeGateConditionId = z.infer<typeof MergeGateConditionIdSchema>;
@@ -126,6 +127,22 @@ export interface MergeGateInput {
   policy: MergePolicy;
   /** Under `human_approval`: who approved the `merge` item at these SHAs, and when; else `null`. */
   approval: MergeApproval | null;
+  /**
+   * The Repositories this PR's Repository comes after in the Delivery Order
+   * (its `after`, ADR-0052, ADR-0066), each with its current PR. Empty or
+   * absent (a single-repo Job, or the first Repository): no such condition.
+   */
+  earlier?: readonly EarlierPullRequest[];
+}
+
+/** The PR of a Repository earlier in the Delivery Order, as the Merge Gate reads it. */
+export interface EarlierPullRequest {
+  repository: string;
+  /** `owner/name#number`; `null` while none is opened. */
+  pullRequest: string | null;
+  state: 'open' | 'closed' | 'merged' | null;
+  /** Under `human_approval`: its `merge` item is approved at its current SHAs. */
+  mergeApproved: boolean;
 }
 
 /** The default grace window: checks have 2 minutes after a push to report (Q13). */
@@ -143,6 +160,9 @@ export function evaluateMergeGate(input: MergeGateInput): MergeGate {
     checks(input),
     reviews(input),
     mergeable(input),
+    ...(input.earlier === undefined || input.earlier.length === 0
+      ? []
+      : [deliveryOrder(input.earlier, input.policy)]),
     policy(input),
   ];
   return { verdict: verdictOf(conditions), conditions };
@@ -326,6 +346,56 @@ function mergeable({ pr }: MergeGateInput): MergeGateCondition {
       state === null
         ? 'not read from GitHub yet'
         : (why[state] ?? `GitHub reports ${state}: mergeability is not known yet`),
+  };
+}
+
+/** `a`, `a and b`, `a, b and c`. */
+function joinAnd(items: readonly string[]): string {
+  return items.length <= 1
+    ? items.join('')
+    : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1] ?? ''}`;
+}
+
+/**
+ * The earlier PRs in Delivery Order have merged (ADR-0052). Under
+ * `human_approval` an earlier PR whose merge is approved also passes: the
+ * factory merges the Job's PRs in Delivery Order, so it merges that one first.
+ * Under `never_auto` only a merge counts; a human can still merge out of
+ * order on GitHub, which the Delivery Report flags.
+ */
+function deliveryOrder(
+  earlier: readonly EarlierPullRequest[],
+  mergePolicy: MergePolicy,
+): MergeGateCondition {
+  const label = 'The earlier PR in Delivery Order has merged';
+  const after = `this Repository comes after ${joinAnd(earlier.map((e) => e.repository))} in the Delivery Order`;
+  const approved = (e: EarlierPullRequest) =>
+    mergePolicy === 'human_approval' && e.state === 'open' && e.mergeApproved;
+  const waiting = earlier.filter((e) => e.state !== 'merged' && !approved(e));
+  if (waiting.length > 0) {
+    const named = waiting.map((e) =>
+      e.pullRequest === null
+        ? `${e.repository} (no pull request opened yet)`
+        : `${e.pullRequest} (${e.repository}${e.state === 'closed' ? ', closed without merging' : ''})`,
+    );
+    return {
+      id: 'delivery_order',
+      label,
+      status: 'pending',
+      reason: `waits for ${joinAnd(named)} to merge: ${after}`,
+    };
+  }
+  return {
+    id: 'delivery_order',
+    label,
+    status: 'pass',
+    reason: earlier
+      .map((e) =>
+        e.state === 'merged'
+          ? `${e.pullRequest ?? e.repository} (${e.repository}) has merged`
+          : `${e.pullRequest ?? e.repository} (${e.repository}): its merge is approved, and the factory merges it first, in Delivery Order`,
+      )
+      .join('; '),
   };
 }
 

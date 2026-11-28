@@ -139,6 +139,30 @@ export const ReviewPacketSchema = z.object({
     patch: z.string(),
     truncated: z.boolean(),
   }),
+  /**
+   * The Integration Review of a multi-repo Job (#106, ADR-0052, ADR-0066):
+   * the Job's other Repositories, each with its approved Plan Tasks' diffs
+   * `base..head`, read-only context to judge cross-repo consistency. Only
+   * this packet's Repository is reviewed; the reviewer has no Worktree of
+   * the others. Set on every `integration` packet (empty in a single-repo
+   * Job), never on a `task` one; packets stored before #106 have none.
+   */
+  otherRepositories: z
+    .array(
+      z.object({
+        repository: z.object({ id: z.string(), name: z.string() }),
+        tasks: z.array(
+          z.object({
+            key: z.string(),
+            title: z.string(),
+            baseSha: z.string(),
+            headSha: z.string(),
+            diff: z.object({ patch: z.string(), truncated: z.boolean() }),
+          }),
+        ),
+      }),
+    )
+    .optional(),
   evidence: z.array(
     z.discriminatedUnion('kind', [
       z.object({

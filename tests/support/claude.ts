@@ -32,6 +32,8 @@ export interface StubInvocation {
   cwd: string;
   pid: number;
   promptOnArgv: boolean;
+  /** The prompt the Run read on stdin. */
+  prompt: string;
   child?: number;
 }
 

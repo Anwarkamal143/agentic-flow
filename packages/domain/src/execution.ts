@@ -12,6 +12,8 @@ import { AnsweredQuestionSchema, InboxQuestionSchema } from './questions.js';
 import { GrantGuidanceSchema } from './blocker-approvals.js';
 import { PullRequestStateSchema } from './pull-request.js';
 import { PrFeedbackEntrySchema } from './pr-feedback.js';
+import { BlockerReasonSchema } from './rework.js';
+import { ContractStepSchema } from './contract-step.js';
 
 // ---- Task states (ARCHITECTURE §4.4) ---------------------------------------
 
@@ -227,9 +229,35 @@ export function addUsage(a: Usage, b: Usage): Usage {
 /** Where the Harness writes its Task Result, relative to the Worktree. Never committed. */
 export const RESULT_FILE = '.factory/result.json';
 
+/**
+ * A Task in another Repository that a dependent Task depends on (ADR-0052,
+ * ADR-0065): its approved result summary and diff, given read-only as context,
+ * never as code in the dependent Task's Worktree.
+ */
+export const UpstreamContextItemSchema = z.object({
+  task: z.object({ id: z.string(), key: z.string(), title: z.string() }),
+  repository: z.object({ id: z.string(), name: z.string() }),
+  /** The approved Attempt's `(base, head)`: the diff is `base..head` in that Repository. */
+  baseSha: z.string(),
+  headSha: z.string(),
+  /** The approved Attempt's Task Result summary (its developer's claim); `null` without one. */
+  summary: z.string().nullable(),
+  diff: z.object({ patch: z.string(), truncated: z.boolean() }),
+});
+export type UpstreamContextItem = z.infer<typeof UpstreamContextItemSchema>;
+
 /** What the factory sends a developer Harness Run. Versioned; stored on the Attempt. */
 export const TaskPacketSchema = z.object({
-  packetVersion: z.literal(1),
+  /**
+   * `2` (#102): verification entries name a profile command with its
+   * arguments and the shell `run` it resolves to; `context.instructionFiles`.
+   * Packets stored before parse as version 1. `3` (#104): free shell is
+   * refused at plan validation, so every entry's `command` names a profile
+   * command; only a Task of a Plan accepted before #104 may still carry free
+   * shell, its `run` then the same string. `4` (#105): `context.upstream`,
+   * the approved Tasks of other Repositories it depends on.
+   */
+  packetVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
   job: z.object({ id: z.string(), title: z.string(), objective: z.string() }),
   task: z.object({
     id: z.string(),
@@ -253,10 +281,26 @@ export const TaskPacketSchema = z.object({
     readHints: z.array(z.string()),
   }),
   acceptance: z.array(z.object({ code: z.string(), text: z.string(), mandatory: z.boolean() })),
-  verification: z.array(z.object({ key: z.string(), command: z.string(), required: z.boolean() })),
+  verification: z.array(
+    z.object({
+      key: z.string(),
+      /** A profile command name (free shell only in a Plan accepted before #104). */
+      command: z.string(),
+      args: z.array(z.string()).optional(),
+      /** The shell command the factory runs (absent in version 1 packets). */
+      run: z.string().optional(),
+      required: z.boolean(),
+    }),
+  ),
   context: z.object({
     artifacts: z.array(z.object({ id: z.string(), kind: z.string(), contentHash: z.string() })),
     files: z.array(z.string()),
+    /**
+     * The Repository's instruction files (`CLAUDE.md`, `AGENTS.md`,
+     * `.cursorrules`) from the Job's frozen profile, paths in the Worktree
+     * (ADR-0051). Repository content: guidance, never a permission.
+     */
+    instructionFiles: z.array(z.string()).default([]),
     /** A Rework Attempt: the Findings of the Attempt before it, to fix first. */
     priorFindings: z.array(AttemptFindingSchema).default([]),
     /**
@@ -275,6 +319,12 @@ export const TaskPacketSchema = z.object({
      * request. Context only: it never changes the scope or a policy.
      */
     prFeedback: z.array(PrFeedbackEntrySchema).default([]),
+    /**
+     * The Tasks of other Repositories this Task depends on, each approved
+     * (ADR-0065): read-only context to code against their agreed contract.
+     * Packets before version 4 have none.
+     */
+    upstream: z.array(UpstreamContextItemSchema).default([]),
   }),
   limits: z.object({ maxTurns: z.number().int().positive(), wallClockS: z.number().positive() }),
   protocol: z.object({ resultFile: z.literal(RESULT_FILE), mayAskQuestions: z.boolean() }),
@@ -336,7 +386,10 @@ export const VerificationRunSchema = z.object({
   id: z.string(),
   attemptId: z.string(),
   key: z.string(),
+  /** The shell command that ran. */
   command: z.string(),
+  /** The profile command and arguments the entry named; `null`: free shell (ADR-0051). */
+  profileCommand: z.object({ name: z.string(), args: z.array(z.string()) }).nullable(),
   required: z.boolean(),
   /** `null` when the command did not exit (killed at its time limit). */
   exitCode: z.number().int().nullable(),
@@ -508,12 +561,32 @@ export const AttemptSchema = z.object({
 });
 export type Attempt = z.infer<typeof AttemptSchema>;
 
-// ---- Delivery Report (v6: v5 of ADR-0036 plus the merge and the CI checks, ADR-0037) ----
+// ---- Delivery Report (v7: v6 of ADR-0037 plus each Repository in Delivery Order, ADR-0066) ----
+
+/**
+ * Where one Repository of the Job got to (#106, ADR-0066): `merged` (its PR
+ * merged), `awaiting_merge` (its PR is open), `pr_closed` (closed without
+ * merging), `delivered_locally` (its Integration Branch is approved and no PR
+ * was opened: no GitHub coordinates, or the PR could not be opened), or
+ * `not_delivered` (its Integration Branch was not approved).
+ */
+export const RepositoryDeliveryStatusSchema = z.enum([
+  'merged',
+  'awaiting_merge',
+  'pr_closed',
+  'delivered_locally',
+  'not_delivered',
+]);
+export type RepositoryDeliveryStatus = z.infer<typeof RepositoryDeliveryStatusSchema>;
 
 export const DeliveryReportSchema = z.object({
-  reportVersion: z.literal(6),
-  /** How the Job ended: a `failed` Job's approved branches are partial results. */
-  outcome: z.enum(['completed', 'failed']),
+  reportVersion: z.literal(7),
+  /**
+   * How the Job ended: a `failed` Job's approved branches are partial results.
+   * `blocked` (#108): some Repositories were delivered while others are held by
+   * `repository_not_writable`; the Job stays blocked (a Partial Completion).
+   */
+  outcome: z.enum(['completed', 'failed', 'blocked']),
   /** One plain sentence on the outcome, saying so when the Job failed. */
   statement: z.string(),
   job: z.object({ id: z.string(), title: z.string() }),
@@ -674,8 +747,64 @@ export const DeliveryReportSchema = z.object({
           ),
         })
         .nullable(),
+      /**
+       * The earlier PRs in Delivery Order (or Repositories, when they had
+       * none) that had not merged when this one was seen merged: merged out
+       * of order on GitHub (ADR-0052). Empty when in order or not merged.
+       */
+      mergedBefore: z.array(z.string()),
     }),
   ),
+  /**
+   * Every Repository of the Job (#106, ADR-0066), in Delivery Order (by name
+   * before a Plan), each with what it comes after, its status, its
+   * Integration Branch and its PR. `repository` and `integration` above
+   * describe the first by name, as in v6.
+   */
+  repositories: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      clonePath: z.string(),
+      /** The Repositories (by name) whose PRs must merge before this one's. */
+      after: z.array(z.string()),
+      status: RepositoryDeliveryStatusSchema,
+      integration: z
+        .object({
+          branch: z.string(),
+          state: TaskStateSchema,
+          headSha: z.string().nullable(),
+          fetchCommand: z.string().nullable(),
+        })
+        .nullable(),
+      /** `owner/name#number` of its current PR; `null` when none was opened. */
+      pullRequest: z.string().nullable(),
+      /**
+       * Why it was not delivered when a Task of it is blocked (#108): the first
+       * blocked Plan Task's Blocker, in Plan order. `null` otherwise; reports
+       * written before #108 have none.
+       */
+      blocker: z
+        .object({ reason: BlockerReasonSchema, detail: z.string() })
+        .nullable()
+        .default(null),
+    }),
+  ),
+  /**
+   * Partial Completion (#108, GLOSSARY): some Repositories delivered and
+   * others not, as `partialCompletion()` counts them; `null` when every
+   * Repository, or none, was delivered. Reports written before #108 have none.
+   */
+  partialCompletion: z
+    .object({ delivered: z.number().int(), total: z.number().int(), line: z.string() })
+    .nullable()
+    .default(null),
+  /**
+   * The Plan's deferred Tasks as the pending contract step (#110, ADR-0052),
+   * offered as a follow-up Job once every pull request merged; `null` when
+   * the Plan deferred nothing. Reports written before #110 have none.
+   */
+  contractStep: ContractStepSchema.nullable().default(null),
   knownLimitations: z.array(z.string()),
 });
 export type DeliveryReport = z.infer<typeof DeliveryReportSchema>;

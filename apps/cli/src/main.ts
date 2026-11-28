@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import { MergePolicySchema } from '@factory/domain';
 import { activity, DEFAULT_TAIL_LINES } from './commands/activity.js';
+import { configExport, configImport, configSet, configShow } from './commands/config.js';
 import { doctor } from './commands/doctor.js';
 import {
   inboxAnswer,
@@ -12,10 +13,18 @@ import {
   planShow,
 } from './commands/inbox.js';
 import { init } from './commands/init.js';
-import { jobCancel, jobCreate, jobList, jobReplan, jobShow } from './commands/job.js';
+import {
+  jobCancel,
+  jobCreate,
+  jobCreateFromIssue,
+  jobList,
+  jobReplan,
+  jobShow,
+} from './commands/job.js';
 import { logs } from './commands/logs.js';
 import { planEdit, planRaw, planRequestChanges } from './commands/plan.js';
-import { repoAdd } from './commands/repo.js';
+import { projectConfigSet, projectCreate, projectList, projectShow } from './commands/project.js';
+import { repoAdd, repoIntakeSet, repoProfileDetect, repoProfileSet } from './commands/repo.js';
 import { start, status, stop } from './commands/lifecycle.js';
 
 const USAGE = `Usage: factory <command> [options]
@@ -26,19 +35,66 @@ Commands:
   status [--json]                 Report whether the runtime is running
   stop                            Stop the runtime cleanly
   doctor [--json]                 Check tools and credential presence (via the runtime)
+  config show [--json]            Show the Factory Level (factory-wide configuration):
+                                  its version, each key's value and source
+  config set <key> <value> [--expect-version <n>]
+                                  Set one Factory Level key (for example
+                                  concurrency.global); a stale version is refused
+  config export                   Print the Factory Level, Projects and Repositories as
+                                  YAML, keyed by name (no token values)
+  config import <file> [--apply --expect-version <n>] [--json]
+                                  Validate a YAML export and print its diff; --apply
+                                  applies exactly that diff in one audited change (it
+                                  may create Projects, never registers a Repository)
+  project create <name> [--json] Create a Project (the only way one comes to exist)
+  project list [--json]           List Projects with their Repositories and active Jobs
+  project show <project> [--json] Show a Project: the config set on it, its Repositories
+                                  and active Jobs
+  project config set <project> <key> <value>
+                                  Set one Project config key (dotted when nested, for
+                                  example concurrency.perJob); new Jobs use it, Jobs
+                                  already created keep their frozen configuration
   repo add <path> [--project <name>] [--test-command <cmd>]
            [--typecheck-command <cmd>] [--github <owner/name>]
            [--required-check <name>]... [--merge-policy never_auto|human_approval]
-           [--merge-method merge|squash|rebase] [--setup <cmd>] [--yes]
-                                  Register a Repository: make its Factory Clone and save
-                                  its confirmed commands (your checkout is never modified);
+           [--merge-method merge|squash|rebase] [--setup <cmd>]
+           [--intake-label <label>] [--yes]
+                                  Register a Repository in an existing Project (unset:
+                                  the only Project; an unknown one is refused): make its
+                                  Factory Clone and save its confirmed commands (your
+                                  checkout is never modified);
                                   --setup runs in each Worktree before the Harness and
-                                  verification (for example "npm ci")
-  job create --repo <id|name> --title <text> [--description <text>]
-             [--per-repository <n>] [--per-job <n>] [--merge-policy <policy>]
-                                  Create a Job for a registered Repository; the
+                                  verification (for example "npm ci"); every field of the
+                                  detected Repository Profile is shown first (--yes
+                                  accepts them); setup is never detected;
+                                  --intake-label opts it into GitHub Issues intake
+  repo intake set <repo> <label> | repo intake off <repo>
+                                  GitHub Issues intake: each open issue with the label
+                                  becomes an Inbox item "Start a Job from owner/name#N?"
+                                  (needs GitHub coordinates); off cancels the open ones
+  repo profile detect <repo> [--yes]
+                                  Re-run Profile Detection on the source's HEAD and show
+                                  the diff against the saved profile; saved once confirmed
+  repo profile set <repo> <key> <value>
+                                  Set one profile field: commands.<name> (empty removes),
+                                  commands.<name>.acceptsArgs true|false, packageManager,
+                                  sensitivePaths, instructionFiles, requiredChecks (JSON
+                                  arrays), setup (empty removes)
+  job create --title <text> [--project <id|name>] [--repo <id|name>]...
+             [--description <text>] [--per-repository <n>] [--per-job <n>]
+             [--merge-policy <policy>]
+                                  Create a Job (unset --project: the only Project;
+                                  unset --repo: the Project's only Repository, or with
+                                  several, triage chooses; repeat --repo for a
+                                  multi-repo Job, all of one Project); the
                                   concurrency flags override its Task limits, and
-                                  --merge-policy may only make the Repository's stricter
+                                  --merge-policy may only make each Repository's stricter
+  job create --from-issue <owner/name#N> [--repo <id|name>]... [--per-repository <n>]
+             [--per-job <n>] [--merge-policy <policy>]
+                                  Create a Job from a GitHub issue of a registered
+                                  Repository: its title, and its text as an untrusted
+                                  description; the issue's Repository plus any --repo;
+                                  an issue starts at most one Job
   job list [--json]               List Jobs, newest first
   job show <id> [--json]          Show a Job: status, Stages, Workflow Snapshot, config
   job cancel <id> [--reason <text>]
@@ -67,6 +123,8 @@ Commands:
                                   a fresh Attempt continues the Task with the answers.
                                   A cleanup Approval: --answer worktrees=discard|keep,
                                   pull_request=close|keep, remote_branch=delete|keep
+                                  (a multi-repo Job's keys start with the Repository:
+                                  web.pull_request=close)
   inbox defer <id> | undefer <id> Hide an item from the default view, or show it again
   activity [--lines <n>] [--json] What is running now: each running Attempt with its
                                   Harness, model, Repository, tier, heartbeat, ports and
@@ -103,6 +161,8 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'repo': {
       const [sub, ...subArgs] = rest;
+      if (sub === 'profile') return repoProfile(subArgs);
+      if (sub === 'intake') return repoIntake(subArgs);
       if (sub !== 'add') {
         process.stderr.write(`factory: unknown repo command '${sub ?? ''}'\n\n${USAGE}`);
         return 2;
@@ -119,6 +179,7 @@ async function main(argv: string[]): Promise<number> {
           'merge-policy': { type: 'string' },
           'merge-method': { type: 'string' },
           setup: { type: 'string' },
+          'intake-label': { type: 'string' },
           yes: { type: 'boolean', short: 'y' },
         },
       });
@@ -137,9 +198,14 @@ async function main(argv: string[]): Promise<number> {
         mergePolicy: values['merge-policy'],
         mergeMethod: values['merge-method'],
         setup: values.setup,
+        intakeLabel: values['intake-label'],
         yes: values.yes === true,
       });
     }
+    case 'config':
+      return config(rest);
+    case 'project':
+      return project(rest);
     case 'job':
       return job(rest);
     case 'inbox':
@@ -183,6 +249,159 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
+function config(argv: string[]): Promise<number> | number {
+  const [sub, ...args] = argv;
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      json: { type: 'boolean' },
+      'expect-version': { type: 'string' },
+      apply: { type: 'boolean' },
+    },
+  });
+  const raw = values['expect-version'];
+  const expectVersion = raw === undefined ? undefined : Number(raw);
+  if (expectVersion !== undefined && (!Number.isInteger(expectVersion) || expectVersion < 1)) {
+    process.stderr.write(`factory: --expect-version takes a version number\n\n${USAGE}`);
+    return 2;
+  }
+  const apply = values.apply === true;
+  if (apply && sub !== 'import') {
+    process.stderr.write(`factory: --apply is for config import\n\n${USAGE}`);
+    return 2;
+  }
+  switch (sub) {
+    case 'show':
+      if (positionals.length > 0 || expectVersion !== undefined) {
+        process.stderr.write(`factory: config show takes no arguments\n\n${USAGE}`);
+        return 2;
+      }
+      return configShow({ json: values.json === true });
+    case 'set': {
+      const [key, value, ...extra] = positionals;
+      if (key === undefined || value === undefined || extra.length > 0) {
+        process.stderr.write(`factory: config set takes <key> <value>\n\n${USAGE}`);
+        return 2;
+      }
+      return configSet(key, value, expectVersion === undefined ? {} : { expectVersion });
+    }
+    case 'export':
+      if (positionals.length > 0 || expectVersion !== undefined || values.json === true) {
+        process.stderr.write(`factory: config export takes no arguments\n\n${USAGE}`);
+        return 2;
+      }
+      return configExport();
+    case 'import': {
+      const [file, ...extra] = positionals;
+      if (file === undefined || extra.length > 0) {
+        process.stderr.write(`factory: config import takes <file>\n\n${USAGE}`);
+        return 2;
+      }
+      if (apply !== (expectVersion !== undefined)) {
+        process.stderr.write(
+          `factory: --apply takes --expect-version <n>, the version its diff was shown at\n\n${USAGE}`,
+        );
+        return 2;
+      }
+      return configImport(file, {
+        apply,
+        json: values.json === true,
+        ...(expectVersion === undefined ? {} : { expectVersion }),
+      });
+    }
+    default:
+      process.stderr.write(`factory: unknown config command '${sub ?? ''}'\n\n${USAGE}`);
+      return 2;
+  }
+}
+
+function repoIntake(argv: string[]): Promise<number> | number {
+  const [action, ...args] = argv;
+  const { positionals } = parseArgs({ args, allowPositionals: true, options: {} });
+  if (action === 'set' && positionals.length === 2) {
+    const [ref = '', label = ''] = positionals;
+    return repoIntakeSet(ref, label);
+  }
+  if (action === 'off' && positionals.length === 1)
+    return repoIntakeSet(positionals[0] ?? '', null);
+  process.stderr.write(`factory: repo intake takes set <repo> <label> or off <repo>\n\n${USAGE}`);
+  return 2;
+}
+
+function repoProfile(argv: string[]): Promise<number> | number {
+  const [action, ...args] = argv;
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: action === 'detect' ? { yes: { type: 'boolean', short: 'y' } } : {},
+  });
+  if (action === 'detect') {
+    const [ref, ...extra] = positionals;
+    if (ref === undefined || extra.length > 0) {
+      process.stderr.write(`factory: repo profile detect takes one Repository\n\n${USAGE}`);
+      return 2;
+    }
+    return repoProfileDetect(ref, { yes: values.yes === true });
+  }
+  if (action === 'set') {
+    const [ref, key, value, ...extra] = positionals;
+    if (ref === undefined || key === undefined || value === undefined || extra.length > 0) {
+      process.stderr.write(
+        `factory: repo profile set takes <repo> <key> <value> (quote the value)\n\n${USAGE}`,
+      );
+      return 2;
+    }
+    return repoProfileSet(ref, key, value);
+  }
+  process.stderr.write(`factory: unknown repo profile command '${action ?? ''}'\n\n${USAGE}`);
+  return 2;
+}
+
+function project(argv: string[]): Promise<number> | number {
+  const [sub, ...args] = argv;
+  if (sub === 'config') {
+    const [action, ...setArgs] = args;
+    const { positionals } = parseArgs({ args: setArgs, allowPositionals: true, options: {} });
+    const [ref, key, value, ...extra] = positionals;
+    if (action !== 'set' || ref === undefined || key === undefined || value === undefined) {
+      process.stderr.write(`factory: project config set takes <project> <key> <value>\n\n${USAGE}`);
+      return 2;
+    }
+    if (extra.length > 0) {
+      process.stderr.write(`factory: project config set takes one value; quote it\n`);
+      return 2;
+    }
+    return projectConfigSet(ref, key, value);
+  }
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: { json: { type: 'boolean' } },
+  });
+  const json = values.json === true;
+  switch (sub) {
+    case 'create':
+    case 'show': {
+      const [ref, ...extra] = positionals;
+      if (ref === undefined || extra.length > 0) {
+        process.stderr.write(`factory: project ${sub} takes exactly one Project\n\n${USAGE}`);
+        return 2;
+      }
+      return sub === 'create' ? projectCreate(ref, { json }) : projectShow(ref, { json });
+    }
+    case 'list':
+      if (positionals.length > 0) {
+        process.stderr.write(`factory: project list takes no arguments\n\n${USAGE}`);
+        return 2;
+      }
+      return projectList({ json });
+    default:
+      process.stderr.write(`factory: unknown project command '${sub ?? ''}'\n\n${USAGE}`);
+      return 2;
+  }
+}
+
 function job(argv: string[]): Promise<number> | number {
   const [sub, ...args] = argv;
   switch (sub) {
@@ -190,16 +409,30 @@ function job(argv: string[]): Promise<number> | number {
       const { values } = parseArgs({
         args,
         options: {
-          repo: { type: 'string' },
+          project: { type: 'string' },
+          repo: { type: 'string', multiple: true },
           title: { type: 'string' },
           description: { type: 'string' },
+          'from-issue': { type: 'string' },
           'per-repository': { type: 'string' },
           'per-job': { type: 'string' },
           'merge-policy': { type: 'string' },
         },
       });
-      if (values.repo === undefined || values.title === undefined) {
-        process.stderr.write(`factory: job create needs --repo and --title\n\n${USAGE}`);
+      const fromIssue = values['from-issue'];
+      if (
+        fromIssue !== undefined &&
+        (values.title !== undefined ||
+          values.description !== undefined ||
+          values.project !== undefined)
+      ) {
+        process.stderr.write(
+          `factory: job create --from-issue takes its title, description and Project from the issue: drop --title, --description and --project\n\n${USAGE}`,
+        );
+        return 2;
+      }
+      if (fromIssue === undefined && values.title === undefined) {
+        process.stderr.write(`factory: job create needs --title (or --from-issue)\n\n${USAGE}`);
         return 2;
       }
       const perRepository = limitFlag('--per-repository', values['per-repository']);
@@ -215,15 +448,25 @@ function job(argv: string[]): Promise<number> | number {
         );
         return 2;
       }
+      const concurrency = {
+        ...(perRepository === undefined ? {} : { perRepository }),
+        ...(perJob === undefined ? {} : { perJob }),
+      };
+      if (fromIssue !== undefined) {
+        return jobCreateFromIssue({
+          ...(mergePolicy === undefined ? {} : { mergePolicy: mergePolicy.data }),
+          issue: fromIssue,
+          repos: values.repo ?? [],
+          concurrency,
+        });
+      }
       return jobCreate({
         ...(mergePolicy === undefined ? {} : { mergePolicy: mergePolicy.data }),
-        repo: values.repo,
-        title: values.title,
+        project: values.project,
+        repos: values.repo ?? [],
+        title: values.title ?? '',
         description: values.description,
-        concurrency: {
-          ...(perRepository === undefined ? {} : { perRepository }),
-          ...(perJob === undefined ? {} : { perJob }),
-        },
+        concurrency,
       });
     }
     case 'list': {

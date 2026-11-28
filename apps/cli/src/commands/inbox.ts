@@ -33,7 +33,7 @@ export async function inboxList(opts: { all: boolean; json: boolean }): Promise<
   for (const i of items) {
     const state = i.deferred ? `${i.state} (deferred)` : i.state;
     process.stdout.write(
-      `${i.id}  ${i.kind.padEnd(11)} ${state.padEnd(18)} v${String(i.version)}  ${i.jobId}  ${i.question}\n`,
+      `${i.id}  ${i.kind.padEnd(11)} ${state.padEnd(18)} v${String(i.version)}  ${i.jobId ?? '(no Job yet)'}  ${i.question}\n`,
     );
   }
   return 0;
@@ -215,7 +215,9 @@ export async function planShow(jobId: string, opts: { json: boolean }): Promise<
             (c) => `  ${c.code} ${c.mandatory ? 'mandatory' : 'optional '} ${c.text}`,
           ),
         ]),
-    `Repositories: ${view.repositories.map((r) => r.name).join(', ') || '(none)'}`,
+    `Repositories: ${view.repositories.map((r) => r.name).join(', ') || '(none)'}${
+      view.repositorySetBy === 'triage' ? ' (chosen by triage)' : ''
+    }`,
     'Tasks (DAG):',
     ...view.tasks.flatMap((t) => [
       `  ${t.key.padEnd(14)} ${t.risk.padEnd(6)} ${repoName(t.repositoryId)}  ${t.title}`,
@@ -231,6 +233,16 @@ export async function planShow(jobId: string, opts: { json: boolean }): Promise<
             (t) =>
               `  ${t.key.padEnd(14)} ${t.state.padEnd(10)} ${repoName(t.repositoryId)}  ${t.branch}`,
           ),
+        ]),
+    ...(view.deferredTasks.length === 0
+      ? []
+      : [
+          'Deferred (the contract step, offered as a follow-up Job once every pull request has merged):',
+          ...view.deferredTasks.flatMap((t) => [
+            `  ${t.key.padEnd(14)} ${repoName(t.repositoryId)}  ${t.title}`,
+            `    after:    ${t.dependsOn.join(', ') || '(none)'}`,
+            `    writable: ${t.writable.join(', ')}`,
+          ]),
         ]),
     'Run in parallel:',
     ...view.parallel.map((w, n) => `  wave ${String(n + 1)}: ${w.join(', ')}`),
@@ -267,7 +279,9 @@ function writeItem(i: Approval): void {
     `Inbox Item ${i.id} (${i.kind})`,
     `  state:      ${i.state}${i.deferred ? ' (deferred)' : ''}`,
     `  version:    ${String(i.version)}`,
-    `  job:        ${i.jobId}: ${i.jobTitle}`,
+    i.jobId === null
+      ? '  job:        (none yet: start_job creates one)'
+      : `  job:        ${i.jobId}: ${i.jobTitle ?? ''}`,
     `  project:    ${i.projectId}`,
     `  repository: ${i.repositoryId}`,
     `  stage:      ${i.stageId ?? '(none)'}`,
@@ -280,7 +294,13 @@ function writeItem(i: Approval): void {
           i.questions.some((q) => q.agentProposed)
             ? '  questions (asked by an agent):'
             : '  decide each (fixed options; unanswered keeps):',
-          ...i.questions.flatMap((q) => [
+          ...i.questions.flatMap((q, n) => [
+            // A proposal Stage's batch is grouped by category (ADR-0071).
+            ...(q.category !== undefined && q.category !== i.questions?.[n - 1]?.category
+              ? [
+                  `   ${q.category}${q.requiresApprover === true ? ' (needs approver rights)' : ''}:`,
+                ]
+              : []),
             `    ${q.id.padEnd(6)} ${q.blocking ? 'blocking' : 'optional'}  ${q.text}`,
             ...(q.options.length === 0
               ? ['           answer in free text']
@@ -302,11 +322,22 @@ function writeItem(i: Approval): void {
     lines.push(
       `  decided:    ${i.decision.option}${i.decision.grant === undefined ? '' : ` +${String(i.decision.grant)}`} by ${i.decidedBy ?? '?'} at ${i.decidedAt ?? '?'}` +
         (i.decision.comment === null ? '' : `: ${i.decision.comment}`),
+      ...(i.decision.followUpJobId === undefined
+        ? []
+        : [
+            `  follow-up Job: ${i.decision.followUpJobId} (factory job show ${i.decision.followUpJobId})`,
+          ]),
+      ...(i.decision.jobId === undefined
+        ? []
+        : [`  started Job: ${i.decision.jobId} (factory job show ${i.decision.jobId})`]),
       ...(i.decision.answers ?? []).map(
         (a) =>
           `    ${a.questionId.padEnd(6)} ${a.option !== undefined ? `option ${a.option}` : `text ${a.text ?? ''}`}`,
       ),
     );
+  } else if (i.state === 'cancelled' && i.decidedBy !== null) {
+    // Cancelled, never decided: an issue_job item whose issue was closed or unlabeled (#112).
+    lines.push(`  cancelled:  by ${i.decidedBy} at ${i.decidedAt ?? '?'} (not a decision)`);
   } else if (i.state === 'open' && i.kind === 'cleanup' && i.questions !== null) {
     lines.push(
       `  answer:     factory inbox answer ${i.id} --answer <question>=<option> ... --expect-version ${String(i.version)} (unanswered: keep)`,

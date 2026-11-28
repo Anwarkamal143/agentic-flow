@@ -24,6 +24,8 @@ import {
 } from '../support/factory.js';
 import { fakeGitHub, type FakeGitHub, type FakeRemote } from '../support/github.js';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
@@ -84,7 +86,7 @@ function oneTaskScript() {
     scope: { writable: ['src/a.ts'], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: 'test -f src/a.ts', criteria: ['AC-01'] }],
+    verification: [{ key: 'test', command: 'exists', args: ['src/a.ts'], criteria: ['AC-01'] }],
   };
   return scriptWith(
     { planning: [{ output: { tasks: [task] } }] },
@@ -147,6 +149,7 @@ async function githubHome(): Promise<Setup> {
 
 async function startRepo(setup: Setup, repoArgs: string[]) {
   const rt = await startRuntime(setup.home, { env: { ...setup.gh.gitEnv(), GH_ACCESS } });
+  await createProject(rt, 'demo');
   const added = await rt.home.cli([
     'repo',
     'add',
@@ -159,6 +162,7 @@ async function startRepo(setup: Setup, repoArgs: string[]) {
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   return { rt, repo, added };
 }
@@ -462,10 +466,17 @@ describe('the human_approval Merge Policy (C3)', { timeout: 150_000 }, () => {
     const { rt, repo } = await startRepo(setup, ['--merge-policy', 'human_approval']);
     const job = await runJob(rt, repo, { mergePolicy: 'never_auto' });
     expect(job.status, rt.output()).toBe('waiting_human');
-    const shown = await json<{ effectiveConfig: { mergePolicy: unknown } }>(
+    const shown = await json<{ effectiveConfig: { repositories: { mergePolicy: unknown }[] } }>(
       rt.request(`/v1/jobs/${job.id}`),
     );
-    expect(shown.effectiveConfig.mergePolicy).toEqual({ value: 'never_auto', source: 'job' });
+    expect(shown.effectiveConfig.repositories[0]?.mergePolicy).toEqual({
+      value: 'never_auto',
+      source: 'job',
+      chain: [
+        { source: 'repository', value: 'human_approval' },
+        { source: 'job', value: 'never_auto' },
+      ],
+    });
     const head = gh.branchHead(FULL_NAME, `factory/${job.id}/integration`) ?? '';
     gh.setCheckRun(FULL_NAME, head, { name: 'build', status: 'completed', conclusion: 'success' });
     const green = await until(

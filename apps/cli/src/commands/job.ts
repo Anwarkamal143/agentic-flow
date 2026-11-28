@@ -8,6 +8,7 @@ import type {
   Worktree,
   CancelJobInput,
   CreateJobInput,
+  CreateJobFromIssueInput,
   Job,
   RequestReplanInput,
   JobSummary,
@@ -36,8 +37,10 @@ export function client(): RuntimeClient | undefined {
 }
 
 export interface JobCreateOptions {
-  /** A Repository id or name. */
-  repo: string;
+  /** A Project id or name; unset: the Repository's Project, or the only Project. */
+  project: string | undefined;
+  /** Repository ids or names (several: a multi-repo Job); none: the Project's only Repository. */
+  repos: readonly string[];
   title: string;
   description: string | undefined;
   /** Overrides of the Job's concurrency limits (the runtime checks the range). */
@@ -46,23 +49,18 @@ export interface JobCreateOptions {
   mergePolicy?: CreateJobInput['mergePolicy'];
 }
 
-/** `factory job create`: records a Job for a registered Repository. */
+/**
+ * `factory job create`: records a Job. The runtime infers the Project only when
+ * exactly one exists, and the Repository only when the Project has one (ADR-0055).
+ */
 export async function jobCreate(opts: JobCreateOptions): Promise<number> {
   const api = client();
   if (api === undefined) return EXIT_NOT_RUNNING;
-  const repos = await api.json<Repository[]>('GET', '/v1/repositories');
-  const matches = repos.filter((r) => r.id === opts.repo || r.name === opts.repo);
-  if (matches.length !== 1) {
-    process.stderr.write(
-      matches.length === 0
-        ? `factory: no Repository '${opts.repo}'. Registered: ${repos.map((r) => `${r.name} (${r.id})`).join(', ') || 'none'}\n`
-        : `factory: '${opts.repo}' names several Repositories; use its id: ${matches.map((r) => r.id).join(', ')}\n`,
-    );
-    return 1;
-  }
-  const [repo] = matches as [Repository];
+  const chosen = await chooseRepositories(api, opts.repos);
+  if (chosen === undefined) return 1;
   const input: CreateJobInput = {
-    repositoryId: repo.id,
+    ...(opts.project === undefined ? {} : { project: opts.project }),
+    ...(chosen.length === 0 ? {} : { repositoryIds: chosen.map((r) => r.id) }),
     title: opts.title,
     description: opts.description ?? '',
     ...(opts.concurrency === undefined || Object.keys(opts.concurrency).length === 0
@@ -71,7 +69,69 @@ export async function jobCreate(opts: JobCreateOptions): Promise<number> {
     ...(opts.mergePolicy === undefined ? {} : { mergePolicy: opts.mergePolicy }),
   };
   const job = await api.json<Job>('POST', '/v1/jobs', { body: input });
-  process.stdout.write(`Created Job ${job.id} for ${repo.name}\n`);
+  process.stdout.write(
+    job.repositories.length === 0
+      ? `Created Job ${job.id}; triage will choose its Repositories from the Project's\n`
+      : `Created Job ${job.id} for ${job.repositories.map((r) => r.name).join(', ')}\n`,
+  );
+  writeJob(job);
+  return 0;
+}
+
+/** The Repositories `refs` name (ids or names), each once; `undefined` after a refusal. */
+async function chooseRepositories(
+  api: RuntimeClient,
+  refs: readonly string[],
+): Promise<Repository[] | undefined> {
+  const chosen: Repository[] = [];
+  if (refs.length === 0) return chosen;
+  const repos = await api.json<Repository[]>('GET', '/v1/repositories');
+  for (const ref of refs) {
+    const matches = repos.filter((r) => r.id === ref || r.name === ref);
+    const [only] = matches;
+    if (only === undefined || matches.length > 1) {
+      process.stderr.write(
+        matches.length === 0
+          ? `factory: no Repository '${ref}'. Registered: ${repos.map((r) => `${r.name} (${r.id})`).join(', ') || 'none'}\n`
+          : `factory: '${ref}' names several Repositories; use its id: ${matches.map((r) => r.id).join(', ')}\n`,
+      );
+      return undefined;
+    }
+    if (chosen.some((r) => r.id === only.id)) {
+      process.stderr.write(`factory: Repository '${ref}' is named more than once\n`);
+      return undefined;
+    }
+    chosen.push(only);
+  }
+  return chosen;
+}
+
+/**
+ * `factory job create --from-issue owner/name#N` (#112): the runtime reads
+ * the issue and creates its Job, the issue's text as an untrusted description.
+ */
+export async function jobCreateFromIssue(opts: {
+  issue: string;
+  repos: readonly string[];
+  concurrency: CreateJobInput['concurrency'];
+  mergePolicy?: CreateJobInput['mergePolicy'];
+}): Promise<number> {
+  const api = client();
+  if (api === undefined) return EXIT_NOT_RUNNING;
+  const chosen = await chooseRepositories(api, opts.repos);
+  if (chosen === undefined) return 1;
+  const input: CreateJobFromIssueInput = {
+    issue: opts.issue,
+    ...(chosen.length === 0 ? {} : { repositoryIds: chosen.map((r) => r.id) }),
+    ...(opts.concurrency === undefined || Object.keys(opts.concurrency).length === 0
+      ? {}
+      : { concurrency: opts.concurrency }),
+    ...(opts.mergePolicy === undefined ? {} : { mergePolicy: opts.mergePolicy }),
+  };
+  const job = await api.json<Job>('POST', '/v1/jobs/from-issue', { body: input });
+  process.stdout.write(
+    `Created Job ${job.id} from ${opts.issue} for ${job.repositories.map((r) => r.name).join(', ')}\n`,
+  );
   writeJob(job);
   return 0;
 }
@@ -90,7 +150,8 @@ export async function jobList(opts: { json: boolean }): Promise<number> {
   }
   for (const job of jobs) {
     process.stdout.write(
-      `${job.id}  ${job.status.padEnd(13)} ${job.currentStage.padEnd(13)} ${job.title}\n`,
+      `${job.id}  ${job.status.padEnd(13)} ${job.currentStage.padEnd(13)} ${job.title}` +
+        `  [${repositoryNames(job)}]\n`,
     );
   }
   return 0;
@@ -259,6 +320,11 @@ async function getJob(api: RuntimeClient, id: string): Promise<Job | undefined> 
   }
 }
 
+/** The profile command a verification run named, with its arguments (ADR-0051); empty for free shell. */
+function profileCommandNote(named: { name: string; args: string[] } | null): string {
+  return named === null ? '' : `  profile command ${[named.name, ...named.args].join(' ')}`;
+}
+
 /**
  * Untrusted text (a foreign commit's subject or author, ADR-0042) as one
  * printable line: control characters, terminal escapes among them, become spaces.
@@ -268,31 +334,88 @@ function oneLine(text: string): string {
   return text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
 }
 
-function writeJob(job: Job): void {
-  type Config = Job['effectiveConfig'];
-  type Setting = Config[Exclude<keyof Config, 'concurrency'>] | Config['concurrency']['perJob'];
-  const { concurrency, ...settings } = job.effectiveConfig;
-  const entries: [string, Setting][] = [
+/** A frozen value as one line: `none`, a list, `key=value` pairs, or the value itself. */
+function shownValue(value: unknown): string {
+  if (value === null || value === undefined) return 'none';
+  if (Array.isArray(value)) return value.length === 0 ? 'every check' : value.join(', ');
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([k, x]) => (typeof x === 'object' && x !== null ? k : `${k}=${shownValue(x)}`))
+      .join(', ');
+  }
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+/** One effective value as `job show` prints it: the value, its source and any chain of narrowings. */
+function effective(
+  key: string,
+  v: { value: unknown; source: string; chain?: { source: string; value: string }[] | undefined },
+  width: number,
+): string {
+  const value = shownValue(v.value);
+  const chain =
+    v.chain === undefined || v.chain.length < 2
+      ? ''
+      : `; ${v.chain.map((c) => `${c.source}: ${c.value}`).join(' → ')}`;
+  return `${key.padEnd(width)}  ${value}  (${v.source}${chain})`;
+}
+
+/** The Job's frozen Effective Configuration, each value with its source (ADR-0057). */
+function configLines(config: Job['effectiveConfig']): string[] {
+  const { concurrency, repositories, mergePolicy, setup, ...settings } = config;
+  const jobWide: [string, Parameters<typeof effective>[1]][] = [
     ...Object.entries(settings),
-    ...Object.entries(concurrency).map(([key, v]): [string, Setting] => [`concurrency.${key}`, v]),
+    ...Object.entries(concurrency).map(([key, v]): [string, Parameters<typeof effective>[1]] => [
+      `concurrency.${key}`,
+      v,
+    ]),
   ];
-  const config = entries
-    .map(([key, v]) =>
-      typeof v.value === 'object'
-        ? `${key} (from ${v.source})`
-        : `${key}=${String(v.value)} (from ${v.source})`,
-    )
-    .join(', ');
+  // A Job from before Phase D froze its one Repository's values at the top level.
+  if (mergePolicy !== undefined) jobWide.push(['mergePolicy', mergePolicy]);
+  if (setup !== undefined) jobWide.push(['setup', setup]);
+  const width = Math.max(...jobWide.map(([key]) => key.length));
+  const lines = [
+    'Configuration (frozen at creation):',
+    ...jobWide.map(([key, v]) => `  ${effective(key, v, width)}`),
+  ];
+  for (const repo of repositories) {
+    const { repositoryId, name, ...values } = repo;
+    lines.push(`  Repository ${name} (${repositoryId}):`);
+    for (const [key, v] of Object.entries(values)) lines.push(`    ${effective(key, v, 14)}`);
+  }
+  return lines;
+}
+
+/** A Job's Repositories by name; a set triage has yet to choose says so (ADR-0067). */
+function repositoryNames(job: JobSummary): string {
+  return job.repositories.length === 0
+    ? 'to be chosen by triage'
+    : job.repositories.map((r) => r.name).join(', ');
+}
+
+function repositoryLine(job: Job): string {
+  if (job.repositories.length === 0) return "(to be chosen by triage from the Project's)";
+  const names = job.repositories.map((r) => `${r.name} (${r.id})`).join(', ');
+  return job.repositorySetBy === 'triage' ? `${names}, chosen by triage` : names;
+}
+
+function writeJob(job: Job): void {
   const lines = [
     `Job ${job.id}: ${job.title}`,
-    `  status:     ${job.status}`,
-    `  stage:      ${job.currentStage}`,
-    `  repository: ${job.repositoryId}`,
-    `  recipe:     ${job.workflowSnapshot.recipeId} v${String(job.workflowSnapshot.recipeVersion)}`,
-    `  config:     ${config}`,
-    `  replans:    ${String(job.replans.used)} of ${String(job.replans.max)} used${job.replanRequested ? '; replan requested, waiting for the Attempts in flight' : ''}`,
-    `  version:    ${String(job.version)}`,
-    `  created:    ${job.createdAt} by ${job.createdBy}`,
+    `  status:       ${job.status}`,
+    `  stage:        ${job.currentStage}`,
+    `  repositories: ${repositoryLine(job)}`,
+    ...(job.sourceIssue === null
+      ? []
+      : [
+          `  from issue:   ${job.sourceIssue.owner}/${job.sourceIssue.name}#${String(job.sourceIssue.number)} (${job.sourceIssue.url}), ${job.sourceIssue.via === 'intake' ? 'an approved intake item' : 'job create --from-issue'}`,
+        ]),
+    ...deliveryOrderLines(job),
+    `  recipe:       ${job.workflowSnapshot.recipeId} v${String(job.workflowSnapshot.recipeVersion)}`,
+    `  replans:      ${String(job.replans.used)} of ${String(job.replans.max)} used${job.replanRequested ? '; replan requested, waiting for the Attempts in flight' : ''}`,
+    `  version:      ${String(job.version)}`,
+    `  created:      ${job.createdAt} by ${job.createdBy}`,
+    ...configLines(job.effectiveConfig),
     'Stages:',
     ...job.stageRuns.map(
       (s) =>
@@ -303,6 +426,22 @@ function writeJob(job: Job): void {
   ];
   if (job.description !== '') lines.splice(1, 0, `  ${job.description}`);
   process.stdout.write(lines.join('\n') + '\n');
+}
+
+/**
+ * The Delivery Order of a Plan over several Repositories (ADR-0052): upstream
+ * first, then which Repository waits for which. Nothing for one Repository.
+ */
+function deliveryOrderLines(job: Job): string[] {
+  const order = job.deliveryOrder;
+  if (order === null || order.length < 2) return [];
+  const name = (id: string) => order.find((e) => e.repositoryId === id)?.name ?? id;
+  const waits = order
+    .filter((e) => e.after.length > 0)
+    .map((e) => `${e.name} after ${e.after.map(name).join(', ')}`);
+  return [
+    `  delivery order: ${order.map((e) => e.name).join(' → ')}${waits.length === 0 ? '' : ` (${waits.join('; ')})`}`,
+  ];
 }
 
 function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
@@ -324,7 +463,7 @@ function writePlan(criteria: AcceptanceCriterion[], tasks: Task[]): void {
             : ''),
         `    writable:  ${t.scope.writable.join(', ')}`,
         `    forbidden: ${t.scope.forbidden.join(', ') || '(none)'}`,
-        `    verify:    ${t.verification.map((v) => `${v.key}: ${v.command}`).join('; ')}`,
+        `    verify:    ${t.verification.map((v) => `${v.key}: ${[v.command, ...(v.args ?? [])].join(' ')}`).join('; ')}`,
       );
       if (t.dependsOn.length > 0) lines.push(`    after:     ${t.dependsOn.join(', ')}`);
       if (t.blocker !== null) {
@@ -413,7 +552,8 @@ function writeAttempts(
       const run = a.verificationRuns.find((r) => r.id === e.verificationRunId);
       lines.push(
         e.kind === 'verification'
-          ? `    ${String(e.verificationKey).padEnd(12)} ${e.verdict.padEnd(10)} exit ${String(run?.exitCode ?? 'none')}`
+          ? `    ${String(e.verificationKey).padEnd(12)} ${e.verdict.padEnd(10)} exit ${String(run?.exitCode ?? 'none')}` +
+              profileCommandNote(run?.profileCommand ?? null)
           : `    ${String(e.criterionCode).padEnd(12)} ${e.verdict.padEnd(10)} ${e.source}: ${e.detail}`,
       );
     }
@@ -543,6 +683,33 @@ function writeDelivery(report: DeliveryReport): void {
     );
     const ci = version >= 6 ? pr.ci : null;
     if (ci !== null) lines.push(`    CI checks: ${ci.status}: ${ci.reason}`);
+    if (version >= 7 && pr.mergedBefore.length > 0) {
+      lines.push(`    merged out of order, before ${pr.mergedBefore.join(', ')}`);
+    }
+  }
+  const repositories = version >= 7 ? report.repositories : [];
+  if (repositories.length > 1) {
+    lines.push(`  Repositories, in Delivery Order:`);
+    for (const r of repositories) {
+      lines.push(
+        `    ${r.name}: ${r.status.replaceAll('_', ' ')}` +
+          (r.blocker === null ? '' : ` (${r.blocker.reason})`) +
+          (r.after.length === 0 ? '' : ` (after ${r.after.join(', ')})`) +
+          (r.pullRequest === null ? '' : `, ${r.pullRequest}`) +
+          (r.integration === null ? '' : `, ${r.integration.branch} (${r.integration.state})`) +
+          `, clone ${r.clonePath}`,
+      );
+      if (r.integration?.fetchCommand != null && r.pullRequest === null) {
+        lines.push(`      fetch from your checkout: ${r.integration.fetchCommand}`);
+      }
+    }
+  }
+  const contract = version >= 7 ? report.contractStep : null;
+  if (contract !== null) {
+    lines.push(
+      `  Contract step (pending): deferred by the Plan, never run in this Job`,
+      ...contract.tasks.map((t) => `    - ${t.key} (${t.repository}): ${t.title}`),
+    );
   }
   lines.push(...report.notes.map((n) => `  ${n}`));
   if (report.knownLimitations.length > 0) {

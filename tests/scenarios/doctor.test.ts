@@ -1,4 +1,5 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { json } from '../support/api.js';
 import { join } from 'node:path';
 import { CLAUDE_CODE_FLAGS } from '@factory/harness';
 import { describe, expect, it } from 'vitest';
@@ -172,6 +173,47 @@ describe('factory doctor', () => {
     expect(res.stdout).toMatch(/resolves +token reference gh/);
     expect(await rt.stop()).toBe(0);
     for (const text of [res.stdout, res.stderr, rt.output()]) expect(text).not.toContain(token);
+  });
+
+  it('warns that config.json concurrency.global is stale once the Factory Level holds it', async () => {
+    const home = await initializedHome();
+    patchFactoryConfig(home, { concurrency: { global: 2 } });
+    const rt = await startRuntime(home, { env: { PATH: fakeBin(TOOLS) } });
+    const set = await home.cli(['config', 'set', 'concurrency.global', '4']);
+    expect(set.code, set.stderr).toBe(0);
+
+    const res = await home.cli(['doctor']);
+
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).toContain(
+      'warning  config.json sets concurrency.global, which the runtime ignores: the Factory Level holds it (now 4)',
+    );
+    expect(res.stdout).toContain('factory config set concurrency.global <n>');
+    const body = JSON.parse((await home.cli(['doctor', '--json'])).stdout) as {
+      staleConfigKeys: { key: string }[];
+    };
+    expect(body.staleConfigKeys.map((k) => k.key)).toEqual(['concurrency.global']);
+
+    // Removing the key from the file ends the warning; the runtime re-reads it.
+    const configPath = join(home.dir, 'config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    delete config['concurrency'];
+    writeFileSync(configPath, JSON.stringify(config));
+    const clean = await home.cli(['doctor']);
+    expect(clean.stdout).not.toContain('stale');
+    expect(await json<{ config: unknown }>(rt.request('/v1/factory/config'))).toMatchObject({
+      config: { concurrency: { global: 4 } },
+    });
+  });
+
+  it('gives no config warning when config.json sets no Factory Level key', async () => {
+    const home = await initializedHome();
+    await startRuntime(home, { env: { PATH: fakeBin(TOOLS) } });
+    const body = JSON.parse((await home.cli(['doctor', '--json'])).stdout) as {
+      staleConfigKeys: unknown[];
+    };
+    expect(body.staleConfigKeys).toEqual([]);
+    expect((await home.cli(['doctor'])).stdout).not.toContain('stale');
   });
 
   it('asks for the runtime when it is not running', async () => {

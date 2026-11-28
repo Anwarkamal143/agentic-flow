@@ -1,6 +1,6 @@
 /**
  * The parallel DAG (#39, ROADMAP exit test B1, ADR-0020, ADR-0021):
- * independent Tasks run at once within the global (`config.json`),
+ * independent Tasks run at once within the global (the Factory Level),
  * per-Repository and per-Job limits (the Effective Configuration, overridable
  * by the Job at creation), and a dependent Task is claimed only once every
  * Task it depends on is `approved`, starting from its Dependency Base.
@@ -20,6 +20,7 @@ import {
   json,
   jobSettled,
   post,
+  declareCommands,
   registeredRepo,
   waitForJob,
   type EventBody,
@@ -49,7 +50,11 @@ interface WorktreeBody {
 type Span = { id: string; claimed: number; approved: number };
 
 /** A Plan Task writing one file, `docs/<key>.md`. */
-function docTask(key: string, dependsOn: string[] = [], verify = `test -f docs/${key}.md`) {
+function docTask(
+  key: string,
+  dependsOn: string[] = [],
+  verify: { command: string; args?: string[] } = { command: 'exists', args: [`docs/${key}.md`] },
+) {
   const [base] = (validOutput('planning') as { tasks: Record<string, unknown>[] }).tasks;
   return {
     ...structuredClone(base),
@@ -58,7 +63,7 @@ function docTask(key: string, dependsOn: string[] = [], verify = `test -f docs/$
     scope: { writable: [`docs/${key}.md`], forbidden: [] },
     dependsOn,
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: verify, criteria: ['AC-01'] }],
+    verification: [{ key: 'test', ...verify, criteria: ['AC-01'] }],
   };
 }
 
@@ -111,6 +116,11 @@ async function runtimeWith(script: string, config: Record<string, unknown> = {})
   patchFactoryConfig(home, config);
   const rt = await startRuntime(home);
   const repo = await registeredRepo(rt);
+  await declareCommands(rt, repo.id, {
+    'all-docs': {
+      run: 'test -f docs/a.md && test -f docs/b.md && test -f docs/c.md && test -f docs/d.md',
+    },
+  });
   return { rt, repo };
 }
 
@@ -159,11 +169,7 @@ describe('B1: an A → {B, C} → D DAG', { timeout: 60_000 }, () => {
                   docTask('a'),
                   docTask('b', ['a']),
                   docTask('c', ['a']),
-                  docTask(
-                    'd',
-                    ['b', 'c'],
-                    'test -f docs/a.md && test -f docs/b.md && test -f docs/c.md && test -f docs/d.md',
-                  ),
+                  docTask('d', ['b', 'c'], { command: 'all-docs' }),
                 ],
               },
             },
@@ -296,8 +302,8 @@ describe('concurrency limits', { timeout: 60_000 }, () => {
       '3',
     ]);
     expect(res.code, res.stderr).toBe(0);
-    expect(res.stdout).toContain('concurrency.perRepository=3 (from job)');
-    expect(res.stdout).toContain('concurrency.perJob=3 (from job)');
+    expect(res.stdout).toMatch(/concurrency\.perRepository +3 +\(job\)/);
+    expect(res.stdout).toMatch(/concurrency\.perJob +3 +\(job\)/);
     const [job] = await json<JobBody[]>(rt.request('/v1/jobs'));
     if (job === undefined) throw new Error('no Job');
     expect(await inFlight(rt, job)).toBe(3);
@@ -318,8 +324,16 @@ describe('concurrency limits', { timeout: 60_000 }, () => {
     expect(await inFlight(rt, job)).toBe(1);
   });
 
-  it('holds config.json concurrency.global over every Job limit', async () => {
+  it('holds a concurrency.global copied from config.json over every Job limit', async () => {
     const { rt, repo } = await runtimeWith(threeTasks(), { concurrency: { global: 1 } });
+    const job = await createJob(rt, repo.id, { concurrency: { perRepository: 3, perJob: 3 } });
+    expect(await inFlight(rt, job)).toBe(1);
+  });
+
+  it('holds the Factory Level concurrency.global set with factory config set', async () => {
+    const { rt, repo } = await runtimeWith(threeTasks());
+    const set = await rt.home.cli(['config', 'set', 'concurrency.global', '1']);
+    expect(set.code, set.stderr).toBe(0);
     const job = await createJob(rt, repo.id, { concurrency: { perRepository: 3, perJob: 3 } });
     expect(await inFlight(rt, job)).toBe(1);
   });

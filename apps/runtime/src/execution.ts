@@ -47,11 +47,13 @@ import {
   SpecificationProposalSchema,
   DiscoveryProposalSchema,
   TaskDefinitionSchema,
+  resolveVerification,
   TaskPacketSchema,
   TaskResultSchema,
   type RuleIssue,
   type TaskDefinition,
   type TaskPacket,
+  type UpstreamContextItem,
   type TaskResult,
   type Usage,
   toolPolicyOf,
@@ -59,7 +61,6 @@ import {
   integrationReviewSkip,
   type IntegrationReviewSkip,
   type Redactor,
-  EffectiveConfigSchema,
   setupEnvironment,
   setupNeeded,
   type SetupLogContent,
@@ -99,6 +100,7 @@ import { claimNextTask, heartbeatIntervalMs, leaseExpiry } from './claim.js';
 import { heartbeatTick, sweptAttempt } from './sweeper.js';
 import { criteriaCoveredBy, currentSpec } from './criteria.js';
 import { blockOnBaseConflict, makeDependencyBase } from './dependency-base.js';
+import { blockNotWritable, checkWritable, recordUnchecked } from './writability.js';
 import { settleExecution } from './keep-going.js';
 import {
   blockOnIntegrationConflict,
@@ -154,8 +156,10 @@ import {
   passedAttemptOf,
 } from './base-change.js';
 import { blockOnForeignRewrite } from './foreign-push.js';
+import { frozenRepositoryConfig } from './repositories.js';
 import { dependencyHashOf, diskUsageBytes, recordSetupRun, setupRunsOf } from './setup.js';
 import { renderTaskPrompt, TASK_TEMPLATE_HASH, TASK_TEMPLATE_ID } from './task-packet.js';
+import { upstreamContext } from './upstream-context.js';
 import {
   allocatePortBlock,
   commitLeftovers,
@@ -193,8 +197,8 @@ export interface TaskSchedulerOptions {
   db: FactoryDb;
   /** `undefined`: no Harness is configured, so ready Tasks wait. */
   harness: AgentHarness | undefined;
-  /** `config.json` `concurrency.global`: Tasks in flight at once, over every Job. */
-  globalConcurrency: number;
+  /** The Factory Level's `concurrency.global`, read at each claim: Tasks in flight at once, over every Job. */
+  globalConcurrency: () => number;
   harnessVersion: string | null;
   artifacts: ArtifactStore;
   workspaceRoot: string;
@@ -296,7 +300,10 @@ interface Inspection extends GitFacts {
 
 interface VerificationRunRecord {
   key: string;
+  /** The shell command that ran. */
   command: string;
+  /** The profile command and arguments the entry named; `null`: free shell. */
+  profileCommand: { name: string; args: string[] } | null;
   required: boolean;
   criteria: string[];
   exitCode: number | null;
@@ -529,7 +536,7 @@ export class TaskScheduler {
     for (;;) {
       const claimed = claimNextTask(this.opts.db, {
         holder: this.holder,
-        globalLimit: this.opts.globalConcurrency,
+        globalLimit: this.opts.globalConcurrency(),
         actor: ACTOR,
       });
       if (claimed === undefined) break;
@@ -667,6 +674,19 @@ export class TaskScheduler {
       .where(eq(schema.attempts.taskId, taskId))
       .orderBy(desc(schema.attempts.n))
       .get();
+    // Before the first Attempt, the factory checks it can deliver to the Repository (#108).
+    if (previous === undefined) {
+      const writable = await checkWritable(repo, this.opts.github);
+      if (writable.kind === 'not_writable') {
+        // The exact reason, never an Attempt (ADR-0068): a human fixes it and checks again.
+        blockNotWritable(db, { jobId: job.id, actor: ACTOR }, taskId, writable.detail);
+        this.opts.onCommit();
+        return;
+      }
+      if (writable.kind === 'unchecked') {
+        recordUnchecked(db, { jobId: job.id, actor: ACTOR }, taskId, writable.detail);
+      }
+    }
     // The Integration Task's first Attempt merges and verifies; no Harness runs (ADR-0034).
     if (task.kind === 'integration' && previous === undefined) {
       await this.runMerge(harness, { task, definition, job, repo, n: 1 }, slot);
@@ -780,6 +800,8 @@ export class TaskScheduler {
     }
     const { path, branch, baseSha } = worktree;
     const worktreeId = worktree.id;
+    // The approved Tasks of other Repositories it depends on, as read-only context (ADR-0065).
+    const upstream = await upstreamContext(db, this.opts.artifacts, task);
     // Built before the Worktree is touched, so nothing between that and its row can fail.
     const packet = this.packet({
       job,
@@ -794,6 +816,7 @@ export class TaskScheduler {
       answers,
       guidance,
       prFeedback: feedback.entries,
+      upstream,
     });
     await this.withClone(clone, async () => {
       await excludeResultFile(clone);
@@ -1041,6 +1064,7 @@ export class TaskScheduler {
       answers: [],
       guidance: [],
       prFeedback: [],
+      upstream: [],
     });
     const portBase = changeJob(
       db,
@@ -1381,6 +1405,7 @@ export class TaskScheduler {
       answers: [],
       guidance: [],
       prFeedback: [],
+      upstream: [],
     });
     const portBase = changeJob(
       db,
@@ -2058,6 +2083,7 @@ export class TaskScheduler {
     answers: AnsweredQuestion[];
     guidance: GrantGuidance[];
     prFeedback: PrFeedbackEntry[];
+    upstream: UpstreamContextItem[];
   }): TaskPacket {
     const { job, task, definition, repo } = input;
     const artifacts = this.opts.artifacts.listForJob(job.id).filter((a) => a.stageRunId !== null);
@@ -2074,8 +2100,9 @@ export class TaskScheduler {
             (f) => f.path,
           );
     const criteria = criteriaCoveredBy(this.opts.db, job.id, definition.acceptance);
+    const section = frozenRepositoryConfig(job.configSnapshotJson, repo);
     return TaskPacketSchema.parse({
-      packetVersion: 1,
+      packetVersion: 4,
       job: { id: job.id, title: job.title, objective },
       task: {
         id: task.id,
@@ -2102,15 +2129,19 @@ export class TaskScheduler {
       verification: definition.verification.map((v) => ({
         key: v.key,
         command: v.command,
+        ...(v.args === undefined ? {} : { args: v.args }),
+        run: resolveVerification(v, section.commands.value).run,
         required: v.required,
       })),
       context: {
         artifacts: artifacts.map((a) => ({ id: a.id, kind: a.kind, contentHash: a.contentHash })),
         files,
+        instructionFiles: section.instructionFiles.value,
         priorFindings: input.priorFindings,
         answers: input.answers,
         guidance: input.guidance,
         prFeedback: input.prFeedback,
+        upstream: input.upstream,
       },
       limits: { maxTurns: MAX_TURNS, wallClockS: input.wallClockMs / 1000 },
       // The developer may ask (ARCHITECTURE §7 Question rules); the reviewer never can.
@@ -2371,7 +2402,7 @@ export class TaskScheduler {
    * It fails when the command does not exit 0 or leaves the Worktree changed.
    */
   private async setup(ctx: AttemptContext): Promise<SetupStep> {
-    const command = EffectiveConfigSchema.parse(JSON.parse(ctx.job.configSnapshotJson)).setup.value;
+    const command = frozenRepositoryConfig(ctx.job.configSnapshotJson, ctx.repo).setup.value;
     if (command === null) return { kind: 'ready' };
     const dependencyHash = dependencyHashOf(ctx.path);
     const runs = setupRunsOf(this.opts.db, ctx.worktreeId);
@@ -2494,8 +2525,11 @@ export class TaskScheduler {
    */
   private async verify(ctx: AttemptContext): Promise<VerificationRunRecord[] | undefined> {
     const records: VerificationRunRecord[] = [];
+    // Named commands resolve from the Job's frozen section, never the profile as it is now.
+    const { commands } = frozenRepositoryConfig(ctx.job.configSnapshotJson, ctx.repo);
     for (const v of ctx.definition.verification) {
       if (await this.stopped(ctx)) return undefined;
+      const { run: command, profileCommand } = resolveVerification(v, commands.value);
       const startedAt = new Date().toISOString();
       const spool = this.spoolOf(ctx.attemptId, `verify-${v.key}`);
       rmSync(spool, { recursive: true, force: true });
@@ -2507,7 +2541,7 @@ export class TaskScheduler {
       });
       const proc = spawnGuarded({
         command: 'sh',
-        args: ['-c', v.command],
+        args: ['-c', command],
         cwd: ctx.path,
         env: ctx.env,
         timeoutMs: this.verifyTimeoutMs,
@@ -2522,7 +2556,8 @@ export class TaskScheduler {
       const exitCode = exit.timedOut ? null : exit.code;
       records.push({
         key: v.key,
-        command: v.command,
+        command,
+        profileCommand,
         required: v.required,
         criteria: v.criteria,
         exitCode,
@@ -2533,7 +2568,8 @@ export class TaskScheduler {
         content: this.opts.artifacts.writeContent({
           source: 'verification',
           key: v.key,
-          command: v.command,
+          command,
+          ...(profileCommand === null ? {} : { profileCommand }),
           exitCode,
           timedOut: exit.timedOut,
           truncated: exit.truncated,
@@ -2874,6 +2910,9 @@ export class TaskScheduler {
           attemptId,
           commandKey: run.key,
           command: run.command,
+          commandName: run.profileCommand?.name ?? null,
+          commandArgsJson:
+            run.profileCommand === null ? null : JSON.stringify(run.profileCommand.args),
           required: run.required,
           headSha: head,
           baseSha: base,

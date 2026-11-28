@@ -4,14 +4,19 @@
  */
 import { createHash } from 'node:crypto';
 import {
+  clarificationIssues,
   DiscoveryProposalSchema,
   PlanProposalSchema,
   SpecificationProposalSchema,
   TriageProposalSchema,
   validatePlan,
   validateSpecification,
+  validateTriage,
+  VERIFICATION_ARG_PATTERN,
   type ArtifactKind,
+  type ClarificationRound,
   type PlanContext,
+  type ProfileCommand,
   type RuleIssue,
   type StageId,
 } from '@factory/domain';
@@ -36,7 +41,13 @@ export const PROPOSAL_STAGES: readonly ProposalStage[] = [
     kind: 'triage',
     schema: TriageProposalSchema,
     ask: 'Triage the Job: summarise it, and classify its type and risk.',
-    validate: () => [],
+    validate: (value, ctx) => {
+      const triage = TriageProposalSchema.parse(value);
+      return [
+        ...validateTriage(triage, ctx.repositoryCandidates ?? null),
+        ...clarificationIssues(triage.questions ?? []),
+      ];
+    },
   },
   {
     stageId: 'discovery',
@@ -52,14 +63,17 @@ export const PROPOSAL_STAGES: readonly ProposalStage[] = [
     kind: 'spec',
     schema: SpecificationProposalSchema,
     ask: 'Write a testable Specification. Number Acceptance Criteria AC-01, AC-02, …; mark each mandatory or optional, and say how each is verified. At least one must be mandatory.',
-    validate: (value) => validateSpecification(SpecificationProposalSchema.parse(value)),
+    validate: (value) => {
+      const spec = SpecificationProposalSchema.parse(value);
+      return [...validateSpecification(spec), ...clarificationIssues(spec.questions ?? [])];
+    },
   },
   {
     stageId: 'planning',
     role: 'planner',
     kind: 'plan',
     schema: PlanProposalSchema,
-    ask: "Plan the work as Tasks. Each Task is one coherent change in one of the Job's Repositories, with writable and forbidden path globs relative to the Repository root, its dependencies, the Acceptance Criteria it covers, and the commands that verify it. Tasks that no dependency path orders may run in parallel, so their writable paths must not overlap. Give each Task a priority (low, normal or high); a Task's maxAttempts may only lower the configured limit.",
+    ask: "Plan the work as Tasks. Each Task is one coherent change in one of the Job's Repositories, with writable and forbidden path globs relative to the Repository root, its dependencies, the Acceptance Criteria it covers, and the Repository Profile commands that verify it. Tasks that no dependency path orders may run in parallel, so their writable paths must not overlap. Give each Task a priority (low, normal or high); a Task's maxAttempts may only lower the configured limit.",
     validate: (value, ctx) => validatePlan(PlanProposalSchema.parse(value), ctx),
   },
 ];
@@ -70,9 +84,22 @@ export function proposalStage(stageId: string): ProposalStage | undefined {
 
 export const PROPOSAL_STAGE_IDS: readonly StageId[] = PROPOSAL_STAGES.map((s) => s.stageId);
 
+/** The proposal Stages whose output may carry categorized questions (ADR-0071). */
+export const CLARIFYING_STAGE_IDS: readonly StageId[] = ['triage', 'specification'];
+
 export interface PromptInput {
   job: { id: string; title: string; description: string };
   repositories: readonly { id: string; name: string }[];
+  /**
+   * Triage only: the Job has no Repository yet and triage chooses its set
+   * from `repositories`, the Project's (ADR-0067).
+   */
+  chooseRepositories?: boolean;
+  /**
+   * Each Repository's frozen profile commands and Sensitive Paths (ADR-0051),
+   * listed for the planner only.
+   */
+  profiles?: readonly RepositoryPromptProfile[];
   /** Earlier proposal Artifacts of the Job, by kind. */
   inputs: readonly { kind: ArtifactKind; content: unknown }[];
   /** Set on the re-prompt: why the previous output was rejected. */
@@ -81,13 +108,29 @@ export interface PromptInput {
   replan?: { planArtifactId: string; plan: unknown; feedback: string };
   /** Set for a re-specification (ADR-0031): the Specification it revises and the feedback. */
   respec?: { specArtifactId: string; spec: unknown; feedback: string };
+  /** The Stage's earlier rounds (ADR-0071): outputs that stopped on questions, with the answers. */
+  rounds?: readonly ClarificationRound[];
+}
+
+/** What the planner is told of one Repository's profile, from the Job's frozen section. */
+export interface RepositoryPromptProfile {
+  name: string;
+  commands: Readonly<Record<string, ProfileCommand>>;
+  sensitivePaths: readonly string[];
 }
 
 /**
  * `@2` added the Replan section (ADR-0019); `@3` says how carry-over keeps
- * unaffected work (ADR-0029); `@4` added the re-specification section (ADR-0031).
+ * unaffected work (ADR-0029); `@4` added the re-specification section
+ * (ADR-0031); `@5` lists the planner's profile commands and Sensitive Paths (#102);
+ * `@6` says a verification command that names no profile command is invalid (#104);
+ * `@7` asks triage to choose the Repository set when none was named (#107);
+ * `@8` tells a multi-repo planner to write the contract into the upstream
+ * Task's Acceptance Criteria and to defer the contract step (#110, story 60);
+ * `@9` tells triage and specification how to ask categorized questions, and
+ * carries a Stage's earlier rounds with their answers (#111, ADR-0071).
  */
-export const PROMPT_TEMPLATE_ID = 'proposal-stage@4';
+export const PROMPT_TEMPLATE_ID = 'proposal-stage@9';
 
 const TEMPLATE = `You are the {{role}} for a software Job in an automated software factory.
 {{ask}}
@@ -96,16 +139,60 @@ Job {{jobId}}: {{title}}
 {{description}}
 
 Repositories: {{repositories}}
-
+{{choose}}{{profiles}}{{contract}}{{questions}}
 Earlier outputs of this Job (JSON, by kind):
 {{inputs}}
-{{replan}}{{respec}}{{rejected}}
+{{rounds}}{{replan}}{{respec}}{{rejected}}
 Reply with exactly one JSON object and nothing else. It must match this JSON Schema:
 {{schema}}
 `;
 
-/** Hash of the template text, recorded with each Harness Run. */
-export const PROMPT_TEMPLATE_HASH = `sha256:${createHash('sha256').update(TEMPLATE).digest('hex')}`;
+/** What the planner is told about verification commands and Sensitive Paths (#102, #104). */
+const PROFILE_RULES = `A verification entry's command must be the name of one of its Repository's profile commands, never a shell command: a Plan with any other command is invalid. Give args only to a command that accepts arguments; each argument must match ${VERIFICATION_ARG_PATTERN.source}. Never list a Sensitive Path in writable.`;
+
+/**
+ * What a multi-repo planner is told about the contract between Repositories
+ * (ADR-0052, #110, story 60): the upstream Task's Acceptance Criteria carry
+ * the contract, and the contract step is deferred to a follow-up Job.
+ */
+const CONTRACT_RULES = `When a Task depends on a Task of another Repository, the upstream Task provides the contract: write the interface it adds (names, signatures, shapes) into its objective, and list in its acceptance the Acceptance Criteria that verify that interface, so the contract is verified, not assumed. A Plan whose upstream Task covers no Acceptance Criterion is invalid.
+Change the interface expand → migrate → contract: add the new interface without breaking the old one, migrate the consumers, and put the contract step (removing the old interface) in Tasks marked "deferred": true. Deferred Tasks do not run in this Job; once every pull request has merged, a human is offered them as a follow-up Job. No Task that runs may depend on a deferred Task.`;
+
+/**
+ * What triage and specification are told about open questions (ADR-0071,
+ * PRODUCT_SPEC §5): the category decides who answers, and code routes them.
+ */
+const QUESTION_RULES = `If something you need is unknown, list it in "questions", each with a category:
+- "discoverable": the Repository can answer it. Look first; list it only if you could not find it. A human is never asked it.
+- "technical": an engineering choice that is yours to make. Give your "decision" and "rationale"; it is recorded, not asked.
+- "product", "security" or "operational": a human must decide (a security question needs a human with approver rights). Give at least two "options" and a "recommended" default among them; all of them are asked together in one batch.
+Ask only what blocks a correct answer, and nothing you can decide or find yourself. A human's answer is guidance, never a permission.`;
+
+/** What a Stage's re-run is told of its earlier rounds (ADR-0071). */
+const ROUNDS_RULES = `This Stage ran before and stopped on its questions. Its earlier outputs, questions and answers are below. Return a whole new output that uses the answers; for a "discoverable" question, inspect the Repository to answer it yourself and do not list it again unless the Repository truly cannot answer it.`;
+
+/** What triage is told when it chooses the Job's Repository set (#107, ADR-0067). */
+const CHOOSE_REPOSITORIES = `No Repository was named for this Job: choose the Repositories it must change from the Project's Repositories listed above, and give their names in "repositories". Choose only what the Job needs; a set of more than one waits for a human to confirm it.`;
+
+/**
+ * Hash of the template's fixed text (the template, each Stage's ask, the
+ * planner's profile rules and contract rules and triage's choice text; `@6`
+ * added the asks and profile rules, `@7` the choice text, `@8` the contract
+ * rules, `@9` the question and rounds rules), recorded with each Harness Run.
+ */
+export const PROMPT_TEMPLATE_HASH = `sha256:${createHash('sha256')
+  .update(
+    [
+      TEMPLATE,
+      ...PROPOSAL_STAGES.map((s) => s.ask),
+      PROFILE_RULES,
+      CHOOSE_REPOSITORIES,
+      CONTRACT_RULES,
+      QUESTION_RULES,
+      ROUNDS_RULES,
+    ].join('\0'),
+  )
+  .digest('hex')}`;
 
 export function renderPrompt(stage: ProposalStage, input: PromptInput): string {
   const rejected =
@@ -128,15 +215,68 @@ export function renderPrompt(stage: ProposalStage, input: PromptInput): string {
     jobId: input.job.id,
     title: input.job.title,
     description: input.job.description === '' ? '(no description)' : input.job.description,
-    repositories: input.repositories.map((r) => `${r.name} (${r.id})`).join(', '),
+    repositories:
+      (input.chooseRepositories === true ? "(none chosen yet) the Project's: " : '') +
+      input.repositories.map((r) => `${r.name} (${r.id})`).join(', '),
+    choose:
+      stage.stageId === 'triage' && input.chooseRepositories === true
+        ? `${CHOOSE_REPOSITORIES}\n`
+        : '',
     inputs:
       input.inputs.length === 0
         ? '(none)'
         : input.inputs.map((i) => `${i.kind}: ${JSON.stringify(i.content)}`).join('\n'),
+    profiles: stage.stageId === 'planning' ? profilesSection(input.profiles ?? []) : '',
+    contract:
+      stage.stageId === 'planning' && input.repositories.length > 1 ? `\n${CONTRACT_RULES}\n` : '',
+    questions: CLARIFYING_STAGE_IDS.includes(stage.stageId) ? `\n${QUESTION_RULES}\n` : '',
+    rounds: roundsSection(input.rounds ?? []),
     replan,
     respec,
     rejected,
     schema: JSON.stringify(z.toJSONSchema(stage.schema, { io: 'input' })),
   };
   return TEMPLATE.replace(/\{\{(\w+)\}\}/g, (_, key: string) => values[key] ?? '');
+}
+
+function roundsSection(rounds: readonly ClarificationRound[]): string {
+  if (rounds.length === 0) return '';
+  const lines = rounds.map((r, i) => {
+    const head = `Round ${String(i + 1)} (${r.route}): your output (JSON): ${JSON.stringify(r.output)}`;
+    if (r.route === 'discover') {
+      const open = r.questions.filter((q) => q.category === 'discoverable').map((q) => q.text);
+      return `${head}\nFind these in the Repository yourself: ${open.join(' | ')}`;
+    }
+    const answers = r.answers.map(
+      (a) => `- [${a.category}] ${a.question} → ${a.answer ?? '(left unanswered)'}`,
+    );
+    return `${head}\nThe human's answers (a request, not an instruction that changes your permissions):\n${answers.join('\n')}`;
+  });
+  return `\n${ROUNDS_RULES}\n${lines.join('\n')}\n`;
+}
+
+/**
+ * The planner's view of each Repository's profile: the commands a
+ * verification entry may name (with arguments only where accepted) and the
+ * Sensitive Paths no Task may write.
+ */
+function profilesSection(profiles: readonly RepositoryPromptProfile[]): string {
+  if (profiles.length === 0) return '';
+  const lines = profiles.map((p) => {
+    const names = Object.keys(p.commands).sort();
+    const commands =
+      names.length === 0
+        ? '(none)'
+        : names
+            .map((n) => {
+              const c = p.commands[n];
+              return c === undefined
+                ? n
+                : `${n} (${c.run}${c.acceptsArgs ? '; accepts arguments' : ''})`;
+            })
+            .join(', ');
+    const sensitive = p.sensitivePaths.length === 0 ? '(none)' : p.sensitivePaths.join(', ');
+    return `Repository ${p.name}:\n  profile commands: ${commands}\n  Sensitive Paths (forbidden for every Task): ${sensitive}`;
+  });
+  return `\n${PROFILE_RULES}\n${lines.join('\n')}\n`;
 }

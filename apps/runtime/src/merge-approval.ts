@@ -20,13 +20,11 @@ import {
   BlockerSchema,
   CheckOutcomeSchema,
   CheckSourceSchema,
-  EffectiveConfigSchema,
   evaluateMergeGate,
   failingChecks,
   describeRerunnability,
   emptyDeliveryNote,
   mergeItemOptions,
-  MergeMethodSchema,
   readyButForPolicy,
   withMergeApproval,
   MergeGateSchema,
@@ -35,14 +33,15 @@ import {
   integrationBranch,
   MERGED_ON_GITHUB,
   mergeItemSubject,
-  RepositoryProfileSchema,
   type ApprovalKind,
+  type EarlierPullRequest,
   type Blocker,
   type ExpiresPolicy,
   type MergeGate,
   type MergeApproval,
   type MergeMethod,
   type MergePolicy,
+  type RepositoryEffectiveConfig,
   type ObservedCheck,
   type PullRequestState,
 } from '@factory/domain';
@@ -53,6 +52,8 @@ import { openBlockerItem } from './blocker-approvals.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 import { latestStageRun } from './replan.js';
+import { frozenRepositoryConfig } from './repositories.js';
+import { storedDeliveryOrder } from './multi-repo.js';
 
 /** The actor of everything the poller writes, and of a `merge` item closed by a merge on GitHub. */
 export const POLLER = 'system:github-poller';
@@ -146,7 +147,7 @@ export function openMergeApproval(tx: Tx, state: JobState, step: StageRunStepper
   }
   const queued = stepAndReread(tx, step, run, 'queued', { reason: 'the pull request is open' });
   const running = stepAndReread(tx, step, queued, 'running');
-  const policy = mergePolicyOf(state);
+  const policy = mergePolicyOf(tx, state);
   step(running, 'waiting_human', { blocker: awaitingMergeBlocker(tx, prs, first, policy) });
   for (const pr of prs) openMergeItem(tx, state.job.id, running.id, pr, policy, ACTOR_OPENING);
   return true;
@@ -180,13 +181,32 @@ function awaitingMergeBlocker(
   };
 }
 
-/** The Job's Merge Policy, frozen into its Effective Configuration at creation (ADR-0038). */
-export function mergePolicyOf(state: JobState): MergePolicy {
-  return policyOfConfig(state.job.configSnapshotJson);
+/**
+ * The Job's Merge Policy, frozen into its Effective Configuration at creation
+ * (ADR-0038): the strictest over the sections of the Job's Repositories (one
+ * today, so that one's).
+ */
+export function mergePolicyOf(tx: Tx | FactoryDb, state: JobState): MergePolicy {
+  const repos = tx
+    .select()
+    .from(schema.repositories)
+    .innerJoin(
+      schema.jobRepositories,
+      eq(schema.jobRepositories.repositoryId, schema.repositories.id),
+    )
+    .where(eq(schema.jobRepositories.jobId, state.job.id))
+    .all();
+  const policies = repos.map(
+    (r) => frozenRepositoryConfig(state.job.configSnapshotJson, r.repositories).mergePolicy.value,
+  );
+  return policies.includes('never_auto') || policies.length === 0 ? 'never_auto' : 'human_approval';
 }
 
-function policyOfConfig(configSnapshotJson: string): MergePolicy {
-  return EffectiveConfigSchema.parse(JSON.parse(configSnapshotJson)).mergePolicy.value;
+/** The frozen section of the PR's Repository in its Job's Effective Configuration. */
+function frozenConfigOf(tx: Tx | FactoryDb, pr: PullRequestRow): RepositoryEffectiveConfig {
+  const job = tx.select().from(schema.jobs).where(eq(schema.jobs.id, pr.jobId)).get();
+  if (job === undefined) throw new Error(`no Job ${pr.jobId}`);
+  return frozenRepositoryConfig(job.configSnapshotJson, repositoryOf(tx, pr));
 }
 
 /** The gate the poller stored for the PR, when it was evaluated on the PR's current SHAs. */
@@ -287,7 +307,7 @@ function closeItem(
   appendEvent(tx, {
     entityKind: 'approval',
     entityId: row.id,
-    jobId: row.jobId,
+    ...(row.jobId === null ? {} : { jobId: row.jobId }),
     type: event.type,
     actor,
     payload: { kind: row.kind, subjectRef: row.subjectRef, ...event.payload },
@@ -330,7 +350,7 @@ function mergeItemOptionsStale(tx: Tx | FactoryDb, pr: PullRequestRow): boolean 
   const job = tx.select().from(schema.jobs).where(eq(schema.jobs.id, pr.jobId)).get();
   if (job === undefined) return false;
   const options = JSON.stringify(
-    mergeItemOptions(policyOfConfig(job.configSnapshotJson), storedGate(pr)),
+    mergeItemOptions(frozenConfigOf(tx, pr).mergePolicy.value, storedGate(pr)),
   );
   return openMergeItemsOf(tx, pr).some((item) => item.optionsJson !== options);
 }
@@ -359,7 +379,7 @@ function syncMergeItemOptions(
     appendEvent(tx, {
       entityKind: 'approval',
       entityId: item.id,
-      jobId: item.jobId,
+      ...(item.jobId === null ? {} : { jobId: item.jobId }),
       type: 'approval.options_changed',
       actor: POLLER,
       payload: {
@@ -468,10 +488,10 @@ export function gateOf(
     .where(eq(schema.repositories.id, pr.repositoryId))
     .get();
   if (repo === undefined) throw new Error(`no Repository ${pr.repositoryId}`);
-  const profile = RepositoryProfileSchema.parse(JSON.parse(repo.profileJson));
   const job = tx.select().from(schema.jobs).where(eq(schema.jobs.id, pr.jobId)).get();
   if (job === undefined) throw new Error(`no Job ${pr.jobId}`);
-  const policy = policyOfConfig(job.configSnapshotJson);
+  const frozen = frozenRepositoryConfig(job.configSnapshotJson, repo);
+  const policy = frozen.mergePolicy.value;
   const attempt = approvedAttemptOf(tx, pr.taskId);
   const blocking = tx
     .select({ n: sql<number>`count(*)` })
@@ -506,7 +526,7 @@ export function gateOf(
     },
     reviewedHeadSha: attempt.headSha,
     checks,
-    requiredChecks: profile.requiredChecks ?? [],
+    requiredChecks: frozen.requiredChecks.value,
     graceMs: opts.graceMs,
     now: opts.now,
     blockingFindings: blocking?.n ?? 0,
@@ -514,7 +534,33 @@ export function gateOf(
     policy,
     // In a multi-PR Job the poller polls an approved PR until every PR is approved.
     approval: approvalOf(tx, pr),
+    earlier: earlierPullRequests(tx, pr),
   });
+}
+
+/**
+ * The PRs of the Repositories `pr`'s Repository comes after in the Job's
+ * Delivery Order (ADR-0052, ADR-0066), in that order: what its Merge Gate's
+ * `delivery_order` condition waits on. Empty in a single-repo Job.
+ */
+function earlierPullRequests(tx: Tx | FactoryDb, pr: PullRequestRow): EarlierPullRequest[] {
+  const order = storedDeliveryOrder(tx, pr.jobId) ?? [];
+  const self = order.find((r) => r.repositoryId === pr.repositoryId);
+  if (self === undefined) return [];
+  const prs = pullRequestsOfJob(tx, pr.jobId);
+  return order
+    .filter((r) => self.after.includes(r.repositoryId))
+    .map((r) => {
+      const earlier = prs.find((p) => p.repositoryId === r.repositoryId);
+      return earlier === undefined
+        ? { repository: r.name, pullRequest: null, state: null, mergeApproved: false }
+        : {
+            repository: r.name,
+            pullRequest: label(earlier),
+            state: stateOf(earlier),
+            mergeApproved: approvedMergeItem(tx, earlier) !== undefined,
+          };
+    });
 }
 
 /** What a poll would change, worked out from the rows without writing anything. */
@@ -664,7 +710,7 @@ export function recordPoll(
     .where(eq(schema.pullRequests.id, prId))
     .get();
   if (current === undefined) throw new Error(`no pull request ${prId}`);
-  const policy = mergePolicyOf(state);
+  const policy = mergePolicyOf(tx, state);
   if ((headMoved || baseMoved) && seen.state === 'open') {
     for (const item of openMergeItemsOf(tx, before)) {
       closeItem(
@@ -765,7 +811,7 @@ function awaitMergeAgain(tx: Tx, holder: StageRunRow, state: JobState, actor: st
   replaceStageBlocker(
     tx,
     holder,
-    awaitingMergeBlocker(tx, prs, first, mergePolicyOf(state)),
+    awaitingMergeBlocker(tx, prs, first, mergePolicyOf(tx, state)),
     actor,
   );
 }
@@ -1016,7 +1062,7 @@ function syncCiBlocker(tx: Tx, jobId: string, now: string): void {
     replaceStageBlocker(
       tx,
       next.holder,
-      awaitingMergeBlocker(tx, prs, first, mergePolicyOf(next.state)),
+      awaitingMergeBlocker(tx, prs, first, mergePolicyOf(tx, next.state)),
       POLLER,
     );
     return;
@@ -1050,11 +1096,9 @@ export function supersedeHeldBlockerItems(
   }
 }
 
-/** The Repository's `requiredChecks` for a PR (empty: every check counts). */
+/** The Repository's `requiredChecks` for a PR, frozen in its Job (empty: every check counts). */
 export function requiredChecksOf(tx: Tx | FactoryDb, pr: PullRequestRow): string[] {
-  return (
-    RepositoryProfileSchema.parse(JSON.parse(repositoryOf(tx, pr).profileJson)).requiredChecks ?? []
-  );
+  return frozenConfigOf(tx, pr).requiredChecks.value;
 }
 
 /** The `merge_approval` Stage Run a Blocker Approval holds, when it waits on `ci_failed` (#61). */
@@ -1195,6 +1239,7 @@ function completeMerge(
       { type: 'approval.decided', payload: { ...decision, mergeSha: pr.mergeSha } },
     );
   }
+  flagOutOfOrderMerge(tx, pr, POLLER);
   const all = pullRequestsOfJob(tx, pr.jobId);
   if (!all.every((p) => p.state === 'merged')) return;
   const approval = latestStageRun(state, 'merge_approval');
@@ -1206,11 +1251,38 @@ function completeMerge(
     const queued = stepAndReread(tx, step, merge, 'queued');
     const running = stepAndReread(tx, step, queued, 'running');
     step(running, 'succeeded', {
-      reason: `merged on GitHub by a human (${mergePolicyOf(state)})`,
+      reason: `merged on GitHub by a human (${mergePolicyOf(tx, state)})`,
       detail: { mergeSha: all.length === 1 ? pr.mergeSha : null, mergeShas },
     });
   }
   queueClosure(state, step);
+}
+
+/**
+ * `pr` was just seen merged: when an earlier PR in Delivery Order had not
+ * merged yet (a human merged out of order on GitHub, which `never_auto`
+ * can't prevent), the row records which, with a
+ * `pull_request.merged_out_of_order` event; the Delivery Report flags it
+ * (ADR-0052, ADR-0066). Judged from what the factory had recorded when it
+ * saw the merge: two merges between polls are seen in polling order.
+ */
+function flagOutOfOrderMerge(tx: Tx, pr: PullRequestRow, actor: string): void {
+  const before = earlierPullRequests(tx, pr)
+    .filter((e) => e.state !== 'merged')
+    .map((e) => e.pullRequest ?? e.repository);
+  if (before.length === 0) return;
+  tx.update(schema.pullRequests)
+    .set({ mergedBeforeJson: JSON.stringify(before) })
+    .where(eq(schema.pullRequests.id, pr.id))
+    .run();
+  appendEvent(tx, {
+    entityKind: 'pull_request',
+    entityId: pr.id,
+    jobId: pr.jobId,
+    type: 'pull_request.merged_out_of_order',
+    actor,
+    payload: { number: pr.number, mergeSha: pr.mergeSha, before },
+  });
 }
 
 // ---- human_approval: the approval and the factory's merge (#59, ADR-0038) -------------------
@@ -1292,7 +1364,7 @@ export function approveMerge(
   state: JobState,
   step: StageRunStepper,
 ): void {
-  if (mergePolicyOf(state) !== 'human_approval') {
+  if (mergePolicyOf(tx, state) !== 'human_approval') {
     throw new ApiFailure(
       409,
       'merge_not_allowed',
@@ -1332,7 +1404,7 @@ export function approveMerge(
       conditions: approved.conditions,
     },
   });
-  const method = MergeMethodSchema.parse(repositoryOf(tx, pr).mergeMethod);
+  const method = frozenConfigOf(tx, pr).mergeMethod.value;
   const auditId = newId('aud');
   tx.insert(schema.auditLog)
     .values({
@@ -1387,17 +1459,26 @@ export type MergeStep =
 
 /**
  * The PRs the `merge` Stage still has to merge, with the approved SHAs and
- * the method: the open PRs of the Job, each with its approved `merge` item.
+ * the method: the open PRs of the Job, each with its approved `merge` item,
+ * in Delivery Order (ADR-0052): the merger merges them one at a time and
+ * stops at the first it can't merge, so a later PR never merges before an
+ * earlier one.
  */
 export function pendingMerges(db: FactoryDb, jobId: string) {
+  const order = (storedDeliveryOrder(db, jobId) ?? []).map((r) => r.repositoryId);
+  const rank = (pr: PullRequestRow) => {
+    const i = order.indexOf(pr.repositoryId);
+    return i === -1 ? order.length : i;
+  };
   return pullRequestsOfJob(db, jobId)
     .filter((pr) => pr.state === 'open')
+    .sort((a, b) => rank(a) - rank(b))
     .map((pr) => ({
       pr,
       // The SHAs the approved item names; null when the PR's head or base moved after its
       // approval (the poller polls the Job's other PRs until all are approved).
       approved: approvedShas(approvedMergeItem(db, pr)),
-      method: MergeMethodSchema.parse(repositoryOf(db, pr).mergeMethod),
+      method: frozenConfigOf(db, pr).mergeMethod.value,
     }));
 }
 
@@ -1453,6 +1534,7 @@ export function recordFactoryMerge(
     actor: MERGER,
     payload: { number: pr.number, mergeSha, headSha: pr.headSha, baseSha: pr.baseSha, how },
   });
+  flagOutOfOrderMerge(tx, { ...pr, mergeSha }, MERGER);
   const all = pullRequestsOfJob(tx, pr.jobId);
   if (!all.every((p) => p.state === 'merged')) return;
   const run = latestStageRun(state, 'merge');

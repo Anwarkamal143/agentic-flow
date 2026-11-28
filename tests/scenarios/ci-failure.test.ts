@@ -21,8 +21,10 @@ import {
   useFakeHarness,
   type RunningRuntime,
 } from '../support/factory.js';
-import { fakeGitHub, type FakeGitHub } from '../support/github.js';
+import { fakeGitHub, type FakeGitHub, type RecordedRequest } from '../support/github.js';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
@@ -125,7 +127,7 @@ function script() {
     scope: { writable: ['src/a.ts'], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: 'test -f src/a.ts', criteria: ['AC-01'] }],
+    verification: [{ key: 'test', command: 'exists', args: ['src/a.ts'], criteria: ['AC-01'] }],
   };
   return scriptWith(
     { planning: [{ output: { tasks: [task] } }] },
@@ -153,6 +155,7 @@ async function start(requiredChecks: string[] = ['build']) {
     },
   });
   const rt = await startRuntime(home, { env: { ...gh.gitEnv(), GH_ACCESS } });
+  await createProject(rt, 'demo');
   const added = await rt.home.cli([
     'repo',
     'add',
@@ -165,6 +168,7 @@ async function start(requiredChecks: string[] = ['build']) {
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   const res = await post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add a' });
   expect(res.status, 'create Job').toBe(201);
@@ -391,6 +395,41 @@ describe('a CI failure', { timeout: 180_000 }, () => {
     );
     expect(mergeApprovalBlocker(await readJob(rt, job.id))?.reason).toBe('awaiting_merge');
     expect((await integrationAttempts(rt, job.id)).attempts).toHaveLength(1);
+  });
+
+  // A poll whose GitHub reads predate a rerun_checks decision would record the old failure after
+  // it, and `ciBlockerStep` would raise a new ci_failed Blocker Approval that the next poll
+  // supersedes (what made C4 above flaky under load). The decision bumps the pull_requests row's
+  // version, so the poller's "row changed while GitHub was read" guard drops the stale poll.
+  it('a poll that read the failed check before rerun_checks raises no new Blocker Approval when it records after the decision', async () => {
+    const { gh, rt, job, pr } = await start();
+    failBuild(gh, pr.headSha);
+    const item = await openCiItem(rt, job.id);
+
+    // Hold the next poll between its check-run read (still `failure`) and its write.
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const statuses = /\/commits\/[^/]+\/statuses$/;
+    const from = gh.requests.length;
+    gh.simulate({ kind: 'held', release: held }, { path: statuses });
+    const isHeld = (r: RecordedRequest) =>
+      statuses.test(r.path.split('?')[0] ?? '') && r.status === undefined;
+    await until(
+      () => Promise.resolve(gh.requests.slice(from).some(isHeld)),
+      (seen) => seen,
+      'a poll to hold its statuses read',
+    );
+    const res = await decide(rt, item, 'rerun_checks');
+    expect(res.status, await res.clone().text()).toBe(200);
+    release();
+
+    // The re-run is queued: the Blocker clears, and the only Blocker Approval is the decided one.
+    await until(
+      () => readJob(rt, job.id),
+      (j) => mergeApprovalBlocker(j)?.reason === 'awaiting_merge',
+      'the Blocker to clear',
+    );
+    expect((await itemsOf(rt, job.id, 'blocker')).map((i) => i.state)).toEqual(['decided']);
   });
 
   it('rework sends the failed check to a Rework Attempt as labelled untrusted context and updates the PR in place', async () => {

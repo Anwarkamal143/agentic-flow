@@ -23,6 +23,8 @@ import {
 } from '../support/factory.js';
 import {
   capAttempts,
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
@@ -30,7 +32,7 @@ import {
   type EventBody,
   type JobBody,
 } from '../support/api.js';
-import { scriptWith, validOutput } from '../support/scripts.js';
+import { FIXTURE_COMMANDS, scriptWith, validOutput } from '../support/scripts.js';
 
 interface TaskBody {
   id: string;
@@ -40,7 +42,13 @@ interface TaskBody {
   cancelReason: string | null;
   writable?: string[];
   scope: { writable: string[]; forbidden: string[] };
-  verification: { key: string; command: string; required: boolean; criteria: string[] }[];
+  verification: {
+    key: string;
+    command: string;
+    args?: string[];
+    required: boolean;
+    criteria: string[];
+  }[];
   blocker: { reason: string; detail: string } | null;
 }
 interface AttemptBody {
@@ -111,8 +119,20 @@ function upstreamCommit(src: string, file: string, content: string): string {
   );
 }
 
+/** The checks only these scenarios need, declared next to the fixture's commands. */
+const DOC_CHECKS = {
+  'a-alone': { run: 'test -f docs/a.md && test ! -f docs/b.md' },
+  'a-alone-or-indexed': {
+    run: 'test -f docs/a.md && { test ! -f docs/b.md || test -f docs/index.md; }',
+  },
+};
+
 /** A Plan Task writing one file, `docs/<key>.md`, with a shared `lint` check. */
-function docTask(key: string, dependsOn: string[] = [], verify = `test -f docs/${key}.md`) {
+function docTask(
+  key: string,
+  dependsOn: string[] = [],
+  verify: { command: string; args?: string[] } = { command: 'exists', args: [`docs/${key}.md`] },
+) {
   const [base] = (validOutput('planning') as { tasks: Record<string, unknown>[] }).tasks;
   return {
     ...structuredClone(base),
@@ -122,8 +142,8 @@ function docTask(key: string, dependsOn: string[] = [], verify = `test -f docs/$
     dependsOn,
     acceptance: ['AC-01'],
     verification: [
-      { key: 'test', command: verify, criteria: ['AC-01'] },
-      { key: 'lint', command: 'test -d docs', criteria: [] },
+      { key: 'test', ...verify, criteria: ['AC-01'] },
+      { key: 'lint', command: 'dir-exists', args: ['docs'], criteria: [] },
     ],
   };
 }
@@ -167,10 +187,12 @@ async function runtimeOn(
   const home = await initializedHome();
   useFakeHarness(home, script(src));
   const rt = await startRuntime(home, opts.env === undefined ? undefined : { env: opts.env });
+  await createProject(rt, 'demo');
   const added = await rt.home.cli(['repo', 'add', src, '--project', 'demo', '--yes']);
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id, { ...FIXTURE_COMMANDS, ...DOC_CHECKS });
   if (opts.maxAttempts === undefined) await skipPlanApproval(rt, repo.projectId);
   else await capAttempts(rt, repo.projectId, opts.maxAttempts);
   return { rt, src, repo };
@@ -239,11 +261,11 @@ describe('the Integration Branch', { timeout: 90_000 }, () => {
     if (task === undefined) throw new Error('no Integration Task');
     // Its definition is the union of the Plan Tasks' (ADR-0034); the shared lint runs once.
     expect(task.scope.writable).toEqual(['docs/c.md', 'docs/a.md', 'docs/b.md']);
-    expect(task.verification.map((v) => [v.key, v.command])).toEqual([
-      ['test', 'test -f docs/c.md'],
-      ['lint', 'test -d docs'],
-      ['test-2', 'test -f docs/a.md'],
-      ['test-3', 'test -f docs/b.md'],
+    expect(task.verification.map((v) => [v.key, v.command, v.args])).toEqual([
+      ['test', 'exists', ['docs/c.md']],
+      ['lint', 'dir-exists', ['docs']],
+      ['test-2', 'exists', ['docs/a.md']],
+      ['test-3', 'exists', ['docs/b.md']],
     ]);
 
     // The merge Attempt: no Harness ran; its base is the default branch as it is upstream now.
@@ -292,10 +314,10 @@ describe('the Integration Branch', { timeout: 90_000 }, () => {
 
     // Verification re-ran on the integration head; its Evidence names (head, base) of it.
     expect(merge.verificationRuns.map((r) => r.command)).toEqual([
-      'test -f docs/c.md',
-      'test -d docs',
-      'test -f docs/a.md',
-      'test -f docs/b.md',
+      "test -f 'docs/c.md'",
+      "test -d 'docs'",
+      "test -f 'docs/a.md'",
+      "test -f 'docs/b.md'",
     ]);
     for (const run of merge.verificationRuns) {
       expect([run.headSha, run.baseSha]).toEqual([head, upstreamHead]);
@@ -323,7 +345,7 @@ describe('the Integration Branch', { timeout: 90_000 }, () => {
 
     // The Delivery Report names the Integration Branch and offers it, not the Task Branches.
     const report = await reportOf(rt, job.id);
-    expect(report.reportVersion).toBe(6);
+    expect(report.reportVersion).toBe(7);
     expect(report.integration).toMatchObject({
       branch,
       state: 'approved',
@@ -363,10 +385,7 @@ describe('the Integration Branch', { timeout: 90_000 }, () => {
             planning: [
               {
                 output: {
-                  tasks: [
-                    docTask('a', [], 'test -f docs/a.md && test ! -f docs/b.md'),
-                    docTask('b'),
-                  ],
+                  tasks: [docTask('a', [], { command: 'a-alone' }), docTask('b')],
                 },
               },
             ],
@@ -489,7 +508,7 @@ describe('the Integration Branch', { timeout: 90_000 }, () => {
     // a's check passes alone; on the Integration Branch (b's file there too) it needs docs/index.md,
     // which a may write. The Integration Task's Rework writes it on factory/<job-id>/integration.
     const a = {
-      ...docTask('a', [], 'test -f docs/a.md && { test ! -f docs/b.md || test -f docs/index.md; }'),
+      ...docTask('a', [], { command: 'a-alone-or-indexed' }),
       scope: { writable: ['docs/a.md', 'docs/index.md'], forbidden: [] },
     };
     const fix = {

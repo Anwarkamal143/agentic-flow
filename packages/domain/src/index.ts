@@ -8,13 +8,36 @@ import { TaskCancelReasonSchema, TaskStateSchema } from './execution.js';
 import { BlockerSchema } from './rework.js';
 import { GitHubCoordinatesSchema, parseCoordinates } from './github.js';
 import { TaskKindSchema } from './integration.js';
-import { ReviewRerunOnBaseChangeSchema } from './base-change.js';
+import { ReviewRerunOnBaseChangeSchema, type ReviewRerunOnBaseChange } from './base-change.js';
 import { SetupCommandSchema } from './setup.js';
+import { DeliveryOrderSchema } from './delivery-order.js';
+import { IntakeLabelSchema, parseIssueRef, SourceIssueSchema } from './issue-intake.js';
+import {
+  DEFAULT_SENSITIVE_PATHS,
+  DetectedProfileSchema,
+  ProfileCommandsSchema,
+  RepositoryProfileSchema,
+  type RepositoryProfile,
+} from './profile.js';
+import { ProjectJobLimitSchema } from './scheduling.js';
+import {
+  ChainLinkSchema,
+  ConcurrencyOverrideSchema,
+  ConfigSourceSchema,
+  LEVEL_CONFIG_SHAPE,
+  narrowingChain,
+  PlanApprovalPolicySchema,
+  type ConcurrencyOverride,
+  type ConfigSource,
+  type ConfigViolation,
+  type PlanApprovalPolicy,
+} from './config-levels.js';
 import {
   EffectiveMergePolicySchema,
   MergeMethodSchema,
   MergePolicySchema,
-  type EffectiveMergePolicy,
+  type MergeMethod,
+  type MergePolicy,
 } from './merge-gate.js';
 import {
   DEFAULT_TOOL_POLICIES,
@@ -24,6 +47,7 @@ import {
   type ToolPolicy,
 } from './tool-policy.js';
 import {
+  RepositorySetBySchema,
   RiskSchema,
   RuleIssueSchema,
   TaskRoleSchema,
@@ -47,7 +71,11 @@ export * from './approvals.js';
 export * from './plan-view.js';
 export * from './capacity.js';
 export * from './dependency-base.js';
+export * from './delivery-order.js';
+export * from './contract-step.js';
+export * from './issue-intake.js';
 export * from './questions.js';
+export * from './clarification.js';
 export * from './blocker-approvals.js';
 export * from './carry-over.js';
 export * from './keep-going.js';
@@ -61,78 +89,26 @@ export * from './merge-gate.js';
 export * from './pr-feedback.js';
 export * from './base-change.js';
 export * from './setup.js';
-
-const commandSchema = z.string().trim().min(1).max(1000).nullable();
-
-/** Shell commands the factory runs to verify work in a Repository. `null`: none. */
-export const RepositoryCommandsSchema = z.object({
-  test: commandSchema,
-  typecheck: commandSchema,
-});
-export type RepositoryCommands = z.infer<typeof RepositoryCommandsSchema>;
-
-export const PackageManagerSchema = z.enum(['npm', 'pnpm', 'yarn', 'bun']);
-export type PackageManager = z.infer<typeof PackageManagerSchema>;
-
-/**
- * What the factory knows about how to work in a Repository. Detected commands
- * are proposals until a human confirms them; only confirmed profiles are saved.
- */
-export const RepositoryProfileSchema = z.object({
-  version: z.literal(1),
-  packageManager: PackageManagerSchema.nullable(),
-  commands: RepositoryCommandsSchema,
-  /**
-   * The checks the Merge Gate counts (#58): when set, only these, and each
-   * must report (never passed by the grace window). Unset or empty: every
-   * check on the PR head.
-   */
-  requiredChecks: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
-  /**
-   * The setup command the factory runs in each Worktree before the Harness
-   * Run and verification (ADR-0047), from `repo add --setup`. Set by a human
-   * only, never detected. Unset: no setup runs.
-   */
-  setup: SetupCommandSchema.optional(),
-  confirmedBy: z.string(),
-  confirmedAt: z.string(),
-});
-export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
-
-/**
- * `required`: every new Plan waits at `plan_approval` for a human. `skip`: the
- * Stage Run ends `skipped`, with the reason in its event (PRODUCT_SPEC §4).
- */
-export const PlanApprovalPolicySchema = z.enum(['required', 'skip']);
-export type PlanApprovalPolicy = z.infer<typeof PlanApprovalPolicySchema>;
-
-/** Task concurrency limits set at a level (Project, or a Job at creation); unset inherits. */
-export const ConcurrencyOverrideSchema = z
-  .object({
-    perRepository: z.number().int().min(1).max(16).optional(),
-    perJob: z.number().int().min(1).max(16).optional(),
-  })
-  .strict();
-export type ConcurrencyOverride = z.infer<typeof ConcurrencyOverrideSchema>;
+export * from './projects.js';
+export * from './factory-level.js';
+export * from './config-levels.js';
+export * from './config-import.js';
+export * from './scheduling.js';
+export * from './profile.js';
+export * from './writability.js';
+export * from './onboarding.js';
 
 /** Operator-set Project configuration. Every field is optional: unset means inherit. */
 export const ProjectConfigSchema = z
   .object({
-    /** Attempts per Task, Rework included (ARCHITECTURE §4.6). */
-    maxAttempts: z.number().int().min(1).max(10).optional(),
-    /** Retries per Task: new Attempts after an interrupted one. They don't count toward `maxAttempts`. */
-    maxRetries: z.number().int().min(0).max(10).optional(),
-    /** Answered Questions per Task, each a new Attempt (ARCHITECTURE §8). */
-    maxQuestions: z.number().int().min(0).max(10).optional(),
-    /** Whether a new Plan waits for a human at `plan_approval` (ADR-0016). */
-    planApproval: PlanApprovalPolicySchema.optional(),
-    /** Replans per Job; re-specification counts too, a Plan Edit doesn't (ARCHITECTURE §4.6, §4.7). */
-    maxReplans: z.number().int().min(0).max(10).optional(),
-    /** Task concurrency limits (ARCHITECTURE §12). A Job may override them at creation. */
-    concurrency: ConcurrencyOverrideSchema.optional(),
-    /** How a Review follows a moved base (ADR-0041): `rerunOnBaseChange`, `if_diff_changed` by default. */
-    review: z
-      .object({ rerunOnBaseChange: ReviewRerunOnBaseChangeSchema.optional() })
+    ...LEVEL_CONFIG_SHAPE,
+    /**
+     * Task concurrency limits (ARCHITECTURE §12); a Job may override them at
+     * creation. `perProjectJobs` (ADR-0050) is read at each claim, not frozen.
+     */
+    concurrency: ConcurrencyOverrideSchema.extend({
+      perProjectJobs: ProjectJobLimitSchema.optional(),
+    })
       .strict()
       .optional(),
   })
@@ -147,6 +123,35 @@ export const ProjectSchema = z.object({
   createdAt: z.string(),
 });
 export type Project = z.infer<typeof ProjectSchema>;
+
+/** `POST /v1/projects` (`project create`). Names are unique. */
+export const CreateProjectInputSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(100)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'must be letters, digits, ".", "_" or "-"'),
+});
+export type CreateProjectInput = z.infer<typeof CreateProjectInputSchema>;
+
+/** `POST /v1/projects/:ref/config/set` (`project config set`): one key, dotted when nested. */
+export const SetProjectConfigInputSchema = z.object({
+  key: z.string().min(1).max(200),
+  value: z.unknown(),
+});
+export type SetProjectConfigInput = z.infer<typeof SetProjectConfigInputSchema>;
+
+/** A Job of a Project that has not reached a terminal status. */
+export const ProjectJobSchema = z.object({ id: z.string(), title: z.string(), status: z.string() });
+export type ProjectJob = z.infer<typeof ProjectJobSchema>;
+
+/** `GET /v1/projects`: each Project with its Repositories and active Jobs. */
+export const ProjectSummarySchema = ProjectSchema.extend({
+  repositories: z.array(z.object({ id: z.string(), name: z.string() })),
+  activeJobs: z.array(ProjectJobSchema),
+});
+export type ProjectSummary = z.infer<typeof ProjectSummarySchema>;
 
 export const RepositorySchema = z.object({
   id: z.string(),
@@ -169,9 +174,22 @@ export const RepositorySchema = z.object({
   mergePolicy: MergePolicySchema,
   /** How the factory merges under `human_approval` (default `merge`, a merge commit; ADR-0038). */
   mergeMethod: MergeMethodSchema,
+  /** The GitHub label that opts it into issue intake (#112, ADR-0072); `null`: none. */
+  intakeLabel: z.string().nullable(),
   createdAt: z.string(),
 });
 export type Repository = z.infer<typeof RepositorySchema>;
+
+/** `POST /v1/repositories/:ref/intake` (`repo intake set|off`): the intake label, or none. */
+export const SetIntakeLabelInputSchema = z.object({ label: IntakeLabelSchema.nullable() });
+export type SetIntakeLabelInput = z.infer<typeof SetIntakeLabelInputSchema>;
+
+/** `GET /v1/projects/:ref` (`project show`): the Project, its Repositories in full and its active Jobs. */
+export const ProjectDetailSchema = ProjectSchema.extend({
+  repositories: z.array(RepositorySchema),
+  activeJobs: z.array(ProjectJobSchema),
+});
+export type ProjectDetail = z.infer<typeof ProjectDetailSchema>;
 
 const absolutePath = z
   .string()
@@ -189,17 +207,24 @@ export const RepositoryInspectionSchema = z.object({
   remoteUrl: z.string().nullable(),
   /** The GitHub coordinates `remoteUrl` gives, when it is a github.com URL. */
   github: GitHubCoordinatesSchema.nullable(),
-  packageManager: PackageManagerSchema.nullable(),
-  /** Proposed commands, for the human to confirm or replace. */
-  detectedCommands: RepositoryCommandsSchema,
+  /**
+   * What Profile Detection proposes (ADR-0060), from the source's HEAD; for
+   * the human to confirm or replace. Never a setup command.
+   */
+  detected: DetectedProfileSchema,
 });
 export type RepositoryInspection = z.infer<typeof RepositoryInspectionSchema>;
 
 /** `POST /v1/repositories`. `commands` are the human-confirmed ones. */
 export const RegisterRepositoryInputSchema = z.object({
   path: absolutePath,
+  /** An existing Project's name or id; an unknown one is refused, never created (ADR-0055). */
   project: z.string().trim().min(1).max(100),
-  commands: RepositoryCommandsSchema,
+  /**
+   * The detected profile fields as the human confirmed them (`repo add`
+   * shows each one; `--yes` accepts them). Saved with detection `detected`.
+   */
+  profile: DetectedProfileSchema,
   /** The Merge Gate's `requiredChecks`, from `repo add --required-check` (repeatable). */
   requiredChecks: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
   /** `repo add --setup`: the Worktree setup command (ADR-0047). Never inferred. */
@@ -215,6 +240,8 @@ export const RegisterRepositoryInputSchema = z.object({
   mergePolicy: MergePolicySchema.optional(),
   /** `repo add --merge-method`; default `merge`. */
   mergeMethod: MergeMethodSchema.optional(),
+  /** `repo add --intake-label`: opts the Repository into issue intake (#112); needs GitHub coordinates. */
+  intakeLabel: IntakeLabelSchema.optional(),
 });
 export type RegisterRepositoryInput = z.infer<typeof RegisterRepositoryInputSchema>;
 
@@ -450,13 +477,54 @@ export function currentStageOf(stageRuns: readonly StageRunPosition[]): StageId 
   return stage.stageId;
 }
 
-// ---- Configuration (ARCHITECTURE §15, Phase A minimal) ---------------------
-
-export const ConfigSourceSchema = z.enum(['recipe', 'project', 'job']);
-export type ConfigSource = z.infer<typeof ConfigSourceSchema>;
+// ---- Configuration (ARCHITECTURE §15, ADR-0049, ADR-0057) -------------------
 
 const effectiveValue = <T extends z.ZodType>(value: T) =>
   z.object({ value, source: ConfigSourceSchema });
+
+/** A permission value: its value, its source, and (since Phase D) its chain of narrowings. */
+const permissionValue = <T extends z.ZodType>(value: T) =>
+  z.object({
+    value,
+    source: ConfigSourceSchema,
+    /** Each level that set it, least specific first. Absent in snapshots from before Phase D. */
+    chain: z.array(ChainLinkSchema).optional(),
+  });
+
+/**
+ * One Repository's section of a Job's Effective Configuration (ADR-0049),
+ * resolved for every Repository of the Project at creation.
+ */
+export const RepositoryEffectiveConfigSchema = z.object({
+  repositoryId: z.string(),
+  name: z.string(),
+  /** The Merge Policy (ADR-0038): the Repository's, or the Job's stricter override. */
+  mergePolicy: permissionValue(MergePolicySchema),
+  mergeMethod: effectiveValue(MergeMethodSchema),
+  /** The Worktree setup command (ADR-0047); `null`: none. */
+  setup: effectiveValue(SetupCommandSchema.nullable()),
+  /** The profile's named commands (v1 snapshots' `{test, typecheck}` read as named). */
+  commands: effectiveValue(ProfileCommandsSchema),
+  /**
+   * The profile's Sensitive Paths (ADR-0051). Snapshots from before #100
+   * have none frozen: they read as the fixed defaults.
+   */
+  sensitivePaths: effectiveValue(z.array(z.string())).default({
+    value: [...DEFAULT_SENSITIVE_PATHS],
+    source: 'repository',
+  }),
+  /** The Merge Gate's `requiredChecks`; empty: every check counts. */
+  requiredChecks: effectiveValue(z.array(z.string())),
+  /**
+   * The profile's instruction files, given to the developer as context
+   * (ADR-0051). Snapshots from before #102 froze none: they give none.
+   */
+  instructionFiles: effectiveValue(z.array(z.string())).default({
+    value: [],
+    source: 'repository',
+  }),
+});
+export type RepositoryEffectiveConfig = z.infer<typeof RepositoryEffectiveConfigSchema>;
 
 /** The settings for one Job once every level is resolved; each value records its source level. */
 export const EffectiveConfigSchema = z.object({
@@ -480,7 +548,7 @@ export const EffectiveConfigSchema = z.object({
     source: 'recipe',
   }),
   /** Jobs created before #35 have no `plan_approval` Stage; the value is unused there. */
-  planApproval: effectiveValue(PlanApprovalPolicySchema).default({
+  planApproval: permissionValue(PlanApprovalPolicySchema).default({
     value: 'required',
     source: 'recipe',
   }),
@@ -499,23 +567,23 @@ export const EffectiveConfigSchema = z.object({
       perRepository: { value: 2, source: 'recipe' },
       perJob: { value: 2, source: 'recipe' },
     }),
-  /** The Merge Policy (ADR-0038). Jobs created before #59 were all `never_auto`, the only policy then. */
-  mergePolicy: EffectiveMergePolicySchema.default({ value: 'never_auto', source: 'repository' }),
   /** `review.rerunOnBaseChange` (ADR-0041). Jobs created before #62 get the recipe default. */
   reviewRerunOnBaseChange: effectiveValue(ReviewRerunOnBaseChangeSchema).default({
     value: 'if_diff_changed',
     source: 'recipe',
   }),
   /**
-   * The Repository's Worktree setup command, frozen at creation (ADR-0047);
-   * `null`: none. Jobs created before it have none.
+   * A section per Repository of the Project at creation, by name (ADR-0049).
+   * Jobs created before Phase D have none: `repositoryConfigOf` builds their
+   * one Repository's section from `mergePolicy` and `setup` below.
    */
+  repositories: z.array(RepositoryEffectiveConfigSchema).default([]),
+  /** Before Phase D only: the Job's one Repository's Merge Policy (ADR-0038). Unset before #59: `never_auto`. */
+  mergePolicy: EffectiveMergePolicySchema.optional(),
+  /** Before Phase D only: the Job's one Repository's setup command (ADR-0047). */
   setup: z
     .object({ value: SetupCommandSchema.nullable(), source: z.literal('repository') })
-    .default({
-      value: null,
-      source: 'repository',
-    }),
+    .optional(),
 });
 export type EffectiveConfig = z.infer<typeof EffectiveConfigSchema>;
 
@@ -526,6 +594,7 @@ export const RECIPE_DEFAULTS: {
   readonly planApproval: PlanApprovalPolicy;
   readonly maxReplans: number;
   readonly concurrency: { readonly perRepository: number; readonly perJob: number };
+  readonly reviewRerunOnBaseChange: ReviewRerunOnBaseChange;
 } = {
   maxAttempts: 3,
   maxRetries: 2,
@@ -533,6 +602,7 @@ export const RECIPE_DEFAULTS: {
   planApproval: 'required',
   maxReplans: 2,
   concurrency: { perRepository: 2, perJob: 2 },
+  reviewRerunOnBaseChange: 'if_diff_changed',
 };
 
 /**
@@ -545,56 +615,182 @@ export function toolPolicyOf(configSnapshotJson: string, role: HarnessRole): Too
   );
 }
 
-/** Resolves the Effective Configuration. Pure; frozen onto the Job at creation. */
-export function resolveEffectiveConfig(levels: {
-  project: ProjectConfig;
-  /** The Job's own overrides, given at creation (ARCHITECTURE §12: concurrency only). */
-  job?: { concurrency?: ConcurrencyOverride | undefined };
-  /** The Merge Policy resolved from the Repository and the Job's override (`resolveMergePolicy`). */
-  mergePolicy?: EffectiveMergePolicy;
-  /** The Repository's setup command (its profile's `setup`), if it has one. */
-  setup?: string | undefined;
-}): EffectiveConfig {
-  const { project } = levels;
-  const limit = (key: keyof ConcurrencyOverride) => {
-    const job = levels.job?.concurrency?.[key];
-    if (job !== undefined) return { value: job, source: 'job' as const };
-    const own = project.concurrency?.[key];
-    return own === undefined
-      ? { value: RECIPE_DEFAULTS.concurrency[key], source: 'recipe' as const }
-      : { value: own, source: 'project' as const };
-  };
-  return {
-    maxAttempts:
-      project.maxAttempts === undefined
-        ? { value: RECIPE_DEFAULTS.maxAttempts, source: 'recipe' }
-        : { value: project.maxAttempts, source: 'project' },
-    maxRetries:
-      project.maxRetries === undefined
-        ? { value: RECIPE_DEFAULTS.maxRetries, source: 'recipe' }
-        : { value: project.maxRetries, source: 'project' },
-    toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
-    maxQuestions:
-      project.maxQuestions === undefined
-        ? { value: RECIPE_DEFAULTS.maxQuestions, source: 'recipe' }
-        : { value: project.maxQuestions, source: 'project' },
-    planApproval:
-      project.planApproval === undefined
-        ? { value: RECIPE_DEFAULTS.planApproval, source: 'recipe' }
-        : { value: project.planApproval, source: 'project' },
-    maxReplans:
-      project.maxReplans === undefined
-        ? { value: RECIPE_DEFAULTS.maxReplans, source: 'recipe' }
-        : { value: project.maxReplans, source: 'project' },
-    concurrency: { perRepository: limit('perRepository'), perJob: limit('perJob') },
-    mergePolicy: levels.mergePolicy ?? { value: 'never_auto', source: 'repository' },
-    reviewRerunOnBaseChange:
-      project.review?.rerunOnBaseChange === undefined
-        ? { value: 'if_diff_changed', source: 'recipe' }
-        : { value: project.review.rerunOnBaseChange, source: 'project' },
-    setup: { value: levels.setup ?? null, source: 'repository' },
+/** What a Repository contributes to the hierarchy: its own settings and its profile's. */
+export interface RepositoryConfigLevel {
+  id: string;
+  name: string;
+  mergePolicy: MergePolicy;
+  mergeMethod: MergeMethod;
+  profile: Pick<RepositoryProfile, 'commands' | 'sensitivePaths'> & {
+    instructionFiles?: string[] | undefined;
+    requiredChecks?: string[] | undefined;
+    setup?: string | undefined;
   };
 }
+
+/** The Job-wide keys a level sets; the Factory Level's `concurrency.global` is read by the scheduler only. */
+export type LevelValues = Omit<ProjectConfig, 'concurrency'> & {
+  concurrency?: (ConcurrencyOverride & { global?: number | undefined }) | undefined;
+};
+
+/** The levels `resolveEffectiveConfig` reads, least specific first (recipe defaults are built in). */
+export interface EffectiveConfigLevels {
+  factory?: LevelValues | undefined;
+  project: ProjectConfig;
+  /** Every Repository of the Project; each gets a section. */
+  repositories?: readonly RepositoryConfigLevel[] | undefined;
+  /** The Job's own overrides, given at creation (ARCHITECTURE §12). */
+  job?:
+    | { concurrency?: ConcurrencyOverride | undefined; mergePolicy?: MergePolicy | undefined }
+    | undefined;
+}
+
+export type EffectiveConfigResolution =
+  { ok: true; config: EffectiveConfig } | ({ ok: false } & ConfigViolation);
+
+/**
+ * Resolves the Effective Configuration (ADR-0049, ADR-0057): recipe < Factory
+ * < Project < Repository < Job, the most specific level that sets a value
+ * wins, and a permission value wider than its parent is refused with the
+ * parent's value. Pure; frozen onto the Job at creation.
+ */
+export function resolveEffectiveConfig(levels: EffectiveConfigLevels): EffectiveConfigResolution {
+  const factory = levels.factory ?? {};
+  const { project } = levels;
+  const pick = <T>(
+    recipe: T,
+    ...set: [ConfigSource, T | undefined][]
+  ): { value: T; source: ConfigSource } => {
+    let found: { value: T; source: ConfigSource } = { value: recipe, source: 'recipe' };
+    for (const [source, value] of set) if (value !== undefined) found = { value, source };
+    return found;
+  };
+  const cap = (key: 'maxAttempts' | 'maxRetries' | 'maxQuestions' | 'maxReplans') =>
+    pick(RECIPE_DEFAULTS[key], ['factory', factory[key]], ['project', project[key]]);
+  const limit = (key: keyof ConcurrencyOverride) =>
+    pick(
+      RECIPE_DEFAULTS.concurrency[key],
+      ['factory', factory.concurrency?.[key]],
+      ['project', project.concurrency?.[key]],
+      ['job', levels.job?.concurrency?.[key]],
+    );
+
+  const planApproval = narrowingChain(
+    'planApproval',
+    [
+      { source: 'factory', value: factory.planApproval },
+      { source: 'project', value: project.planApproval },
+    ],
+    { value: RECIPE_DEFAULTS.planApproval, source: 'recipe' },
+  );
+  if (!planApproval.ok)
+    return { ok: false, code: planApproval.code, message: planApproval.message };
+
+  const repositories: RepositoryEffectiveConfig[] = [];
+  const sorted = [...(levels.repositories ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  for (const repo of sorted) {
+    const merge = narrowingChain(
+      'mergePolicy',
+      [
+        { source: 'factory', value: factory.mergePolicy },
+        { source: 'project', value: project.mergePolicy },
+        { source: 'repository', name: repo.name, value: repo.mergePolicy },
+        { source: 'job', value: levels.job?.mergePolicy },
+      ],
+      { value: repo.mergePolicy, source: 'repository' },
+    );
+    if (!merge.ok) return { ok: false, code: merge.code, message: merge.message };
+    repositories.push({
+      repositoryId: repo.id,
+      name: repo.name,
+      mergePolicy: {
+        value: MergePolicySchema.parse(merge.value),
+        source: merge.source,
+        chain: merge.chain,
+      },
+      mergeMethod: { value: repo.mergeMethod, source: 'repository' },
+      setup: { value: repo.profile.setup ?? null, source: 'repository' },
+      commands: { value: repo.profile.commands, source: 'repository' },
+      sensitivePaths: { value: repo.profile.sensitivePaths, source: 'repository' },
+      requiredChecks: { value: repo.profile.requiredChecks ?? [], source: 'repository' },
+      instructionFiles: { value: repo.profile.instructionFiles ?? [], source: 'repository' },
+    });
+  }
+
+  return {
+    ok: true,
+    config: {
+      maxAttempts: cap('maxAttempts'),
+      maxRetries: cap('maxRetries'),
+      toolPolicies: { value: DEFAULT_TOOL_POLICIES, source: 'recipe' },
+      maxQuestions: cap('maxQuestions'),
+      planApproval: {
+        value: PlanApprovalPolicySchema.parse(planApproval.value),
+        source: planApproval.source,
+        chain: planApproval.chain,
+      },
+      maxReplans: cap('maxReplans'),
+      concurrency: { perRepository: limit('perRepository'), perJob: limit('perJob') },
+      reviewRerunOnBaseChange: pick(
+        RECIPE_DEFAULTS.reviewRerunOnBaseChange,
+        ['factory', factory.review?.rerunOnBaseChange],
+        ['project', project.review?.rerunOnBaseChange],
+      ),
+      repositories,
+    },
+  };
+}
+
+/**
+ * The section of `repository` in a Job's Effective Configuration. A Job
+ * created before Phase D has none: its section is built from its frozen
+ * `mergePolicy` and `setup` and, for what it never froze (the merge method,
+ * the commands, the required checks), the Repository as it is now.
+ */
+export function repositoryConfigOf(
+  config: EffectiveConfig,
+  repository: RepositoryConfigLevel,
+): RepositoryEffectiveConfig {
+  const frozen = config.repositories.find((r) => r.repositoryId === repository.id);
+  if (frozen !== undefined) return frozen;
+  return {
+    repositoryId: repository.id,
+    name: repository.name,
+    mergePolicy: config.mergePolicy ?? { value: 'never_auto', source: 'repository' },
+    mergeMethod: { value: repository.mergeMethod, source: 'repository' },
+    setup: config.setup ?? { value: null, source: 'repository' },
+    commands: { value: repository.profile.commands, source: 'repository' },
+    sensitivePaths: { value: repository.profile.sensitivePaths, source: 'repository' },
+    requiredChecks: { value: repository.profile.requiredChecks ?? [], source: 'repository' },
+    instructionFiles: { value: repository.profile.instructionFiles ?? [], source: 'repository' },
+  };
+}
+
+/**
+ * A Task's `maxAttempts`: the Plan's narrower cap (source `task`; Plan
+ * validation refuses a wider one, ADR-0017), else the Job's.
+ */
+export function taskMaxAttempts(
+  config: EffectiveConfig,
+  planned: number | undefined,
+): { value: number; source: ConfigSource } {
+  return planned === undefined ? config.maxAttempts : { value: planned, source: 'task' };
+}
+
+/**
+ * `GET /v1/projects/:ref/effective-config` and `GET /v1/repositories/:id/effective-config`:
+ * the Effective Configuration a new Job of the Project would freeze now, with no Job-level
+ * overrides (ADR-0059). Resolved at each read, never stored. A Repository's preview keeps
+ * only that Repository's section.
+ */
+export const EffectiveConfigPreviewSchema = z.object({
+  projectId: z.string(),
+  projectName: z.string(),
+  /** The Repository the preview is for; `null` for a Project's (every section). */
+  repositoryId: z.string().nullable(),
+  config: EffectiveConfigSchema,
+});
+export type EffectiveConfigPreview = z.infer<typeof EffectiveConfigPreviewSchema>;
 
 // ---- Job API contracts ------------------------------------------------------
 
@@ -632,10 +828,23 @@ export const StageRunSchema = z.object({
 });
 export type StageRun = z.infer<typeof StageRunSchema>;
 
+/** A Repository a Job touches, as the Job API shows it. */
+export const JobRepositorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+});
+export type JobRepository = z.infer<typeof JobRepositorySchema>;
+
 export const JobSummarySchema = z.object({
   id: z.string(),
   projectId: z.string(),
-  repositoryId: z.string(),
+  /**
+   * The Repositories the Job touches (one or more of its Project's, ADR-0052),
+   * by name. Empty only while triage has yet to choose them (ADR-0067).
+   */
+  repositories: z.array(JobRepositorySchema),
+  /** Who chose `repositories`: the operator (named, or the Project's only one) or triage (ADR-0067). */
+  repositorySetBy: RepositorySetBySchema,
   title: z.string(),
   type: JobTypeSchema,
   status: JobStatusSchema,
@@ -659,8 +868,35 @@ export const JobSchema = JobSummarySchema.extend({
   replanRequested: z.boolean(),
   /** Replans used, against `maxReplans`. */
   replans: z.object({ used: z.number().int(), max: z.number().int() }),
+  /**
+   * The Delivery Order of the newest persisted Plan (ADR-0052, ADR-0065): its
+   * Repositories upstream first. `null` before a Plan's Tasks exist.
+   */
+  deliveryOrder: DeliveryOrderSchema.nullable(),
+  /**
+   * The GitHub issue the Job came from (#112, ADR-0072): an approved intake
+   * item, or `job create --from-issue`. `null` for any other Job.
+   */
+  sourceIssue: SourceIssueSchema.nullable(),
 });
 export type Job = z.infer<typeof JobSchema>;
+
+/**
+ * `POST /v1/jobs/from-issue` (`job create --from-issue owner/name#N`, #112):
+ * a Job from a GitHub issue of a registered Repository, its title and
+ * untrusted description from the issue. Its Repository set is the issue's
+ * Repository and any others named, all of one Project.
+ */
+export const CreateJobFromIssueInputSchema = z.object({
+  issue: z.string().refine((text) => parseIssueRef(text).ok, {
+    message: 'must be a GitHub issue as owner/name#N (for example acme/widgets#12)',
+  }),
+  /** More Repositories (ids) of the issue's Repository's Project. */
+  repositoryIds: z.array(z.string().min(1)).max(20).optional(),
+  concurrency: ConcurrencyOverrideSchema.optional(),
+  mergePolicy: MergePolicySchema.optional(),
+});
+export type CreateJobFromIssueInput = z.infer<typeof CreateJobFromIssueInputSchema>;
 
 /** `POST /v1/jobs/:id/replan` (`requestReplan`, ADR-0029). */
 export const RequestReplanInputSchema = z.object({
@@ -670,15 +906,48 @@ export const RequestReplanInputSchema = z.object({
 export type RequestReplanInput = z.infer<typeof RequestReplanInputSchema>;
 
 /** `POST /v1/jobs`. */
-export const CreateJobInputSchema = z.object({
-  repositoryId: z.string().min(1),
-  title: z.string().trim().min(1).max(200),
-  description: z.string().max(20_000).default(''),
-  /** Overrides of the Effective Configuration's concurrency limits, up or down (ARCHITECTURE §12). */
-  concurrency: ConcurrencyOverrideSchema.optional(),
-  /** A Merge Policy at least as strict as the Repository's (PRODUCT_SPEC §9); a looser one is refused. */
-  mergePolicy: MergePolicySchema.optional(),
-});
+export const CreateJobInputSchema = z
+  .object({
+    /**
+     * The Project, by id or name. Unset: the Repositories' Project, or else the only
+     * Project; with several, the request is refused (PRODUCT_SPEC §5, ADR-0055).
+     */
+    project: z.string().min(1).optional(),
+    /**
+     * One Repository: the same as `repositoryIds` with one entry. Neither: the
+     * Project's only Repository; with several, triage chooses the set (ADR-0067).
+     */
+    repositoryId: z.string().min(1).optional(),
+    /**
+     * The Repositories of a multi-repo Job (ADR-0052, ADR-0065), all of one
+     * Project, each once. Triage can't change a named set.
+     */
+    repositoryIds: z.array(z.string().min(1)).min(1).max(20).optional(),
+    title: z.string().trim().min(1).max(200),
+    description: z.string().max(20_000).default(''),
+    /** Overrides of the Effective Configuration's concurrency limits, up or down (ARCHITECTURE §12). */
+    concurrency: ConcurrencyOverrideSchema.optional(),
+    /** A Merge Policy at least as strict as each Repository's (PRODUCT_SPEC §9); a looser one is refused. */
+    mergePolicy: MergePolicySchema.optional(),
+  })
+  .superRefine((input, ctx) => {
+    if (input.repositoryId !== undefined && input.repositoryIds !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['repositoryIds'],
+        message: 'name the Repositories with repositoryId or repositoryIds, not both',
+      });
+    }
+    const ids = input.repositoryIds ?? [];
+    const repeated = ids.filter((id, i) => ids.indexOf(id) !== i);
+    if (repeated.length > 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['repositoryIds'],
+        message: `each Repository is named once (${[...new Set(repeated)].join(', ')} more than once)`,
+      });
+    }
+  });
 export type CreateJobInput = z.infer<typeof CreateJobInputSchema>;
 
 /** `POST /v1/jobs/:id/cancel`. `expectedVersion` is the Job version the caller saw. */
@@ -708,6 +977,13 @@ export const ArtifactKindSchema = z.enum([
   'replan_request',
   /** A re-specification asked for by a `spec` Finding or a human (ADR-0031), never regenerated. */
   'respec_request',
+  /**
+   * A proposal Stage Run's output that stopped on its questions (ADR-0071):
+   * kept, never applied and never regenerated; the next Stage Run reads it.
+   */
+  'clarification',
+  /** The Technical decisions an agent made in a proposal Stage Run, ADR-style (ADR-0071). */
+  'decision_record',
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 

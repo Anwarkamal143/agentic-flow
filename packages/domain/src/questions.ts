@@ -18,10 +18,12 @@ import type { Blocker } from './rework.js';
 export const InboxQuestionSchema = z.object({
   /**
    * `q1`, `q2`, … in the Task Result's order; `scope` for a scope change
-   * request; `worktrees`, `pull_request`, `remote_branch` on a cleanup item.
+   * request; `worktrees`, `pull_request`, `remote_branch` on a cleanup item,
+   * `<repo>.<question>` when its Job has several Repositories (ADR-0069).
    */
   id: z.string(),
-  source: z.enum(['question', 'scope_change_request', 'cleanup']),
+  /** `clarification`: a proposal Stage's question for a human (ADR-0071). */
+  source: z.enum(['question', 'scope_change_request', 'cleanup', 'clarification']),
   text: z.string(),
   /** The agent's proposed answers; a human may also answer in free text. */
   options: z.array(z.string()),
@@ -33,12 +35,17 @@ export const InboxQuestionSchema = z.object({
   agentProposed: z.boolean(),
   /** For a scope change request: the paths the agent asked for (never granted). */
   paths: z.array(z.string()),
+  /** A `clarification` question's category; the batch is grouped by it (ADR-0071). */
+  category: z.enum(['product', 'security', 'operational']).optional(),
+  /** A Security question needs a human with approver rights (PRODUCT_SPEC §5); a mark only for a single-user factory. */
+  requiresApprover: z.boolean().optional(),
 });
 export type InboxQuestion = z.infer<typeof InboxQuestionSchema>;
 
 /** One answer: an offered option, or free text. */
 export const QuestionAnswerSchema = z.object({
-  questionId: z.string().min(1).max(40),
+  /** At most 300: a multi-repo cleanup key is `<repo>.<question>`, a Repository name up to 255 (ADR-0069). */
+  questionId: z.string().min(1).max(300),
   option: z.string().max(5000).optional(),
   text: z.string().max(5000).optional(),
 });

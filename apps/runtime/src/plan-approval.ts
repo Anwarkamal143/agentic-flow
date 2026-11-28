@@ -18,6 +18,7 @@ import { readJobState, type JobState, type StageRunStepper } from './engine.js';
 import { currentSpec } from './criteria.js';
 import { newId } from './ids.js';
 import { settleExecution } from './execution.js';
+import { repositorySetToConfirm } from './repository-set.js';
 
 type StageRunRow = JobState['stageRuns'][number];
 
@@ -42,7 +43,9 @@ export function queueNextStage(
     return;
   }
   const policy = EffectiveConfigSchema.parse(JSON.parse(job.configSnapshotJson)).planApproval;
-  if (policy.value === 'skip') {
+  // A triage-chosen set of more than one waits for a human even under skip (ADR-0067).
+  const repositorySet = repositorySetToConfirm(tx, jobId);
+  if (policy.value === 'skip' && repositorySet === null) {
     step(next, 'skipped', { reason: `planApproval: skip (from ${policy.source})` });
     queueNextStage(tx, jobId, step, next.position, actor);
     return;
@@ -50,7 +53,10 @@ export function queueNextStage(
   step(next, 'queued');
   step(reread(tx, next.id), 'running');
   step(reread(tx, next.id), 'waiting_human', {
-    reason: `planApproval: required (from ${policy.source}); waiting for a human to approve or reject the Plan`,
+    reason:
+      repositorySet === null
+        ? `planApproval: required (from ${policy.source}); waiting for a human to approve or reject the Plan`
+        : `triage chose the Repositories ${repositorySet.join(', ')}; waiting for a human to confirm them by approving or rejecting the Plan (planApproval: ${policy.value}, from ${policy.source})`,
   });
   openPlanItem(tx, jobId, next.id, actor);
 }
@@ -84,6 +90,7 @@ export function openPlanItem(tx: Tx, jobId: string, stageRunId: string, actor: s
   const plan = latestArtifact(tx, jobId, 'plan');
   if (plan === undefined) throw new Error(`Job ${jobId} reached plan_approval without a Plan`);
   const spec = currentSpec(tx, jobId);
+  const repositorySet = repositorySetToConfirm(tx, jobId);
   const id = newId('apr');
   const kind: ApprovalKind = 'plan';
   const expiresPolicy: ExpiresPolicy = 'remain_pending';
@@ -94,8 +101,14 @@ export function openPlanItem(tx: Tx, jobId: string, stageRunId: string, actor: s
       stageRunId,
       kind,
       subjectRef: plan.id,
-      question: 'Approve this Plan?',
-      why: 'Every new Plan waits for a human before any Task runs (planApproval: required). Review it with: factory plan show <job>.',
+      question:
+        repositorySet === null
+          ? 'Approve this Plan?'
+          : `Approve this Plan and the Repositories triage chose (${repositorySet.join(', ')})?`,
+      why:
+        repositorySet === null
+          ? 'Every new Plan waits for a human before any Task runs (planApproval: required). Review it with: factory plan show <job>.'
+          : `No Repository was named when the Job was created, so triage chose ${repositorySet.join(', ')} from the Project's Repositories. A triage-chosen set of more than one waits for a human before any Task runs, even under planApproval: skip; approving confirms it. To change the set, reject and create the Job again with --repo. Review it with: factory plan show <job>.`,
       optionsJson: JSON.stringify(PLAN_APPROVAL_OPTIONS),
       recommended: null,
       evidenceJson: JSON.stringify(spec === undefined ? [plan.id] : [spec.id, plan.id]),

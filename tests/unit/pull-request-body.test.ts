@@ -76,6 +76,8 @@ function input(overrides: Partial<PullRequestBodyInput> = {}): PullRequestBodyIn
     foreignCommits: [],
     droppedCommits: [],
     changedFiles: 2,
+    multiRepository: null,
+    issue: null,
     ...overrides,
   };
 }
@@ -248,6 +250,70 @@ describe('renderPullRequestBody', () => {
     expect(body).not.toContain(secret);
     expect(body).toContain('[REDACTED');
     expect(hasFactoryMarker(body, 'job_01')).toBe(true);
+  });
+
+  it('has no multi-repository section in a single-repo Job', () => {
+    const body = renderPullRequestBody(input(), identity);
+    expect(body).not.toContain('multi-repository');
+    expect(body).not.toContain('not atomic');
+  });
+
+  describe('in a multi-repo Job (#106, ADR-0052)', () => {
+    const web = (state: 'open' | 'merged' | null) =>
+      input({
+        multiRepository: {
+          repository: 'web',
+          order: [
+            {
+              repository: 'api',
+              after: [],
+              pullRequest:
+                state === null
+                  ? null
+                  : { label: 'acme/api#12', url: 'https://github.test/acme/api/pull/12', state },
+            },
+            {
+              repository: 'web',
+              after: ['api'],
+              pullRequest: {
+                label: 'acme/web#13',
+                url: 'https://github.test/acme/web/pull/13',
+                state: 'open',
+              },
+            },
+          ],
+        },
+      });
+
+    it('lists the sibling PRs, the Delivery Order and that the PRs are not atomic, after the opening line', () => {
+      const body = renderPullRequestBody(web('open'), identity);
+      const section = body.slice(
+        body.indexOf('## Part of a multi-repository Job'),
+        body.indexOf('## Summary'),
+      );
+      expect(body.indexOf('## Part of a multi-repository Job')).toBeGreaterThan(0);
+      expect(section.trim()).toBe(
+        [
+          '## Part of a multi-repository Job',
+          '',
+          'This pull request is one of 2, one per Repository of Job `job_01`. **The pull requests are not atomic: each is merged on its own, and one can be merged while another is not.**',
+          '',
+          'Delivery Order: `api` → `web`. Merge them in this order: the Merge Gate of a later Repository waits until the pull requests it comes after have merged.',
+          '',
+          '- 1. `api`: acme/api#12 ([link](https://github.test/acme/api/pull/12)), open',
+          '- 2. `web`, after `api`: this pull request',
+        ].join('\n'),
+      );
+    });
+
+    it('says a sibling is not opened yet, and is re-rendered with it once it opens or merges', () => {
+      expect(renderPullRequestBody(web(null), identity)).toContain(
+        '- 1. `api`: no pull request opened yet',
+      );
+      expect(renderPullRequestBody(web('merged'), identity)).toContain(
+        '- 1. `api`: acme/api#12 ([link](https://github.test/acme/api/pull/12)), merged',
+      );
+    });
   });
 
   it('carries the hidden factory marker of its Job', () => {

@@ -1,6 +1,7 @@
 import type { GitHubState, JobSummary } from '@factory/domain';
 import Link from 'next/link';
 import { connection } from 'next/server';
+import { Repositories } from '@/components/job-sections';
 import { LiveRefresh } from '@/components/live';
 import { GitHubPauseNotice, RuntimeUnavailableNotice } from '@/components/states';
 import { Badge } from '@/components/ui/badge';
@@ -47,6 +48,7 @@ export default async function JobsPage() {
               <TableHead>Title</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Stage</TableHead>
+              <TableHead>Repositories</TableHead>
               <TableHead>Created</TableHead>
               <TableHead>Id</TableHead>
             </TableRow>
@@ -66,6 +68,9 @@ export default async function JobsPage() {
                   <Badge variant={stateVariant(job.status)}>{humanize(job.status)}</Badge>
                 </TableCell>
                 <TableCell>{job.currentStage}</TableCell>
+                <TableCell>
+                  <Repositories repositories={job.repositories} setBy={job.repositorySetBy} />
+                </TableCell>
                 <TableCell className="whitespace-nowrap">{formatTime(job.createdAt)}</TableCell>
                 <TableCell className="font-mono text-xs">{job.id}</TableCell>
               </TableRow>

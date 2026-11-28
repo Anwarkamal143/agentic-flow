@@ -24,6 +24,8 @@ import {
   integrationBranch,
   IntegrationRewriteRouteSchema,
   isCurrent,
+  isPushPermissionRefusal,
+  NOT_WRITABLE_ACTION,
   PlanProposalSchema,
   PullRequestRecordSchema,
   pullRequestDelivery,
@@ -40,8 +42,11 @@ import {
   type PullRequestBodyInput,
   type PullRequestRecord,
   type Redactor,
+  issueLabel,
+  issueReferenceLine,
+  SourceIssueSchema,
 } from '@factory/domain';
-import { changedPaths, git } from '@factory/git';
+import { changedPaths, git, GitError } from '@factory/git';
 import type { GitHubFailure, GitHubPort, PullRequest } from '@factory/github';
 import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -59,6 +64,7 @@ import { latestStageRun } from './replan.js';
 import { describeTriggers, ensureComment, triggersAnswered } from './pr-feedback.js';
 import { defaultBranchTip, startBaseMergeIn } from './base-change.js';
 import { foreignCommitsOf, foreignHeadsOf } from './foreign-push.js';
+import { multiRepositoryOf, storedDeliveryOrder } from './multi-repo.js';
 import { createHash } from 'node:crypto';
 
 /** The Task scheduler, which runs this Stage. */
@@ -221,6 +227,13 @@ export function nextPullRequest(db: FactoryDb): { id: string; jobId: string } | 
 
 /** Thrown out of the Stage's work: GitHub or git refused something retrying won't fix. */
 class DeliveryFailed extends Error {}
+
+/**
+ * GitHub refused a push for lack of permission (#108, ADR-0068): not a
+ * delivery failure but the `repository_not_writable` Blocker, so the Stage
+ * waits for a human to fix the permission and check again.
+ */
+class PushNotPermitted extends Error {}
 
 interface DeliveryTarget {
   job: typeof schema.jobs.$inferSelect;
@@ -619,7 +632,14 @@ export async function runPullRequest(
   if (job === undefined) throw new Error(`no Job ${jobId}`);
 
   try {
-    for (const { task, repo } of integrationTasksOf(db, jobId)) {
+    // In Delivery Order (ADR-0066): an earlier Repository's PR opens first, so a later
+    // one's body names it; the poller re-renders the earlier body once the later opens.
+    const order = (storedDeliveryOrder(db, jobId) ?? []).map((r) => r.repositoryId);
+    const rank = (id: string) => (order.includes(id) ? order.indexOf(id) : order.length);
+    const targets = integrationTasksOf(db, jobId).sort((a, b) => rank(a.repo.id) - rank(b.repo.id));
+    // A push refused for lack of permission holds its Repository; the others go on (#108).
+    const refused: { task: TaskRow; attempt: AttemptRow; detail: string }[] = [];
+    for (const { task, repo } of targets) {
       const coordinates = coordinatesOf(repo);
       if (coordinates === null) continue; // delivered locally (the report says so)
       const recorded = currentPullRequest(db, jobId, repo.id);
@@ -644,35 +664,19 @@ export async function runPullRequest(
       if (route === 'none') continue;
       if (!stillRunning(db, stageRunId) || deps.closed()) return;
       const target = { job, task, repo, coordinates, attempt, stageRunId };
-      if (route === 'open') {
-        if (!(await openPullRequest(deps, { ...target, branch: integrationBranch(jobId) }))) return;
+      let go: 'next' | 'stop';
+      try {
+        go = await deliverTo(deps, target, route, recorded, rewrite);
+      } catch (err) {
+        if (!(err instanceof PushNotPermitted)) throw err;
+        refused.push({ task, attempt, detail: err.message });
         continue;
       }
-      if (recorded === undefined) throw new Error(`a ${route} without a recorded pull request`);
-      if (route === 'needs_approval') {
-        // A rebuilt Integration Branch (#65, Q25): never force-pushed on the factory's judgment.
-        waitOnRewrite(deps, { ...target, recorded });
-        return;
-      }
-      if (route === 'new_pr') {
-        if (rewrite === undefined) throw new Error('new_pr without a decision');
-        const opened = await openPullRequest(deps, {
-          ...target,
-          branch: nextPublishedBranch(db, recorded),
-          replacing: { recorded, approvalId: rewrite.approvalId },
-        });
-        if (!opened) return;
-        continue;
-      }
-      // Feedback was reworked (ADR-0039), the base merged in (ADR-0041), or a human approved
-      // force-pushing the rebuilt branch (#65): the same PR is updated in place.
-      const updated = await updateInPlace(deps, {
-        ...target,
-        branch: recorded.headBranch,
-        recorded,
-        force: route === 'force_push' && rewrite !== undefined ? rewrite : null,
-      });
-      if (!updated) return; // shutting down: resumed at the next start
+      if (go === 'stop') return;
+    }
+    if (refused.length > 0) {
+      blockNotPermitted(deps, stageRunId, jobId, refused);
+      return;
     }
   } catch (err) {
     if (!(err instanceof DeliveryFailed)) throw err;
@@ -686,6 +690,93 @@ export async function runPullRequest(
     step(run, 'succeeded');
     // merge_approval waits for the merge (feature v6); a v5 Job goes straight to closure.
     if (!openMergeApproval(tx, state, step)) queueClosure(state, step);
+  });
+  deps.onCommit();
+}
+
+/**
+ * One Repository's delivery by its route: `stop` when the Stage stops here
+ * (shutting down, a base merge-in, a foreign PR, a rewrite waiting on a
+ * human), `next` to go on to the next Repository.
+ */
+async function deliverTo(
+  deps: PullRequestDeps,
+  target: DeliveryTarget,
+  route: Exclude<ReturnType<typeof pullRequestDelivery>, 'none'>,
+  recorded: PullRequestRow | undefined,
+  rewrite: RewriteDecision | undefined,
+): Promise<'next' | 'stop'> {
+  const { db } = deps;
+  const jobId = target.job.id;
+  if (route === 'open') {
+    const opened = await openPullRequest(deps, { ...target, branch: integrationBranch(jobId) });
+    return opened ? 'next' : 'stop';
+  }
+  if (recorded === undefined) throw new Error(`a ${route} without a recorded pull request`);
+  if (route === 'needs_approval') {
+    // A rebuilt Integration Branch (#65, Q25): never force-pushed on the factory's judgment.
+    waitOnRewrite(deps, { ...target, recorded });
+    return 'stop';
+  }
+  if (route === 'new_pr') {
+    if (rewrite === undefined) throw new Error('new_pr without a decision');
+    const opened = await openPullRequest(deps, {
+      ...target,
+      branch: nextPublishedBranch(db, recorded),
+      replacing: { recorded, approvalId: rewrite.approvalId },
+    });
+    return opened ? 'next' : 'stop';
+  }
+  // Feedback was reworked (ADR-0039), the base merged in (ADR-0041), or a human approved
+  // force-pushing the rebuilt branch (#65): the same PR is updated in place.
+  const updated = await updateInPlace(deps, {
+    ...target,
+    branch: recorded.headBranch,
+    recorded,
+    force: route === 'force_push' && rewrite !== undefined ? rewrite : null,
+  });
+  return updated ? 'next' : 'stop'; // stop: shutting down, resumed at the next start
+}
+
+/**
+ * Holds `pull_request` on the `repository_not_writable` Blocker of the first
+ * refused push (#108, ADR-0068), with its Blocker Approval: the Stage Run is
+ * `blocked` (the Job stays blocked) until a human checks again (the Stage is
+ * queued again; the PRs already open are not touched) or cancels. Each
+ * refused Repository is named in an event.
+ */
+function blockNotPermitted(
+  deps: PullRequestDeps,
+  stageRunId: string,
+  jobId: string,
+  refused: readonly { task: TaskRow; attempt: AttemptRow; detail: string }[],
+): void {
+  const [first] = refused;
+  if (first === undefined) return;
+  changeJob(deps.db, { jobId, expectedVersion: 'current', actor: ACTOR }, (tx, state, step) => {
+    const run = state.stageRuns.find((r) => r.id === stageRunId);
+    if (run?.state !== 'running') return;
+    const blocker: Blocker = {
+      kind: 'infrastructure',
+      reason: 'repository_not_writable',
+      detail: refused.map((r) => r.detail).join('; '),
+      requiredAction: NOT_WRITABLE_ACTION,
+      taskId: first.task.id,
+      attemptId: first.attempt.id,
+      createdAt: new Date().toISOString(),
+    };
+    step(run, 'blocked', { blocker });
+    openBlockerItem(tx, { jobId, actor: ACTOR }, first.task, blocker, { stageRunId: run.id });
+    for (const r of refused) {
+      appendEvent(tx, {
+        entityKind: 'task',
+        entityId: r.task.id,
+        jobId,
+        type: 'pull_request.push_not_permitted',
+        actor: ACTOR,
+        payload: { attemptId: r.attempt.id, detail: r.detail },
+      });
+    }
   });
   deps.onCommit();
 }
@@ -747,6 +838,13 @@ async function push(
   } catch (err) {
     // git's output carries `remote:` lines GitHub wrote: untrusted, redacted, one line.
     const output = (err instanceof Error ? err.message : String(err)).replace(/\s*\n\s*/g, ' ');
+    // The permission refusal is in git's `remote:` lines, not only its last line (#108).
+    const stderr = err instanceof GitError ? err.stderr.replace(/\s*\n\s*/g, ' ').trim() : output;
+    if (isPushPermissionRefusal(stderr)) {
+      throw new PushNotPermitted(
+        `GitHub refused the push of ${branch} to ${repoLabel(repo)} for lack of permission: ${redact(stderr.slice(0, 1000))}`,
+      );
+    }
     throw new DeliveryFailed(`could not push ${branch} to ${repoLabel(repo)}: ${redact(output)}`);
   }
 }
@@ -1370,7 +1468,30 @@ export function pullRequestBodyInput(
       author: c.author,
     })),
     changedFiles,
+    multiRepository: multiRepositoryOf(db, job.id, task.repositoryId),
+    issue: issueOf(db, job, task.repositoryId),
   };
+}
+
+/**
+ * The issue line of an issue-sourced Job's PR (#112, ADR-0072): `Closes #N`
+ * in the issue's own Repository's PR, `Refs owner/name#N` in the others.
+ */
+function issueOf(
+  db: FactoryDb,
+  job: typeof schema.jobs.$inferSelect,
+  repositoryId: string,
+): PullRequestBodyInput['issue'] {
+  if (job.sourceIssueJson === null) return null;
+  const issue = SourceIssueSchema.parse(JSON.parse(job.sourceIssueJson));
+  const repo = db
+    .select()
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .get();
+  if (repo?.githubOwner == null || repo.githubName === null) return null;
+  const line = issueReferenceLine(issue, { owner: repo.githubOwner, name: repo.githubName });
+  return { line, closes: line.startsWith('Closes '), label: issueLabel(issue) };
 }
 
 /** The files `attempt`'s head changes against its base, in the Factory Clone: 0 is an empty delivery. */
@@ -1416,6 +1537,8 @@ export function toPullRequestRecord(
     ...row,
     replacedByNumber: replacedBy?.number ?? null,
     changesRequestedBy: JSON.parse(row.changesRequestedJson) as unknown,
+    mergedBefore:
+      row.mergedBeforeJson === null ? [] : (JSON.parse(row.mergedBeforeJson) as unknown),
     gate: row.gateJson === null ? null : (JSON.parse(row.gateJson) as unknown),
     checks,
   });

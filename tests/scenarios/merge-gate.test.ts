@@ -24,6 +24,8 @@ import {
 } from '../support/factory.js';
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
@@ -97,7 +99,7 @@ function oneTaskScript() {
     scope: { writable: ['src/a.ts'], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: 'test -f src/a.ts', criteria: ['AC-01'] }],
+    verification: [{ key: 'test', command: 'exists', args: ['src/a.ts'], criteria: ['AC-01'] }],
   };
   return scriptWith(
     { planning: [{ output: { tasks: [task] } }] },
@@ -154,10 +156,12 @@ async function githubHome(
 
 async function startJob(home: TestHome, gh: FakeGitHub, src: string) {
   const rt = await startRuntime(home, { env: { ...gh.gitEnv(), GH_ACCESS } });
+  await createProject(rt, 'demo');
   const added = await rt.home.cli(['repo', 'add', src, '--project', 'demo', '--yes']);
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   const res = await post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add a' });
   expect(res.status, 'create Job').toBe(201);
@@ -328,7 +332,7 @@ describe('the poller and the Merge Gate under never_auto', { timeout: 150_000 },
     expect(recorded).toMatchObject({ state: 'merged', mergeSha });
 
     const report = await reportOf(rt, job.id);
-    expect(report.reportVersion).toBe(6);
+    expect(report.reportVersion).toBe(7);
     expect(report.outcome).toBe('completed');
     expect(report.pullRequests).toEqual([expect.objectContaining({ state: 'merged', mergeSha })]);
     expect(report.pullRequests[0]?.ci?.checks).toEqual([

@@ -18,8 +18,10 @@ import {
   type RunningRuntime,
 } from '../support/factory.js';
 import {
-  json,
+  createProject,
+  declareCommands,
   jobSettled,
+  json,
   post,
   skipPlanApproval,
   waitForJob,
@@ -77,7 +79,7 @@ function docTask(key: string, dependsOn: string[] = [], writable = [`docs/${key}
     scope: { writable, forbidden: [] },
     dependsOn,
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: 'true', criteria: ['AC-01'] }],
+    verification: [{ key: 'test', command: 'pass', criteria: ['AC-01'] }],
   };
 }
 
@@ -134,11 +136,13 @@ async function runtimeWith(script: string, config: Record<string, unknown> = {})
   useFakeHarness(home, script);
   const rt = await startRuntime(home);
   const source = tinyTsRepo();
+  await createProject(rt, 'demo');
   const res = await rt.home.cli(['repo', 'add', source, '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId, config);
   return { rt, repo, source };
 }
@@ -255,7 +259,7 @@ describe(
 
       // The Delivery Report v3: says plainly that the Job failed, lists every Task, offers D only.
       const report = await reportOf(rt, job.id);
-      expect(report.reportVersion).toBe(6);
+      expect(report.reportVersion).toBe(7);
       expect(report.outcome).toBe('failed');
       expect(report.statement).toMatch(/The Job failed/);
       expect(report.statement).toMatch(/partial results/);

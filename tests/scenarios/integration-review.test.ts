@@ -20,6 +20,8 @@ import {
 } from '../support/factory.js';
 import {
   capAttempts,
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
@@ -94,7 +96,9 @@ function fileTask(key: string) {
     scope: { writable: [`src/${key}.ts`], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: `test -f src/${key}.ts`, criteria: ['AC-01'] }],
+    verification: [
+      { key: 'test', command: 'exists', args: [`src/${key}.ts`], criteria: ['AC-01'] },
+    ],
   };
 }
 
@@ -157,10 +161,12 @@ async function runtimeOn(
   const home = await initializedHome();
   useFakeHarness(home, script(src));
   const rt = await startRuntime(home);
+  await createProject(rt, 'demo');
   const added = await rt.home.cli(['repo', 'add', src, '--project', 'demo', '--yes']);
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   if (opts.maxAttempts === undefined) await skipPlanApproval(rt, repo.projectId);
   else await capAttempts(rt, repo.projectId, opts.maxAttempts);
   return { rt, src, repo };
@@ -254,8 +260,8 @@ describe('the Integration Review', { timeout: 120_000 }, () => {
     expect(
       integrationReviews.map((r) => [r.promptTemplate.id, r.outcome, r.headSha, r.baseSha]),
     ).toEqual([
-      ['integration-review-packet@1', 'changes_requested', merge.headSha, merge.baseSha],
-      ['integration-review-packet@1', 'approved', rework.headSha, merge.baseSha],
+      ['integration-review-packet@2', 'changes_requested', merge.headSha, merge.baseSha],
+      ['integration-review-packet@2', 'approved', rework.headSha, merge.baseSha],
     ]);
     expect(integrationReviews[0]?.findings).toMatchObject([
       { faultOrigin: 'implementation', blocking: true, problem: DUPLICATED },

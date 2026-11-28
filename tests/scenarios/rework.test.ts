@@ -17,14 +17,16 @@ import {
 } from '../support/factory.js';
 import {
   capAttempts,
+  createProject,
+  declareCommands,
   expectStoppedAtCap,
   json,
   onlyAttempt,
   post,
+  skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  skipPlanApproval,
 } from '../support/api.js';
 import { scriptWith, validReviewResponse, validTaskResponse } from '../support/scripts.js';
 
@@ -83,11 +85,13 @@ async function runWith(script: string, opts: { maxAttempts?: number } = {}) {
   const home = await initializedHome();
   useFakeHarness(home, script);
   const rt = await startRuntime(home);
+  await createProject(rt, 'demo');
   const res = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
   if (res.code !== 0) throw new Error(`repo add failed: ${res.stderr}`);
   const [repo] = await json<[{ id: string; projectId: string; clonePath: string }]>(
     rt.request('/v1/repositories'),
   );
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   if (opts.maxAttempts !== undefined) await capAttempts(rt, repo.projectId, opts.maxAttempts);
   const created = await post(rt, '/v1/jobs', {
@@ -243,15 +247,17 @@ describe('The path-scope Gate and Rework', () => {
     const first = await onlyAttempt<AttemptBody>(rt, job.id);
     expect(first).toMatchObject({ state: 'failed', exitReason: 'gates_failed' });
     expect(first.findings.map((f) => [f.rule, f.paths])).toEqual([
-      ['scope.forbidden', ['.github/workflows/ci.yml', 'package.json']],
-      ['scope.outside_writable', ['.env.local', 'lib/math.ts']],
+      // `.env.local` is a Sensitive Path (ADR-0061), so forbidden, not merely outside writable.
+      ['scope.forbidden', ['.env.local', '.github/workflows/ci.yml', 'package.json']],
+      ['scope.outside_writable', ['lib/math.ts']],
     ]);
     expect(first.exitDetail).toContain(
       '.github/workflows/ci.yml (added, matches forbidden .github/**)',
     );
     expect(first.exitDetail).toContain('package.json (deleted, matches forbidden package.json)');
+    expect(first.exitDetail).toContain('.env.local (added, matches forbidden .env*)');
     expect(first.exitDetail).toContain(
-      '[scope.outside_writable] the diff touches paths outside the writable scope (src/math.ts, test/**): .env.local (added), lib/math.ts (added)',
+      '[scope.outside_writable] the diff touches paths outside the writable scope (src/math.ts, test/**): lib/math.ts (added)',
     );
   });
 

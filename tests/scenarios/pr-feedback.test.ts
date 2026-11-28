@@ -29,6 +29,8 @@ import {
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
 import {
   capAttempts,
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
@@ -137,7 +139,7 @@ function script(reworks: number, gateFile?: string) {
     scope: { writable: ['src/a.ts'], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: 'test -f src/a.ts', criteria: ['AC-01'] }],
+    verification: [{ key: 'test', command: 'exists', args: ['src/a.ts'], criteria: ['AC-01'] }],
   };
   const integration = Array.from({ length: reworks }, (_, i) =>
     writes(
@@ -181,10 +183,12 @@ async function start(
     env: opts.crashAt === undefined ? env : { ...env, FACTORY_TEST_CRASH_AT: opts.crashAt },
   });
   const policy = opts.policy === undefined ? [] : ['--merge-policy', opts.policy];
+  await createProject(rt, 'demo');
   const added = await rt.home.cli(['repo', 'add', src, '--project', 'demo', '--yes', ...policy]);
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   if (opts.maxAttempts === undefined) await skipPlanApproval(rt, repo.projectId);
   else await capAttempts(rt, repo.projectId, opts.maxAttempts);
   const res = await post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add a' });
@@ -257,6 +261,11 @@ async function mergeItems(rt: RunningRuntime, jobId: string): Promise<ItemBody[]
 const commentPosts = (gh: FakeGitHub) =>
   gh.requests.filter((r) => r.method === 'POST' && /\/issues\/\d+\/comments$/.test(r.path));
 
+/** The Merge Policy frozen in the Job's one Repository section (ADR-0057). */
+interface FrozenMergePolicy {
+  repositories: { mergePolicy: { value: string } }[];
+}
+
 describe('the PR feedback loop', { timeout: 180_000 }, () => {
   it('C5: a CHANGES_REQUESTED review produces a Rework Attempt, updates the same PR in place, and re-runs the Integration Review on the new head', async () => {
     const { gh, rt, repo, job, pr } = await start();
@@ -310,7 +319,7 @@ describe('the PR feedback loop', { timeout: 180_000 }, () => {
     const newHead = rework.headSha;
     expect(newHead).not.toBe(firstHead);
     expect(reviews.map((r) => [r.promptTemplate.id, r.outcome, r.headSha])).toEqual([
-      ['integration-review-packet@1', 'approved', newHead],
+      ['integration-review-packet@2', 'approved', newHead],
     ]);
 
     // The same PR, updated in place: a fast-forward to the new head, the body re-rendered.
@@ -435,8 +444,8 @@ describe('the PR feedback loop', { timeout: 180_000 }, () => {
     const waiting = await readJob(rt, job.id);
     expect(waiting.status).toBe('waiting_human');
     expect(
-      (waiting as JobBody & { effectiveConfig: { mergePolicy: { value: string } } }).effectiveConfig
-        .mergePolicy.value,
+      (waiting as JobBody & { effectiveConfig: FrozenMergePolicy }).effectiveConfig.repositories[0]
+        ?.mergePolicy.value,
     ).toBe('human_approval');
     expect(stagesOf(waiting, 'integration_review')).toEqual(['skipped']);
     expect(stagesOf(waiting, 'merge_approval')).toEqual(['waiting_human']);
@@ -465,8 +474,8 @@ describe('the PR feedback loop', { timeout: 180_000 }, () => {
     expect(gh.requests.some((r) => r.method === 'PUT' && /\/merge$/.test(r.path))).toBe(false);
     const after = await readJob(rt, job.id);
     expect(
-      (after as JobBody & { effectiveConfig: { mergePolicy: { value: string } } }).effectiveConfig
-        .mergePolicy.value,
+      (after as JobBody & { effectiveConfig: FrozenMergePolicy }).effectiveConfig.repositories[0]
+        ?.mergePolicy.value,
     ).toBe('human_approval');
   });
 

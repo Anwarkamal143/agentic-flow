@@ -31,9 +31,10 @@ function entry(key: string, dependsOn: string[] = [], extra: Partial<PlanTaskPro
     dependsOn,
     acceptance: ['AC-01'],
     verification: [
-      { key: 'test', command: `test -f docs/${key}.md`, required: true, criteria: [] },
+      { key: 'test', command: 'exists', args: [`docs/${key}.md`], required: true, criteria: [] },
     ],
     priority: 'normal',
+    deferred: false,
     ...extra,
   } satisfies PlanTaskProposal;
 }

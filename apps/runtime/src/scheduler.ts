@@ -14,9 +14,11 @@ import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
 import {
+  ClarificationQuestionSchema,
   PlanProposalSchema,
   schemaIssues,
   SpecificationProposalSchema,
+  TriageProposalSchema,
   type ArtifactKind,
   type PlanContext,
   type RuleIssue,
@@ -32,16 +34,29 @@ import {
   type HarnessRawResult,
   type HarnessRun,
 } from '@factory/harness';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
+import { z } from 'zod';
+import { claimNextProposalStage, resumeProposalSlot } from './claim.js';
 import type { ArtifactStore } from './artifacts.js';
 import { changeJob, readJobState, stepTask, type JobState } from './engine.js';
 import { newId } from './ids.js';
 import { PassLoop } from './pass-loop.js';
+import {
+  clarificationRouteOf,
+  recordDecisions,
+  roundsOf,
+  roundsSummary,
+  stopOnQuestions,
+  type StageRound,
+} from './clarification.js';
 import { currentSpec } from './criteria.js';
 import { queueNextStage } from './plan-approval.js';
+import { applyTriageRepositorySet, repositoryCandidatesOf } from './repository-set.js';
 import {
+  commandsOf,
   persistPlanTasks,
   planContextOf,
+  sensitivePathsOf,
   replanRequestOf,
   repositoriesOf,
   type JobRepository,
@@ -49,12 +64,14 @@ import {
   cancelTaskItems,
 } from './plans.js';
 import {
+  CLARIFYING_STAGE_IDS,
   PROMPT_TEMPLATE_HASH,
   PROMPT_TEMPLATE_ID,
   PROPOSAL_STAGE_IDS,
   proposalStage,
   renderPrompt,
   type ProposalStage,
+  type RepositoryPromptProfile,
 } from './proposals.js';
 import {
   awaitSpecChange,
@@ -72,6 +89,8 @@ const PROPOSAL_MAX_TURNS = 30;
 
 export interface SchedulerOptions {
   db: FactoryDb;
+  /** The holder of the Project slots its claims take (`runtime:<pid>`, ADR-0050). */
+  holder: string;
   /** `undefined`: no Harness is configured, so queued Stages wait. */
   harness: AgentHarness | undefined;
   artifacts: ArtifactStore;
@@ -101,6 +120,8 @@ interface StageRunContext {
   rejected: RuleIssue[] | undefined;
   replan: ReplanRequest | undefined;
   respec: RespecRequest | undefined;
+  /** The Stage's earlier rounds it reads (ADR-0071). */
+  rounds: readonly StageRound[];
 }
 
 export class StageScheduler {
@@ -129,6 +150,10 @@ export class StageScheduler {
       )
       .all()
       .map((r) => r.id);
+    // A resumed Stage keeps its Job in flight: its Project slot passes to this runtime.
+    for (const id of this.orphans) {
+      resumeProposalSlot(this.opts.db, this.stageRun(id).jobId, this.opts.holder);
+    }
     this.loop.start();
   }
 
@@ -201,31 +226,18 @@ export class StageScheduler {
     }
   }
 
-  /** Moves the oldest Job's queued proposal Stage Run to `running`, and returns its id. */
+  /**
+   * Moves the first queued proposal Stage Run in the fair order whose Project
+   * has room (ADR-0050) to `running`, and returns its id.
+   */
   private claimNext(): string | undefined {
-    const next = this.opts.db
-      .select({ run: schema.stageRuns })
-      .from(schema.stageRuns)
-      .innerJoin(schema.jobs, eq(schema.jobs.id, schema.stageRuns.jobId))
-      .where(
-        and(
-          eq(schema.stageRuns.state, 'queued'),
-          inArray(schema.stageRuns.stageId, [...PROPOSAL_STAGE_IDS]),
-        ),
-      )
-      .orderBy(asc(schema.jobs.createdAt), asc(schema.stageRuns.position))
-      .limit(1)
-      .get();
-    if (next === undefined) return undefined;
-    changeJob(
-      this.opts.db,
-      { jobId: next.run.jobId, expectedVersion: 'current', actor: ACTOR },
-      (_, state, step) => {
-        step(requireStageRun(state, next.run.id, 'queued'), 'running');
-      },
-    );
+    const claimed = claimNextProposalStage(this.opts.db, {
+      holder: this.opts.holder,
+      actor: ACTOR,
+    });
+    if (claimed === undefined) return undefined;
     this.opts.onCommit();
-    return next.run.id;
+    return claimed.stageRunId;
   }
 
   private async runStage(harness: AgentHarness, stageRunId: string): Promise<void> {
@@ -233,7 +245,11 @@ export class StageScheduler {
     const stage = proposalStage(run.stageId);
     if (stage === undefined) throw new Error(`Stage ${run.stageId} is not a proposal Stage`);
     const { job } = readJobState(this.opts.db, run.jobId);
-    const repositories = this.repositoriesOf(job.id);
+    // Triage chooses the set of a Job created with none named (ADR-0067): it sees the
+    // Project's Repositories, and reads in the first one's Factory Clone.
+    const candidates =
+      stage.stageId === 'triage' ? repositoryCandidatesOf(this.opts.db, job.id) : null;
+    const repositories = candidates ?? this.repositoriesOf(job.id);
     const [cwd] = repositories.map((r) => r.clonePath);
     if (cwd === undefined) throw new Error(`Job ${job.id} has no Repository`);
     // A replan or re-specification request reaches its Stage as a section below, not as an
@@ -241,7 +257,11 @@ export class StageScheduler {
     const spec = currentSpec(this.opts.db, job.id)?.id;
     const inputs = this.opts.artifacts
       .listForJob(job.id)
-      .filter((a) => a.kind !== 'replan_request' && a.kind !== 'respec_request')
+      // A Stage's own earlier rounds reach it as their own section (ADR-0071).
+      .filter(
+        (a) =>
+          a.kind !== 'replan_request' && a.kind !== 'respec_request' && a.kind !== 'clarification',
+      )
       .filter((a) => a.kind !== 'spec' || a.id === spec)
       .map((a) => ({ kind: a.kind, content: this.opts.artifacts.readJson(a.id) }));
 
@@ -265,12 +285,26 @@ export class StageScheduler {
             spec: this.opts.artifacts.readJson(respec.specArtifactId),
           };
 
+    // A clarifying Stage re-run reads its earlier rounds and their answers (ADR-0071); a
+    // re-specification asks no human (it answers a Finding).
+    const rounds =
+      CLARIFYING_STAGE_IDS.includes(stage.stageId) && respec === undefined
+        ? roundsOf(this.opts.db, job.id, stage.stageId, (id) => this.opts.artifacts.readJson(id))
+        : [];
+
+    // The planner is told each Repository's frozen profile commands and Sensitive Paths.
+    const profiles =
+      stage.stageId === 'planning' ? this.promptProfiles(job, repositories) : undefined;
+
     let rejected: RuleIssue[] | undefined;
     for (let n = 1; n <= MAX_RUNS; n++) {
       const prompt = renderPrompt(stage, {
         job,
         repositories,
+        ...(candidates === null ? {} : { chooseRepositories: true }),
+        ...(profiles === undefined ? {} : { profiles }),
         inputs,
+        ...(rounds.length === 0 ? {} : { rounds }),
         ...(rejected === undefined ? {} : { rejected }),
         ...(replanInput === undefined ? {} : { replan: replanInput }),
         ...(respecInput === undefined ? {} : { respec: respecInput }),
@@ -281,7 +315,8 @@ export class StageScheduler {
         cwd,
         policy: toolPolicyOf(job.configSnapshotJson, stage.role),
         repositories,
-        context: { rejected, replan, respec },
+        candidates,
+        context: { rejected, replan, respec, rounds },
       });
       if (this.closed) return; // shutdown: left running, resumed at the next start
       if (this.stageRun(stageRunId).state !== 'running') return; // the Job was cancelled
@@ -313,10 +348,13 @@ export class StageScheduler {
       cwd: string;
       policy: ToolPolicy;
       repositories: readonly JobRepository[];
+      /** The Project's Repositories triage chooses from; `null`: the set is fixed. */
+      candidates: readonly JobRepository[] | null;
       context: StageRunContext;
     },
   ): Promise<Outcome> {
-    const { rejected, replan, respec } = input.context;
+    const { rejected, replan, respec, rounds } = input.context;
+    const clarification = roundsSummary(rounds);
     // A proposal Run is never re-attached: a Stage Run left running starts again.
     const spool = join(this.opts.spoolRoot, `${run.id}-${String(input.n)}`);
     rmSync(spool, { recursive: true, force: true });
@@ -348,6 +386,7 @@ export class StageScheduler {
       template: { id: PROMPT_TEMPLATE_ID, hash: PROMPT_TEMPLATE_HASH },
       ...(started.sessionRef === undefined ? {} : { sessionRef: started.sessionRef }),
       ...(rejected === undefined ? {} : { reprompt: { issues: rejected } }),
+      ...(clarification === undefined ? {} : { clarification }),
       ...(replan === undefined ? {} : { replan }),
       ...(respec === undefined
         ? {}
@@ -369,10 +408,12 @@ export class StageScheduler {
     const eventCount = await drained;
     this.current = undefined;
     rmSync(spool, { recursive: true, force: true });
-    const outcome = this.evaluate(
-      stage,
-      result,
-      await this.planContext(stage, run, input.repositories),
+    const outcome = respecAsks(
+      this.evaluate(stage, result, {
+        ...(await this.planContext(stage, run, input.repositories)),
+        repositoryCandidates: input.candidates,
+      }),
+      respec,
     );
     this.event(run, started.executionId, 'harness_run.finished', {
       stageRunId: run.id,
@@ -387,6 +428,19 @@ export class StageScheduler {
       ...(outcome.kind === 'invalid' ? { issues: outcome.issues } : {}),
     });
     return outcome;
+  }
+
+  private promptProfiles(
+    job: { configSnapshotJson: string },
+    repositories: readonly JobRepository[],
+  ): RepositoryPromptProfile[] {
+    const commands = commandsOf(this.opts.db, job, repositories);
+    const sensitive = sensitivePathsOf(this.opts.db, job, repositories);
+    return repositories.map((r) => ({
+      name: r.name,
+      commands: commands.get(r.id) ?? {},
+      sensitivePaths: sensitive.get(r.id) ?? [],
+    }));
   }
 
   /**
@@ -455,6 +509,27 @@ export class StageScheduler {
       { jobId: run.jobId, expectedVersion: 'current', actor: ACTOR },
       (tx, state, step) => {
         const current = requireStageRun(state, run.id, 'running');
+        // Categorized questions are routed in code (ADR-0071). Technical decisions are kept
+        // whatever happens; an output that stops on its questions is kept but not applied.
+        const questions = questionsOf(value);
+        recordDecisions(tx, this.opts.artifacts, { run: current, questions, actor: ACTOR });
+        if (respec === undefined && CLARIFYING_STAGE_IDS.includes(stage.stageId)) {
+          const route = clarificationRouteOf(tx, {
+            job: state.job,
+            stageId: stage.stageId,
+            questions,
+            readJson: (id) => this.opts.artifacts.readJson(id),
+          });
+          if (route.kind !== 'proceed') {
+            stopOnQuestions(
+              tx,
+              this.opts.artifacts,
+              { run: current, route, output: value, questions, actor: ACTOR },
+              step,
+            );
+            return;
+          }
+        }
         const artifact = this.opts.artifacts.record(
           tx,
           { jobId: run.jobId, stageRunId: run.id, kind: stage.kind, content },
@@ -498,6 +573,14 @@ export class StageScheduler {
           })),
         )
         .run();
+    }
+    if (kind === 'triage') {
+      applyTriageRepositorySet(tx, {
+        jobId: ctx.jobId,
+        proposal: TriageProposalSchema.parse(value),
+        artifactId: ctx.artifactId,
+        actor: ACTOR,
+      });
     }
     if (kind === 'plan') {
       persistPlanTasks(tx, PlanProposalSchema.parse(value), {
@@ -564,6 +647,31 @@ export class StageScheduler {
   private repositoriesOf(jobId: string): JobRepository[] {
     return repositoriesOf(this.opts.db, jobId);
   }
+}
+
+/** The categorized questions a valid proposal carries (triage and specification; none otherwise). */
+function questionsOf(value: unknown): z.infer<typeof ClarificationQuestionSchema>[] {
+  const questions = (value as { questions?: unknown } | null)?.questions;
+  return questions === undefined ? [] : z.array(ClarificationQuestionSchema).parse(questions);
+}
+
+/**
+ * A re-specification answers a Finding and asks no human (ADR-0071): its
+ * output may record Technical decisions only, else the usual re-prompt.
+ */
+function respecAsks(outcome: Outcome, respec: RespecRequest | undefined): Outcome {
+  if (outcome.kind !== 'valid' || respec === undefined) return outcome;
+  const asks = questionsOf(outcome.value).filter((q) => q.category !== 'technical');
+  if (asks.length === 0) return outcome;
+  return {
+    kind: 'invalid',
+    issues: [
+      {
+        rule: 'clarification.respecification',
+        message: `a re-specification answers the feedback and asks no one: decide technical questions yourself and remove the ${asks.map((q) => q.category).join(', ')} question(s)`,
+      },
+    ],
+  };
 }
 
 /** The Stage Run `id` of the Job being changed, which must be in state `expected`. */

@@ -94,6 +94,60 @@ export interface PullRequestBodyInput {
    * flagged at the top of the body. `null` when not counted.
    */
   changedFiles: number | null;
+  /**
+   * A multi-repo Job's PRs (ADR-0052, ADR-0066): this PR's Repository and the
+   * Delivery Order, each Repository with what it comes after and its current
+   * PR (`null` until it opens). `null` in a single-repo Job: no section.
+   */
+  multiRepository: {
+    repository: string;
+    order: readonly {
+      repository: string;
+      after: readonly string[];
+      pullRequest: { label: string; url: string; state: PullRequestState } | null;
+    }[];
+  } | null;
+  /**
+   * The issue an issue-sourced Job came from (#112, ADR-0072): `line` is
+   * `Closes #N` in the issue's own Repository's PR (`closes`) and `Refs
+   * owner/name#N` in the others (`issueReferenceLine`). `null`: no section.
+   */
+  issue: { line: string; closes: boolean; label: string } | null;
+}
+
+/** The PRs of a multi-repo Job are not atomic: said in each PR body and the Delivery Report. */
+export const NOT_ATOMIC =
+  'The pull requests are not atomic: each is merged on its own, and one can be merged while another is not.';
+
+/** The `## Part of a multi-repository Job` section of a PR body. */
+function multiRepositorySection(
+  jobId: string,
+  multi: NonNullable<PullRequestBodyInput['multiRepository']>,
+): string {
+  const entries = multi.order.map((r, i) => {
+    const after = r.after.length === 0 ? '' : `, after ${r.after.map((a) => code(a)).join(', ')}`;
+    const pr =
+      r.repository === multi.repository
+        ? 'this pull request'
+        : r.pullRequest === null
+          ? 'no pull request opened yet'
+          : `${line(r.pullRequest.label)}${link(r.pullRequest.url, 'link')}, ${r.pullRequest.state}`;
+    return `${String(i + 1)}. ${code(r.repository)}${after}: ${pr}`;
+  });
+  return [
+    '## Part of a multi-repository Job',
+    `This pull request is one of ${String(multi.order.length)}, one per Repository of Job ${code(jobId)}. **${NOT_ATOMIC}**`,
+    `Delivery Order: ${multi.order.map((r) => code(r.repository)).join(' → ')}. Merge them in this order: the Merge Gate of a later Repository waits until the pull requests it comes after have merged.`,
+    list(entries),
+  ].join('\n\n');
+}
+
+/** The `## Issue` section: the closing keyword in the issue's own Repository's PR only. */
+function issueSection(issue: NonNullable<PullRequestBodyInput['issue']>): string {
+  const why = issue.closes
+    ? `The Job came from issue ${issue.label}; merging this pull request closes it.`
+    : `The Job came from issue ${issue.label}, which belongs to another Repository of the Job: only the pull request of that Repository will close the issue, so merging this one leaves it open.`;
+  return `## Issue\n\n${issue.line}. ${why}`;
 }
 
 /**
@@ -106,9 +160,9 @@ export function emptyDeliveryNote(headSha: string, baseSha: string): string {
 }
 
 /** A link GitHub reported, shown only when it is an http(s) URL. */
-function link(url: string | null): string {
+function link(url: string | null, text = 'details'): string {
   if (url === null || !/^https?:\/\/[^\s()<>]+$/.test(url)) return '';
-  return ` ([details](${url}))`;
+  return ` ([${text}](${url}))`;
 }
 
 /** One line of a list item: newlines folded, so untrusted text can't open a new section. */
@@ -139,6 +193,10 @@ export function renderPullRequestBody(input: PullRequestBodyInput, redact: Redac
     ...(input.changedFiles === 0
       ? [`## No changes\n\n**${emptyDeliveryNote(input.headSha, input.baseSha)}**`]
       : []),
+    ...(input.issue === null ? [] : [issueSection(input.issue)]),
+    ...(input.multiRepository === null
+      ? []
+      : [multiRepositorySection(input.jobId, input.multiRepository)]),
     `## Summary\n\n**Problem.** ${line(input.spec.problem)}\n\n**Objective.** ${line(input.spec.objective)}`,
     `## Acceptance Criteria\n\n${list(
       input.criteria.map(
@@ -291,6 +349,11 @@ export const PullRequestRecordSchema = z.object({
   lastPolledAt: z.string().nullable(),
   /** The merge commit, once the poller saw the PR merged on GitHub. */
   mergeSha: z.string().nullable(),
+  /**
+   * The earlier PRs in Delivery Order that had not merged when this one was
+   * seen merged (#106, ADR-0066): an out-of-order merge. Empty otherwise.
+   */
+  mergedBefore: z.array(z.string()),
   /** GitHub's `mergeable_state` as last read. */
   mergeableState: z.string().nullable(),
   /** When the factory first saw the current head: the checks grace window starts here. */

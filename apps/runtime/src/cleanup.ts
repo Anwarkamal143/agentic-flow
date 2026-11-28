@@ -11,16 +11,25 @@
  * stopped tracking it; the remote branch is deleted only on an explicit yes.
  * The Task Branches are never deleted locally, and no uncommitted work is lost.
  */
-import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
+import {
+  appendEvent,
+  jobBound,
+  schema,
+  type FactoryDb,
+  type JobApprovalRow,
+  type Tx,
+} from '@factory/db';
 import {
   checkCleanupAnswers,
   cleanupChoices,
   CLEANUP_OPTIONS,
   cleanupItemText,
-  cleanupQuestions,
+  CLEANUP_WORKTREES,
   InboxDecisionSchema,
   InboxQuestionSchema,
+  jobCleanupQuestions,
   LEGACY_CLEANUP_OPTIONS,
+  splitCleanupKey,
   untrackedComment,
   untrackedMarker,
   type ApprovalKind,
@@ -28,6 +37,7 @@ import {
   type CleanupScope,
   type ExpiresPolicy,
   type QuestionAnswer,
+  type RepositoryCleanup,
 } from '@factory/domain';
 import { removeWorktree } from '@factory/git';
 import type { GitHubFailure, GitHubPort } from '@factory/github';
@@ -38,9 +48,10 @@ import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 import { label } from './merge-approval.js';
 import { PassLoop } from './pass-loop.js';
+import { repositoriesOf } from './plans.js';
 import { commitLeftovers, requireWorktree } from './worktree.js';
 
-type ApprovalRow = typeof schema.approvals.$inferSelect;
+type ApprovalRow = JobApprovalRow;
 type PullRequestRow = typeof schema.pullRequests.$inferSelect;
 
 /** What the worker needs of GitHub: close a PR, comment on it, delete its branch. */
@@ -65,14 +76,47 @@ function unmergedPullRequests(db: FactoryDb | Tx, jobId: string): PullRequestRow
     .all();
 }
 
-/** What a cancel left to clean up, from the rows. */
-function cleanupScopeOf(db: FactoryDb | Tx, jobId: string): CleanupScope {
+/** The Job's Repositories by name: the order a multi-repo cleanup asks in. */
+function jobRepositories(db: FactoryDb | Tx, jobId: string) {
+  return repositoriesOf(db, jobId).sort(
+    (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+  );
+}
+
+/**
+ * What a cancel left to clean up, per Repository of the Job, from the rows. A
+ * Job with several Repositories is asked per Repository (`<repo>.<question>`,
+ * ADR-0052); a single-repo Job as before.
+ */
+function cleanupOf(db: FactoryDb | Tx, jobId: string): RepositoryCleanup[] {
   const prs = unmergedPullRequests(db, jobId);
-  return {
-    preservedWorktrees: preservedWorktrees(db, jobId).length,
-    openPullRequests: prs.filter((p) => p.state === 'open').map(label),
-    remoteBranches: [...new Set(prs.map((p) => p.headBranch))],
+  const worktrees = preservedWorktrees(db, jobId);
+  const scope = (inRepo: (repositoryId: string) => boolean): CleanupScope => {
+    const own = prs.filter((p) => inRepo(p.repositoryId));
+    return {
+      preservedWorktrees: worktrees.filter((w) => inRepo(w.repositoryId)).length,
+      openPullRequests: own.filter((p) => p.state === 'open').map(label),
+      remoteBranches: [...new Set(own.map((p) => p.headBranch))],
+    };
   };
+  const repositories = jobRepositories(db, jobId);
+  if (repositories.length <= 1) {
+    // Everything of the Job, as before: one Repository, unprefixed keys.
+    return [{ repository: repositories[0]?.name ?? '', scope: scope(() => true) }];
+  }
+  return repositories.map((r) => ({ repository: r.name, scope: scope((id) => id === r.id) }));
+}
+
+/**
+ * The Repository name an item's answers are keyed by, for each of the Job's
+ * Repositories: `undefined` (bare keys) unless the item was asked per
+ * Repository, which its stored question keys tell (a bare key holds no dot).
+ */
+function answerPrefixes(db: FactoryDb | Tx, item: ApprovalRow): Map<string, string | undefined> {
+  const prefixed = cleanupQuestionsOf(item).some(
+    (q) => splitCleanupKey(q.id).repository !== undefined,
+  );
+  return new Map(jobRepositories(db, item.jobId).map((r) => [r.id, prefixed ? r.name : undefined]));
 }
 
 /**
@@ -89,14 +133,14 @@ export function openCleanupItem(tx: Tx, jobId: string, actor: string): string | 
     .where(and(eq(schema.approvals.jobId, jobId), eq(schema.approvals.kind, KIND)))
     .get();
   if (existing !== undefined) return undefined;
-  const scope = cleanupScopeOf(tx, jobId);
-  const questions = cleanupQuestions(scope);
+  const cleanup = cleanupOf(tx, jobId);
+  const questions = jobCleanupQuestions(cleanup);
   if (questions.length === 0) return undefined;
   const preserved = preservedWorktrees(tx, jobId);
   const prs = unmergedPullRequests(tx, jobId);
   const id = newId('apr');
   const expiresPolicy: ExpiresPolicy = 'remain_pending';
-  const { question, why } = cleanupItemText(scope);
+  const { question, why } = cleanupItemText(cleanup);
   tx.insert(schema.approvals)
     .values({
       id,
@@ -129,7 +173,7 @@ export function openCleanupItem(tx: Tx, jobId: string, actor: string): string | 
       subjectRef: jobId,
       worktrees: preserved.map((w) => ({ id: w.id, taskId: w.taskId, path: w.path })),
       pullRequests: prs.map((p) => ({ id: p.id, pullRequest: label(p), state: p.state })),
-      remoteBranches: scope.remoteBranches,
+      remoteBranches: [...new Set(prs.map((p) => p.headBranch))],
       questions: questions.map((q) => q.id),
     },
   });
@@ -162,7 +206,7 @@ export function openMissingCleanupItems(db: FactoryDb): number {
     .all();
   let opened = 0;
   for (const job of jobs) {
-    if (cleanupQuestions(cleanupScopeOf(db, job.id)).length === 0) continue;
+    if (jobCleanupQuestions(cleanupOf(db, job.id)).length === 0) continue;
     changeJob(db, { jobId: job.id, expectedVersion: 'current', actor: ACTOR }, (tx) => {
       if (openCleanupItem(tx, job.id, ACTOR) !== undefined) opened++;
     });
@@ -347,23 +391,25 @@ export class CleanupWorker {
         ),
       )
       .all()
+      .map(jobBound)
       .filter((row) => {
-        const choices = choicesOf(row);
-        // A kept item still comments on each PR it asked about; a Phase B keep does nothing.
-        return (
-          choices.discardWorktrees || (row.questionsJson !== null && askedAboutPullRequests(row))
+        const choices = choicesOf(this.db, row);
+        const discards = jobRepositories(this.db, row.jobId).some(
+          (r) => choices(r.id).discardWorktrees,
         );
+        // A kept item still comments on each PR it asked about; a Phase B keep does nothing.
+        return discards || (row.questionsJson !== null && askedAboutPullRequests(row));
       });
   }
 
   /** `true` once completed; `false` when a Worktree could not be removed (tried at the next start). */
   private async carryOut(item: ApprovalRow): Promise<boolean> {
-    const choices = choicesOf(item);
-    const removed = choices.discardWorktrees ? await this.discard(item) : [];
+    const choices = choicesOf(this.db, item);
+    const removed = await this.discard(item, choices);
     if (removed === undefined) return false;
     const pullRequests: { pullRequest: string; closed: boolean; branchDeleted: boolean }[] = [];
     for (const pr of unmergedPullRequests(this.db, item.jobId)) {
-      pullRequests.push(await this.untrack(item, pr, choices));
+      pullRequests.push(await this.untrack(item, pr, choices(pr.repositoryId)));
     }
     this.db.transaction(
       (tx) => {
@@ -517,16 +563,21 @@ export class CleanupWorker {
   }
 
   /**
-   * Removes the Job's preserved Worktrees. Returns what was removed, or
-   * `undefined` when one could not be (it stays `preserved`).
+   * Removes the Job's preserved Worktrees in each Repository whose Worktrees
+   * the human said to discard. Returns what was removed, or `undefined` when
+   * one could not be (it stays `preserved`).
    */
   private async discard(
     item: ApprovalRow,
+    choices: ChoicesOf,
   ): Promise<{ worktreeId: string; wipCommit: string | null }[] | undefined> {
     const { jobId } = item;
     const removed: { worktreeId: string; wipCommit: string | null }[] = [];
     const failed: string[] = [];
-    for (const worktree of preservedWorktrees(this.db, jobId)) {
+    const discarded = preservedWorktrees(this.db, jobId).filter(
+      (w) => choices(w.repositoryId).discardWorktrees,
+    );
+    for (const worktree of discarded) {
       const repo = this.db
         .select({ clonePath: schema.repositories.clonePath })
         .from(schema.repositories)
@@ -599,14 +650,19 @@ export class CleanupWorker {
   }
 }
 
-function choicesOf(row: ApprovalRow): CleanupChoices {
+/** A decided item's effect on each Repository of its Job (by id): only that Repository's answers. */
+type ChoicesOf = (repositoryId: string) => CleanupChoices;
+
+function choicesOf(db: FactoryDb, row: ApprovalRow): ChoicesOf {
   if (row.decisionJson === null) throw new Error(`cleanup item ${row.id} has no decision`);
-  return cleanupChoices(InboxDecisionSchema.parse(JSON.parse(row.decisionJson)));
+  const decision = InboxDecisionSchema.parse(JSON.parse(row.decisionJson));
+  const prefixes = answerPrefixes(db, row);
+  return (repositoryId) => cleanupChoices(decision, prefixes.get(repositoryId));
 }
 
 /** Whether the item asked about a PR or a remote branch (so each PR gets its comment). */
 function askedAboutPullRequests(row: ApprovalRow): boolean {
-  return cleanupQuestionsOf(row).some((q) => q.id !== 'worktrees');
+  return cleanupQuestionsOf(row).some((q) => splitCleanupKey(q.id).question !== CLEANUP_WORKTREES);
 }
 
 function preservedWorktrees(db: FactoryDb | Tx, jobId: string) {

@@ -73,7 +73,7 @@ Scope: multiple projects; repo discovery profiles (language, package manager, co
 
 Exit tests:
 1. **D1** A multi-repo job (api + web fixtures): an expand-style API task comes before the web task, with separate worktrees and PRs, and the delivery order is respected. The report states that the PRs are not atomic.
-2. **D2** Five jobs across three projects with `per_project_jobs: 1`: every project makes progress, and no project starves (a bound on the wait-time ratio).
+2. **D2** Five jobs across three projects with `per_project_jobs: 1`: every project makes progress, and no project starves: the longest mean ready-wait of any project is at most twice the shortest, a wait counted as the claims of other projects' work committed while it was ready (ADR-0058).
 3. **D3** A config change after job creation doesn't affect the running job (snapshot). The new job uses the new value. The effective-value UI shows the source level.
 4. **D4** A repo with an existing `CLAUDE.md`: registering the repo leaves the file byte-identical.
 5. **D5** One repo in a multi-repo job is not writable → that task is `blocked` with the exact reason, the other repos continue, and the report shows partial completion.

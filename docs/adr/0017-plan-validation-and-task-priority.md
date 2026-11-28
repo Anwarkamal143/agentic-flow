@@ -19,6 +19,8 @@
 
 ## Dispatch order
 
+*Superseded in Phase D by ADR-0050 and ADR-0058: both schedulers use the fair order (`fairOrder`), with aging and the project share; the tie-breaks below remain.*
+
 - Ready Tasks are taken by `tasks.priority` descending, then the time they became ready, then plan order (`READY_TASK_ORDER`, `apps/runtime/src/dispatch.ts`). This is the **MVP form of §12 step 1's** `effective_priority = priority_weight + aging(wait_time) − project_share_penalty`: the weight only, with ties broken by wait. Aging and the project share are v1.
 - It is global, not per Job: the earlier "oldest Job first" order is gone, so a high-priority Task of a newer Job runs before a normal one of an older Job.
 - **Time ready** is the `seq` of the Task's latest `task.ready` event (or `task.created` for a Task created ready), read by a subquery on the job's events. Events are written in the same transaction as the state change, so `seq` is the commit order of the transition. There is no `ready_at` column; adding one would be a schema change, and this ticket made none. If one is added later, it replaces the subquery and nothing else.

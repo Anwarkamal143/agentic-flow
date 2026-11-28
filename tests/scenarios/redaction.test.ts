@@ -17,16 +17,19 @@ import {
   useFakeHarness,
 } from '../support/factory.js';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
+  skipPlanApproval,
   waitForJob,
   type EventBody,
   type JobBody,
-  skipPlanApproval,
 } from '../support/api.js';
 import { filesUnder } from '../support/files.js';
 import { openStream } from '../support/sse.js';
 import {
+  FIXTURE_COMMANDS,
   scriptWith,
   validOutput,
   validReviewResponse,
@@ -55,7 +58,7 @@ describe('redaction', () => {
     const planning = validOutput('planning') as { tasks: { verification: unknown[] }[] };
     planning.tasks[0]?.verification.push({
       key: 'leak',
-      command: 'cat test/fixture.txt',
+      command: 'show-fixture',
       required: true,
     });
     const task = validTaskResponse();
@@ -78,9 +81,14 @@ describe('redaction', () => {
       ),
     );
     const rt = await startRuntime(home, { env: { GH_TOKEN: secret } });
+    await createProject(rt, 'demo');
     const added = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
     expect(added.code, added.stderr).toBe(0);
     const [repo] = await json<[{ id: string; projectId: string }]>(rt.request('/v1/repositories'));
+    await declareCommands(rt, repo.id, {
+      ...FIXTURE_COMMANDS,
+      'show-fixture': { run: 'cat test/fixture.txt' },
+    });
     await skipPlanApproval(rt, repo.projectId);
     const res = await post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add sum()' });
     expect(res.status).toBe(201);
@@ -188,11 +196,13 @@ describe('redaction', () => {
       const doctor = await rt.home.cli(['doctor']);
       expect(doctor.stdout).toMatch(new RegExp(`resolves +token reference ${reference}`));
 
+      await createProject(rt, 'demo');
       const added = await rt.home.cli(['repo', 'add', tinyTsRepo(), '--project', 'demo', '--yes']);
       expect(added.code, added.stderr).toBe(0);
       const [repo] = await json<[{ id: string; projectId: string }]>(
         rt.request('/v1/repositories'),
       );
+      await declareCommands(rt, repo.id);
       await skipPlanApproval(rt, repo.projectId);
       const created = await json<JobBody>(
         post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add sum()' }),

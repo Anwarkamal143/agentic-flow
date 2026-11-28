@@ -4,7 +4,8 @@
  * owned by the runtime, which is its single writer.
  *
  *   token          API bearer token, mode 0600
- *   config.json    operator config (workspace root, port, Harness, concurrency)
+ *   config.json    bootstrap config (workspace root, port, Harness, GitHub); factory-wide
+ *                  settings live in the database's Factory Level (ADR-0056)
  *   runtime.json   pid record of the running runtime (pidfile)
  *   factory.db     SQLite database (runtime only)
  *   artifacts/     immutable Artifact contents, named by content hash (runtime only)
@@ -18,7 +19,6 @@ import {
   BillingSchema,
   DEFAULT_CHECKS_GRACE_MS,
   DEFAULT_GITHUB_API_BASE_URL,
-  DEFAULT_GLOBAL_CONCURRENCY,
   GitHubApiBaseUrlSchema,
   PriceTableSchema,
   TokenReferenceTextSchema,
@@ -121,8 +121,9 @@ export const FactoryConfigSchema = z.object({
   port: z.number().int().min(0).max(65535),
   harness: HarnessConfigSchema.optional(),
   /**
-   * Task concurrency across the whole factory (ARCHITECTURE §12, ADR-0020).
-   * `global`: Tasks in flight at once, over every Job and Repository; 3 when unset.
+   * Stale (ADR-0056): `global` is copied into the Factory Level once, on the
+   * first start with the Factory Level, and ignored after; `factory doctor`
+   * warns while it is set. Still accepted so an older file stays valid.
    */
   concurrency: z
     .object({ global: z.number().int().min(1).max(64).optional() })
@@ -166,11 +167,6 @@ export function githubSettings(config: FactoryConfig): GitHubSettings {
     pollIntervalMs: config.github?.pollIntervalMs ?? DEFAULT_GITHUB_POLL_INTERVAL_MS,
     checksGraceMs: config.github?.checksGraceMs ?? DEFAULT_CHECKS_GRACE_MS,
   };
-}
-
-/** The global Task concurrency limit `config` sets, or the default. */
-export function globalConcurrency(config: FactoryConfig): number {
-  return config.concurrency?.global ?? DEFAULT_GLOBAL_CONCURRENCY;
 }
 
 /**

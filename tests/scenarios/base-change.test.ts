@@ -26,6 +26,8 @@ import {
 } from '../support/factory.js';
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
@@ -134,7 +136,9 @@ function script(reviews: Record<string, unknown>[]) {
     scope: { writable: [`src/${key}.ts`], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: `test-${key}`, command: `test -f src/${key}.ts`, criteria: ['AC-01'] }],
+    verification: [
+      { key: `test-${key}`, command: 'exists', args: [`src/${key}.ts`], criteria: ['AC-01'] },
+    ],
   });
   return scriptWith(
     { planning: [{ output: { tasks: [task('a'), task('b')] } }] },
@@ -172,10 +176,12 @@ async function start(
   });
   const rt = await startRuntime(home, { env: { ...gh.gitEnv(), GH_ACCESS } });
   const policy = opts.policy === undefined ? [] : ['--merge-policy', opts.policy];
+  await createProject(rt, 'demo');
   const added = await rt.home.cli(['repo', 'add', src, '--project', 'demo', '--yes', ...policy]);
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId, opts.projectConfig ?? {});
   const res = await post(rt, '/v1/jobs', { repositoryId: repo.id, title: 'Add a and b' });
   expect(res.status, 'create Job').toBe(201);
@@ -402,8 +408,8 @@ describe('a moved base (C2)', { timeout: 240_000 }, () => {
     ]);
     const newHead = String(attempts[1]?.headSha);
     expect(reviews.map((r) => [r.promptTemplate.id, r.headSha, r.reanchoredFrom])).toEqual([
-      ['integration-review-packet@1', attempts[0]?.headSha, null],
-      ['integration-review-packet@1', newHead, null],
+      ['integration-review-packet@2', attempts[0]?.headSha, null],
+      ['integration-review-packet@2', newHead, null],
     ]);
     expect(reviews[1]?.baseSha).toBe(movedBase);
     expect(reviews[1]?.sessionRef).not.toBeNull();

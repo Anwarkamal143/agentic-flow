@@ -1,0 +1,1 @@
+ALTER TABLE `jobs` ADD `repository_set_by` text DEFAULT 'operator' NOT NULL;

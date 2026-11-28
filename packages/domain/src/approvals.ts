@@ -13,6 +13,18 @@ export const ApprovalKindSchema = z.enum([
   'cleanup',
   /** One per PR `(head_sha, base_sha)`, held by `merge_approval` (#58, ADR-0037). */
   'merge',
+  /**
+   * Offers the contract step as a follow-up Job once every PR of a Job whose
+   * Plan deferred it has merged (ADR-0052, #110). Holds no Stage.
+   */
+  'contract_job',
+  /**
+   * Offers a Job from a GitHub issue that has its Repository's intake label
+   * (#112, ADR-0072). It comes before its Job: `jobId` is null until a
+   * human's `start_job` creates one. Cancelled, never approved, by
+   * `system:github-intake` when the issue is closed or unlabeled first.
+   */
+  'issue_job',
 ]);
 export type ApprovalKind = z.infer<typeof ApprovalKindSchema>;
 
@@ -40,14 +52,19 @@ export const InboxDecisionSchema = z.object({
   answers: z.array(QuestionAnswerSchema).optional(),
   /** A Blocker Approval's grant size, when its `grant` option was chosen (ADR-0026). */
   grant: z.number().int().positive().optional(),
+  /** A `contract_job` item's follow-up Job, created by its `start_job` decision (#110). */
+  followUpJobId: z.string().optional(),
+  /** An `issue_job` item's Job, created by its `start_job` decision (#112). */
+  jobId: z.string().optional(),
 });
 export type InboxDecision = z.infer<typeof InboxDecisionSchema>;
 
 /** One Inbox Item, as the API returns it. */
 export const ApprovalSchema = z.object({
   id: z.string(),
-  jobId: z.string(),
-  jobTitle: z.string(),
+  /** `null` only for an `issue_job` item: it comes before its Job (#112). */
+  jobId: z.string().nullable(),
+  jobTitle: z.string().nullable(),
   projectId: z.string(),
   repositoryId: z.string(),
   taskId: z.string().nullable(),

@@ -6,6 +6,9 @@
  */
 import picomatch from 'picomatch';
 import { z } from 'zod';
+import { ProposalQuestionsSchema } from './clarification.js';
+import { deliveryOrder } from './delivery-order.js';
+import type { ProfileCommand } from './profile.js';
 
 const text = z.string().trim().min(1).max(10_000);
 const shortText = z.string().trim().min(1).max(500);
@@ -19,8 +22,81 @@ export const TriageProposalSchema = z.object({
   summary: text,
   type: z.enum(['feature']),
   risk: RiskSchema,
+  /**
+   * The Repositories the Job changes, by name (ADR-0052, ADR-0067). Required
+   * when the Job's set is triage's to choose, from the Project's Repositories;
+   * ignored when the operator named it (or the Project has only one).
+   */
+  repositories: z.array(shortText).min(1).max(20).optional(),
+  /** Open questions, by category, routed in code (ADR-0071). */
+  questions: ProposalQuestionsSchema,
 });
 export type TriageProposal = z.infer<typeof TriageProposalSchema>;
+
+/** Who chose a Job's Repository set (ADR-0067): the operator (named, or the Project's only one), or triage. */
+export const RepositorySetBySchema = z.enum(['operator', 'triage']);
+export type RepositorySetBy = z.infer<typeof RepositorySetBySchema>;
+
+/**
+ * The triage checks (ADR-0067). `candidates` are the Project's Repositories
+ * when triage chooses the Job's set, `null` when the set is fixed: a fixed set
+ * is never judged, and a proposed one is ignored, never applied. A chosen set
+ * must be given, each name a Repository of the Project, each once. Pure.
+ */
+export function validateTriage(
+  proposal: TriageProposal,
+  candidates: readonly { id: string; name: string }[] | null,
+): RuleIssue[] {
+  if (candidates === null) return [];
+  const names = candidates.map((c) => c.name).sort();
+  const rule = 'triage.repositories';
+  if (proposal.repositories === undefined) {
+    return [
+      {
+        rule,
+        message: `choose the Repositories the Job changes, by name, from the Project's: ${names.join(', ')}`,
+      },
+    ];
+  }
+  const issues: RuleIssue[] = [];
+  for (const name of proposal.repositories) {
+    if (!names.includes(name)) {
+      issues.push({
+        rule,
+        message: `${name} is not a Repository of the Project (its Repositories: ${names.join(', ')})`,
+      });
+    }
+  }
+  for (const dup of duplicates(proposal.repositories)) {
+    issues.push({ rule, message: `${dup} is listed more than once` });
+  }
+  return issues;
+}
+
+/** The Repositories a valid triage proposal chose, ordered by name, then id. Pure. */
+export function triageRepositorySet<R extends { id: string; name: string }>(
+  proposal: TriageProposal,
+  candidates: readonly R[],
+): R[] {
+  const chosen = new Set(proposal.repositories ?? []);
+  return candidates
+    .filter((c) => chosen.has(c.name))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+}
+
+/**
+ * Whether entering `plan_approval` must wait for a human whatever the
+ * `planApproval` policy (ADR-0052, ADR-0067): a triage-chosen set of more than
+ * one Repository, until a Plan of the Job has been approved (which confirms
+ * the set). Pure.
+ */
+export function repositorySetNeedsConfirmation(input: {
+  setBy: RepositorySetBy;
+  count: number;
+  confirmed: boolean;
+}): boolean {
+  return input.setBy === 'triage' && input.count > 1 && !input.confirmed;
+}
 
 export const DiscoveryProposalSchema = z.object({
   summary: text,
@@ -48,6 +124,8 @@ export const SpecificationProposalSchema = z.object({
   edgeCases: z.array(shortText),
   securityConsiderations: z.array(shortText),
   definitionOfDone: z.array(shortText).min(1),
+  /** Open questions, by category, routed in code (ADR-0071). */
+  questions: ProposalQuestionsSchema,
 });
 export type SpecificationProposal = z.infer<typeof SpecificationProposalSchema>;
 
@@ -55,9 +133,27 @@ const slug = z
   .string()
   .regex(/^[a-z0-9][a-z0-9-]{0,39}$/, 'must be a lowercase slug (a-z, 0-9, -), at most 40 long');
 
+/**
+ * What an argument to a profile command must match (ADR-0051): no
+ * whitespace, quote, glob or shell metacharacter. Arguments are shell-quoted
+ * and appended to the command's `run` anyway.
+ */
+export const VERIFICATION_ARG_PATTERN = /^[A-Za-z0-9._/:=@+,-]+$/;
+
 export const VerificationCommandSchema = z.object({
   key: slug,
+  /**
+   * A Repository Profile command name (ADR-0051), resolved from the Job's
+   * frozen per-Repository section. `validatePlan` refuses any other string
+   * (`plan.verification_command`, #104); only a Plan accepted before #104
+   * can hold free shell.
+   */
   command: z.string().trim().min(1).max(1000),
+  /**
+   * Arguments appended to a profile command marked `acceptsArgs`, each
+   * matching {@link VERIFICATION_ARG_PATTERN} (checked by `validatePlan`).
+   */
+  args: z.array(z.string().max(200)).max(20).optional(),
   required: z.boolean().default(true),
   /**
    * Codes of the Task's Acceptance Criteria this command verifies. Its exit
@@ -66,6 +162,40 @@ export const VerificationCommandSchema = z.object({
   criteria: z.array(z.string()).default([]),
 });
 export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
+
+/** A verification entry as the factory runs it. */
+export interface ResolvedVerification {
+  /** The shell command run in the Worktree. */
+  run: string;
+  /** The profile command and arguments it names; `null`: a free shell command. */
+  profileCommand: { name: string; args: string[] } | null;
+}
+
+/**
+ * How a verification entry runs (ADR-0051): a name of one of `commands` (the
+ * Job's frozen profile commands of the Task's Repository) runs that command's
+ * `run` with each argument shell-quoted and appended. Plan validation refuses
+ * any other command (#104), so only an entry of a Plan accepted before #104
+ * runs as written, free shell with no arguments: a stored Plan is never
+ * re-validated or regenerated. Pure.
+ */
+export function resolveVerification(
+  entry: Pick<VerificationCommand, 'command' | 'args'>,
+  commands: Readonly<Record<string, ProfileCommand>>,
+): ResolvedVerification {
+  const args = entry.args ?? [];
+  const named = Object.hasOwn(commands, entry.command) ? commands[entry.command] : undefined;
+  const base = named?.run ?? entry.command;
+  return {
+    run: [base, ...args.map(shellQuote)].join(' '),
+    profileCommand: named === undefined ? null : { name: entry.command, args: [...args] },
+  };
+}
+
+/** `value` as one single-quoted POSIX shell word. */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
 
 export const TaskScopeSchema = z.object({
   writable: z.array(z.string()).min(1),
@@ -108,6 +238,17 @@ export const PlanTaskProposalSchema = z.object({
   priority: TaskPrioritySchema.default('normal'),
   /** Attempts this Task may take. It may only narrow the Effective Configuration's value. */
   maxAttempts: z.number().int().positive().optional(),
+  /**
+   * A contract Task (ADR-0052, #110): it removes the old interface once every
+   * consumer migrated, so it never runs in this Job. Once every pull request
+   * has merged, an Approval offers it as a follow-up Job.
+   */
+  deferred: z
+    .boolean()
+    .default(false)
+    .describe(
+      'true only for the contract step: a Task that removes or breaks the old interface. It does not run in this Job; it is offered as a follow-up Job once every pull request has merged.',
+    ),
 });
 export type PlanTaskProposal = z.infer<typeof PlanTaskProposalSchema>;
 
@@ -170,18 +311,42 @@ export interface PlanContext {
    * decide whether globs overlap.
    */
   trackedFiles: ReadonlyMap<string, readonly string[]>;
+  /**
+   * The Sensitive Paths of each Repository (by id), from the Job's frozen
+   * per-Repository section (ADR-0051). A Task's `writable` may not list one.
+   */
+  sensitivePaths: ReadonlyMap<string, readonly string[]>;
+  /**
+   * The named profile commands of each Repository (by id), from the Job's
+   * frozen per-Repository section (ADR-0051). A verification entry names one.
+   */
+  commands: ReadonlyMap<string, Readonly<Record<string, ProfileCommand>>>;
+  /**
+   * Triage only: the Project's Repositories when triage chooses the Job's set
+   * (ADR-0067); `null` or unset when the set is fixed.
+   */
+  repositoryCandidates?: readonly { id: string; name: string }[] | null;
 }
 
 /**
  * The Plan's DAG checks (ARCHITECTURE §3, §7): unique keys, a Repository of
  * the Job on every Task, valid scope globs, existing dependencies, no cycles,
  * Acceptance Criteria that exist and are all covered when mandatory, a
- * `maxAttempts` that only narrows, and no overlapping writable paths between
- * Tasks that no dependency path orders.
+ * `maxAttempts` that only narrows, no `writable` entry that is literally a
+ * Sensitive Path of the Task's Repository, no cycle between Repositories (the
+ * Delivery Order, ADR-0052), and no overlapping writable paths
+ * between Tasks that no dependency path orders. Deferred (contract) Tasks
+ * (#110) are checked as Tasks, but only the Tasks that run make the Delivery
+ * Order, the overlap check and mandatory coverage; none of those may depend
+ * on a deferred one, and an upstream of another Repository's Task must cover
+ * Acceptance Criteria (the contract, story 60).
  */
 export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] {
   const issues: RuleIssue[] = [];
   const keys = new Set(plan.tasks.map((t) => t.key));
+  const deferredKeys = new Set(plan.tasks.filter((t) => t.deferred).map((t) => t.key));
+  // What runs in this Job: deferred Tasks are the contract step's (ADR-0052).
+  const runnable: PlanProposal = { ...plan, tasks: plan.tasks.filter((t) => !t.deferred) };
   const criteria = new Set(ctx.criteria.map((c) => c.code));
 
   for (const dup of duplicates(plan.tasks.map((t) => t.key))) {
@@ -192,11 +357,25 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
   }
   for (const task of plan.tasks) {
     const at = `Task ${task.key}`;
-    if (!ctx.repositories.some((r) => r.id === task.repository || r.name === task.repository)) {
+    const repository = ctx.repositories.find(
+      (r) => r.id === task.repository || r.name === task.repository,
+    );
+    if (repository === undefined) {
       issues.push({
         rule: 'plan.task_repository',
         message: `${at}: repository '${task.repository}' is not a Repository of this Job (${ctx.repositories.map((r) => r.name).join(', ')})`,
       });
+    } else {
+      const sensitive = ctx.sensitivePaths.get(repository.id) ?? [];
+      for (const glob of task.scope.writable.filter((g) => sensitive.includes(g))) {
+        issues.push({
+          rule: 'plan.sensitive_writable',
+          message: `${at}: writable '${glob}' is a Sensitive Path of Repository ${repository.name}; Sensitive Paths are forbidden for every Task (a human removes one from the Repository Profile to allow it)`,
+        });
+      }
+      issues.push(
+        ...verificationCommandIssues(task, repository.name, ctx.commands.get(repository.id) ?? {}),
+      );
     }
     for (const [list, globs] of [
       ['writable', task.scope.writable],
@@ -217,6 +396,11 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
         issues.push({
           rule: 'plan.dependencies_exist',
           message: `${at} depends on unknown Task ${dep}`,
+        });
+      } else if (!task.deferred && deferredKeys.has(dep)) {
+        issues.push({
+          rule: 'plan.deferred_dependency',
+          message: `${at} depends on deferred Task ${dep}, which does not run in this Job; a deferred Task is the contract step, offered as a follow-up Job once every pull request has merged`,
         });
       }
     }
@@ -251,20 +435,139 @@ export function validatePlan(plan: PlanProposal, ctx: PlanContext): RuleIssue[] 
       });
     }
   }
+  if (runnable.tasks.length === 0) {
+    issues.push({
+      rule: 'plan.no_runnable_task',
+      message:
+        'every Task is deferred: a Plan needs at least one Task that runs in this Job (only the contract step is deferred)',
+    });
+  }
   const cycle = findCycle(plan.tasks);
   if (cycle !== undefined) {
     issues.push({ rule: 'plan.no_cycles', message: `dependency cycle: ${cycle.join(' → ')}` });
+  } else {
+    // The contract step comes after the consumers in another Job: its edges order nothing here.
+    const order = deliveryOrder(
+      runnable.tasks.map((t) => ({ ...t, repository: repositoryIdOf(ctx, t.repository) ?? '' })),
+      ctx.repositories,
+    );
+    if (!order.ok) {
+      issues.push({
+        rule: 'plan.delivery_order_cycle',
+        message: `cross-repo dependency cycle: ${order.cycle.join(' → ')}; the Delivery Order must be defined, so no Repository may depend on a Repository that depends on it`,
+      });
+    }
   }
-  issues.push(...overlapIssues(plan, ctx));
+  issues.push(...contractCriteriaIssues(runnable, ctx));
+  issues.push(...overlapIssues(runnable, ctx));
   for (const c of ctx.criteria) {
-    if (c.mandatory && !plan.tasks.some((t) => t.acceptance.includes(c.code))) {
+    if (c.mandatory && !runnable.tasks.some((t) => t.acceptance.includes(c.code))) {
+      const deferredOnly = plan.tasks.some((t) => t.acceptance.includes(c.code));
       issues.push({
         rule: 'plan.mandatory_criteria_covered',
-        message: `mandatory ${c.code} is covered by no Task`,
+        message: `mandatory ${c.code} is covered by no Task${deferredOnly ? ' that runs in this Job (deferred Tasks do not)' : ''}`,
       });
     }
   }
   return issues;
+}
+
+/**
+ * `plan.contract_criteria` (story 60, ADR-0052): a Task that a Task of
+ * another Repository depends on provides the contract, the interface its
+ * dependents code against, so it must cover Acceptance Criteria (the
+ * planner writes the contract into them): its review and Evidence then
+ * verify the interface instead of assuming it.
+ */
+function contractCriteriaIssues(plan: PlanProposal, ctx: PlanContext): RuleIssue[] {
+  const repoOf = (t: PlanTaskProposal) => repositoryIdOf(ctx, t.repository) ?? t.repository;
+  const issues: RuleIssue[] = [];
+  for (const upstream of plan.tasks) {
+    if (upstream.acceptance.length > 0) continue;
+    const dependent = plan.tasks.find(
+      (t) => t.dependsOn.includes(upstream.key) && repoOf(t) !== repoOf(upstream),
+    );
+    if (dependent === undefined) continue;
+    const name =
+      ctx.repositories.find((r) => r.id === repoOf(dependent))?.name ?? dependent.repository;
+    issues.push({
+      rule: 'plan.contract_criteria',
+      message: `Task ${upstream.key}: Task ${dependent.key} of Repository ${name} depends on it, so it must cover the Acceptance Criteria that state the contract (the interface ${dependent.key} codes against)`,
+    });
+  }
+  return issues;
+}
+
+/** The id of the Job's Repository a Plan Task names (by id or name), if it is one. */
+export function repositoryIdOf(
+  ctx: Pick<PlanContext, 'repositories'>,
+  ref: string,
+): string | undefined {
+  return ctx.repositories.find((r) => r.id === ref || r.name === ref)?.id;
+}
+
+/**
+ * The verification entries' commands (ADR-0051): `plan.verification_command`
+ * for an entry that names no profile command of the Task's Repository (free
+ * shell is refused, #104); `plan.verification_args` for arguments except on a
+ * profile command marked `acceptsArgs`, each matching
+ * {@link VERIFICATION_ARG_PATTERN}.
+ */
+function verificationCommandIssues(
+  task: PlanTaskProposal,
+  repository: string,
+  commands: Readonly<Record<string, ProfileCommand>>,
+): RuleIssue[] {
+  const issues: RuleIssue[] = [];
+  for (const v of task.verification) {
+    const at = `Task ${task.key}: verification ${v.key}`;
+    const named = Object.hasOwn(commands, v.command) ? commands[v.command] : undefined;
+    if (named === undefined) {
+      const names = Object.keys(commands).sort();
+      issues.push({
+        rule: 'plan.verification_command',
+        message: `${at}: '${v.command}' is not a profile command of Repository ${repository} (${names.length === 0 ? 'it has none' : names.join(', ')}); a verification entry names one of its Repository's profile commands, never free shell`,
+      });
+      continue;
+    }
+    const args = v.args ?? [];
+    if (args.length === 0) continue;
+    if (!named.acceptsArgs) {
+      issues.push({
+        rule: 'plan.verification_args',
+        message: `${at}: profile command '${v.command}' of Repository ${repository} does not accept arguments (a human marks it acceptsArgs in the Repository Profile)`,
+      });
+      continue;
+    }
+    for (const arg of args.filter((a) => !VERIFICATION_ARG_PATTERN.test(a))) {
+      issues.push({
+        rule: 'plan.verification_args',
+        message: `${at}: argument ${JSON.stringify(arg)} must match ${VERIFICATION_ARG_PATTERN.source}`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * The Task with its Repository's Sensitive Paths added to its `forbidden`
+ * list, after its own globs and without duplicates (ADR-0051). The path-scope
+ * Gate reports a path that is both writable and forbidden as forbidden, so a
+ * Sensitive Path inside a writable glob still fails it. The stored Plan stays
+ * as proposed; the Task's definition carries the merged list.
+ */
+export function withSensitivePaths<T extends { scope: TaskScope }>(
+  task: T,
+  sensitivePaths: readonly string[],
+): T {
+  const own = task.scope.forbidden;
+  return {
+    ...task,
+    scope: {
+      ...task.scope,
+      forbidden: [...own, ...[...new Set(sensitivePaths)].filter((g) => !own.includes(g))],
+    },
+  };
 }
 
 /**

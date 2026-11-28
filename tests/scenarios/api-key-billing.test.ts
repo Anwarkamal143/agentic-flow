@@ -9,7 +9,14 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { initializedHome, startRuntime, type RunningRuntime } from '../support/factory.js';
-import { createJob, json, registeredRepo, waitForJob, type JobBody } from '../support/api.js';
+import {
+  createJob,
+  declareCommands,
+  json,
+  registeredRepo,
+  waitForJob,
+  type JobBody,
+} from '../support/api.js';
 import {
   claudeStub,
   useClaudeCode,
@@ -59,6 +66,7 @@ async function runtimeWith(
 
 async function completedJob(rt: RunningRuntime): Promise<JobBody> {
   const repo = await registeredRepo(rt);
+  await declareCommands(rt, repo.id, { 'no-api-key': { run: 'test -z "${ANTHROPIC_API_KEY:-}"' } });
   const created = await createJob(rt, repo.id);
   const job = await waitForJob(rt, created.id, (j) => j.status !== 'active', 30_000);
   expect(job.status, rt.output()).toBe('completed');
@@ -72,7 +80,7 @@ function keyAbsentFromVerification(): Record<string, unknown[]> {
   }[];
   planner[0]?.output.tasks[0]?.verification.push({
     key: 'no-api-key',
-    command: 'test -z "${ANTHROPIC_API_KEY:-}"',
+    command: 'no-api-key',
     required: true,
   });
   return { planner };

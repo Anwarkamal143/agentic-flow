@@ -1,7 +1,7 @@
 /**
  * Making the Dependency Base (ARCHITECTURE §10, ADR-0021) in the Factory
- * Clone: the commit a dependent Task's new Worktree starts from. One
- * dependency: its approved head. Several: their approved heads merged in Plan
+ * Clone: the commit a dependent Task's new Worktree starts from, from its
+ * dependencies in the same Repository only. One dependency: its approved head. Several: their approved heads merged in Plan
  * order into a local commit (merge commits only; no ref, index or Worktree is
  * touched). It is local to the Job and is not the Integration Branch (§14).
  * A merge that conflicts blocks the Task with `base_merge_conflict`, a human
@@ -27,13 +27,26 @@ export type DependencyBase =
   /** Merging the heads conflicts; `paths` are the conflicting paths. */
   | { kind: 'conflict'; dependencies: string[]; paths: string[] };
 
-/** The Task's dependencies in Plan order, with their state and approved head. */
-function dependencyFacts(db: FactoryDb, taskId: string): DependencyFact[] {
+/**
+ * The Task's dependencies in its own Repository, in Plan order, with their
+ * state and approved head. A dependency in another Repository (ADR-0052) is
+ * no part of the base: its head lives in another Factory Clone, and the Task
+ * gets its summary and diff as context instead (ADR-0065).
+ */
+function dependencyFacts(
+  db: FactoryDb,
+  task: { id: string; repositoryId: string },
+): DependencyFact[] {
   const deps = db
     .select({ id: schema.tasks.id, key: schema.tasks.key, state: schema.tasks.state })
     .from(schema.taskDependencies)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskDependencies.dependsOnTaskId))
-    .where(eq(schema.taskDependencies.taskId, taskId))
+    .where(
+      and(
+        eq(schema.taskDependencies.taskId, task.id),
+        eq(schema.tasks.repositoryId, task.repositoryId),
+      ),
+    )
     .orderBy(asc(sql`"tasks"."rowid"`))
     .all();
   return deps.map((d) => {
@@ -54,9 +67,9 @@ function dependencyFacts(db: FactoryDb, taskId: string): DependencyFact[] {
 export async function makeDependencyBase(
   db: FactoryDb,
   clone: string,
-  task: { id: string; key: string },
+  task: { id: string; key: string; repositoryId: string },
 ): Promise<DependencyBase> {
-  const facts = dependencyFacts(db, task.id);
+  const facts = dependencyFacts(db, task);
   const dependencies = facts.map((f) => f.key);
   const plan = planDependencyBase(facts);
   switch (plan.kind) {

@@ -138,6 +138,14 @@ const RETRY_SETUP: ApprovalOption = {
   agentProposed: false,
 };
 
+const RETRY_CHECK: ApprovalOption = {
+  id: 'retry_check',
+  label: 'Check again',
+  description:
+    "Once the Factory Clone is writable and the GitHub token may push to the repository, check again: a Task that never started is readied (the check runs before its first Attempt), and a refused push is tried again. Refused once the Job's other Repositories have been delivered without it; cancelling the Job remains.",
+  agentProposed: false,
+};
+
 /** The Blocker reasons that open a Blocker Approval, with their options (§8.1). */
 const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   rework_cap_reached: [GRANT, REPLAN, CANCEL_JOB],
@@ -158,6 +166,8 @@ const OPTIONS: Partial<Record<BlockerReason, readonly ApprovalOption[]>> = {
   pr_closed: [REOPEN_PR, CANCEL_JOB],
   // Never forced on the factory's own judgment (#65, Q25): a human chooses.
   integration_rewrite: [FORCE_PUSH_WITH_LEASE, NEW_PR, CANCEL_JOB],
+  // A permission, not the work (#108): a human fixes it and checks again.
+  repository_not_writable: [RETRY_CHECK, CANCEL_JOB],
 };
 
 /** The option a Blocker Approval recommends, if any (§8.1). */
@@ -191,6 +201,7 @@ const TITLES: Partial<Record<BlockerReason, string>> = {
   replan_cap_reached: 'reached its Replan cap',
   base_merge_conflict: "can't start: its Dependency Base conflicts",
   spec_finding_unresolved: 'has a Specification Finding to decide',
+  repository_not_writable: "can't start: its Repository is not writable",
 };
 
 /** The option that starts a Replan from an Inbox Item (a Blocker Approval or a scope change Question). */
@@ -205,6 +216,7 @@ const INTEGRATION_TITLES: Partial<Record<BlockerReason, string>> = {
   foreign_push_rewrite: 'was rewritten by a foreign push that drops approved commits',
   pr_closed: "can't be merged: its pull request was closed without merging",
   integration_rewrite: 'was rebuilt: publishing it rewrites the open pull request',
+  repository_not_writable: "can't be delivered: its Repository is not writable",
 };
 
 /** The line a Blocker Approval shows in a list. */

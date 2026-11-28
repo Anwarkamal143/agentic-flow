@@ -31,6 +31,8 @@ import {
 import { fakeGitHub, type FakeGitHub } from '../support/github.js';
 import { emptyDeliveryNote } from '@factory/domain';
 import {
+  createProject,
+  declareCommands,
   json,
   post,
   skipPlanApproval,
@@ -102,7 +104,9 @@ function fileTask(key: string) {
     scope: { writable: [`src/${key}.ts`], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: `test -f src/${key}.ts`, criteria: ['AC-01'] }],
+    verification: [
+      { key: 'test', command: 'exists', args: [`src/${key}.ts`], criteria: ['AC-01'] },
+    ],
   };
 }
 
@@ -169,7 +173,7 @@ function emptyScript() {
     scope: { writable: ['src/math.ts'], forbidden: [] },
     dependsOn: [],
     acceptance: ['AC-01'],
-    verification: [{ key: 'test', command: 'test -f src/math.ts', criteria: ['AC-01'] }],
+    verification: [{ key: 'test', command: 'exists', args: ['src/math.ts'], criteria: ['AC-01'] }],
   };
   return scriptWith(
     { planning: [{ output: { tasks: [task] } }] },
@@ -211,10 +215,12 @@ const runtimeEnv = (gh: FakeGitHub, extra: Record<string, string> = {}) => ({
 });
 
 async function register(rt: RunningRuntime, src: string): Promise<RepoBody> {
+  await createProject(rt, 'demo');
   const added = await rt.home.cli(['repo', 'add', src, '--project', 'demo', '--yes']);
   expect(added.code, added.stderr).toBe(0);
   const [repo] = await json<RepoBody[]>(rt.request('/v1/repositories'));
   if (repo === undefined) throw new Error('no Repository');
+  await declareCommands(rt, repo.id);
   await skipPlanApproval(rt, repo.projectId);
   return repo;
 }
@@ -265,7 +271,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
     const approval = reviews.find(
       (r) => r.taskId === integrationTask?.id && r.outcome === 'approved',
     );
-    expect(approval?.promptTemplate.id).toBe('integration-review-packet@1');
+    expect(approval?.promptTemplate.id).toBe('integration-review-packet@2');
     const branch = `factory/${job.id}/integration`;
 
     // On the fake GitHub: one PR, correct base, head and body; its head SHA is the approved one.
@@ -285,7 +291,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
     expect(body).toMatch(/\*\*AC-01\*\* \(mandatory\): \*\*pass\*\*/);
     expect(body).toContain('## Commands run on the integration head');
     expect(body).toContain(String(approval?.headSha));
-    expect(body).toContain('test -f src/a.ts');
+    expect(body).toContain("test -f 'src/a.ts'");
     expect(body).toContain('## Risks');
     expect(body).toContain('The constant could use a clearer name.');
     expect(body).toContain('## Rollback');
@@ -329,7 +335,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
     const completed = await waitForJob(rt, job.id, (j) => j.status === 'completed', 30_000);
     expect(stagesOf(completed, 'merge')).toEqual(['succeeded']);
     const report = await reportOf(rt, job.id);
-    expect(report.reportVersion).toBe(6);
+    expect(report.reportVersion).toBe(7);
     expect(report.outcome).toBe('completed');
     expect(report.pullRequests).toEqual([
       {
@@ -343,6 +349,7 @@ describe('the pull request', { timeout: 120_000 }, () => {
         mergeSha,
         adopted: false,
         ci: report.pullRequests[0]?.ci ?? null,
+        mergedBefore: [],
       },
     ]);
     expect(report.pullRequests[0]?.ci).not.toBeNull();

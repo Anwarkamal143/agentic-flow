@@ -1,0 +1,1 @@
+ALTER TABLE `jobs` ADD `delivery_order_json` text;

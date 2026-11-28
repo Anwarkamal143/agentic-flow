@@ -12,7 +12,15 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import { API_KEY_EXPOSURE, type Billing } from '@factory/domain';
+import {
+  API_KEY_EXPOSURE,
+  factoryGlobalConcurrency,
+  staleBootstrapKeys,
+  type Billing,
+  type FactoryLevel,
+  type OnboardingCheckInput,
+} from '@factory/domain';
+import { readConfig, type FactoryHome } from '@factory/home';
 import type { TokenSource } from '@factory/github';
 import { findExecutable, probeClaudeCode } from '@factory/harness';
 
@@ -42,6 +50,8 @@ export interface CredentialCheck {
   /** Where presence was looked for: an environment variable name, or a command. */
   source: string;
   present: boolean;
+  /** `false` when presence could not be detected safely (then `present` is false too). */
+  detected?: false;
 }
 
 /**
@@ -73,8 +83,27 @@ export interface GitHubCheck {
   problem?: string;
 }
 
+/**
+ * A `config.json` key the runtime no longer reads (ADR-0056): the Factory Level
+ * in the database holds it. Edits to the file have no effect.
+ */
+export interface StaleConfigKey {
+  key: string;
+  message: string;
+}
+
+export interface UndetectedProfile {
+  repositoryId: string;
+  name: string;
+  message: string;
+}
+
 export interface DoctorReport {
   checkedAt: string;
+  /** `config.json` keys that are stale; empty when there are none. */
+  staleConfigKeys: StaleConfigKey[];
+  /** Repositories whose profile was upgraded from v1 without detection (ADR-0060); empty when none. */
+  undetectedProfiles: UndetectedProfile[];
   tools: ToolCheck[];
   credentials: CredentialCheck[];
   /** `null` when the configured Harness isn't Claude Code. */
@@ -133,6 +162,8 @@ export async function runDoctor(
   github: { token: TokenSource; apiBaseUrl: string },
   claudeCommand = 'claude',
   billing?: Billing,
+  staleConfigKeys: StaleConfigKey[] = [],
+  undetectedProfiles: UndetectedProfile[] = [],
 ): Promise<DoctorReport> {
   const tools = await Promise.all(
     TOOLS.map((spec) =>
@@ -162,6 +193,8 @@ export async function runDoctor(
       source: 'claude auth status',
       // Exit code only; the output is discarded.
       present: probe.loggedIn === true,
+      // `claude auth status` could not run to an exit code, so the login is unknown (#114).
+      ...(probe.loggedIn === null ? { detected: false } : {}),
     });
   }
   const gh = tools.find((t) => t.id === 'gh');
@@ -176,6 +209,8 @@ export async function runDoctor(
   const token = await github.token.resolve();
   return {
     checkedAt: new Date().toISOString(),
+    staleConfigKeys,
+    undetectedProfiles,
     tools,
     credentials,
     billing: billing === undefined ? null : billingCheck(billing, env),
@@ -186,6 +221,27 @@ export async function runDoctor(
       ...(token.ok ? {} : { problem: token.problem }),
     },
   };
+}
+
+/**
+ * The stale keys `config.json` sets now (it is re-read, so an edit after the
+ * start is seen). An unreadable file reports nothing here: the runtime started
+ * from it, and the next start refuses it with the reason.
+ */
+export function staleConfigKeys(home: FactoryHome, level: FactoryLevel): StaleConfigKey[] {
+  let file;
+  try {
+    file = readConfig(home);
+  } catch {
+    return [];
+  }
+  return staleBootstrapKeys(file).map((key) => ({
+    key,
+    message:
+      `config.json sets ${key}, which the runtime ignores: the Factory Level holds it ` +
+      `(now ${String(factoryGlobalConcurrency(level.config))}). Change it with ` +
+      `\`factory config set ${key} <n>\` and remove the key from config.json.`,
+  }));
 }
 
 function billingCheck(billing: Billing, env: NodeJS.ProcessEnv): BillingCheck {
@@ -256,4 +312,22 @@ function run(file: string, args: string[], env: NodeJS.ProcessEnv): Promise<RunR
       },
     );
   });
+}
+
+/**
+ * What the onboarding finish checks read from a doctor report (ADR-0074):
+ * node, git and Claude Code's statuses, its login (`null`: not detected
+ * safely), and its billing.
+ */
+export function onboardingEnvironment(
+  report: DoctorReport,
+): Omit<OnboardingCheckInput, 'repositories'> {
+  const status = (id: ToolCheck['id']) =>
+    report.tools.find((t) => t.id === id)?.status ?? 'missing';
+  const login = report.credentials.find((c) => c.id === 'claude_login');
+  return {
+    tools: { node: status('node'), git: status('git'), claude: status('claude') },
+    claudeLogin: login === undefined || login.detected === false ? null : login.present,
+    billing: report.billing?.mode ?? null,
+  };
 }

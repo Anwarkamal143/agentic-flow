@@ -7,7 +7,14 @@
  */
 import { approveForeignRewrite } from './foreign-push.js';
 import { approveIntegrationRewrite } from './pull-request.js';
-import { appendEvent, schema, type FactoryDb, type Tx } from '@factory/db';
+import {
+  appendEvent,
+  jobBound,
+  schema,
+  type FactoryDb,
+  type JobApprovalRow,
+  type Tx,
+} from '@factory/db';
 import { rmSync } from 'node:fs';
 import {
   ApprovalKindSchema,
@@ -32,6 +39,7 @@ import {
   checkMergeChangeRequest,
   EffectiveConfigSchema,
   humanDecisionPoints,
+  RepositorySetBySchema,
   InboxDecisionSchema,
   JobStatusSchema,
   TERMINAL_JOB_STATUSES,
@@ -69,6 +77,7 @@ import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
 import { inspectSpool } from '@factory/harness';
 import { openBlockerItem, raiseCap, replaceBlocker } from './blocker-approvals.js';
+import { continueAfterAnswers } from './clarification.js';
 import { applyCleanupDecision, checkCleanupAnswersOf } from './cleanup.js';
 import {
   ciFailedHolder,
@@ -92,6 +101,8 @@ import {
   type StageRunStepper,
 } from './engine.js';
 import { ApiFailure } from './errors.js';
+import { startContractJob, type CreateJobIn } from './contract-job.js';
+import { decideIssueJob, intakeOfItem } from './issue-intake.js';
 import { parseProcess } from './execution.js';
 import { openQuestionItem } from './questions.js';
 import { stopIfAlive, worktreeStatus } from './recovery.js';
@@ -102,7 +113,10 @@ import { grantReplanIn, requestReplanIn } from './replan.js';
 import { applySpecChangeDecision, grantRespecificationIn } from './spec-route.js';
 import { stageIdOfTask } from './task-stage.js';
 
-type ApprovalRow = typeof schema.approvals.$inferSelect;
+/** An item of a Job: every kind but `issue_job` (#112). */
+type ApprovalRow = JobApprovalRow;
+/** Any item, an `issue_job` item (no Job yet) included. */
+type AnyApprovalRow = typeof schema.approvals.$inferSelect;
 type Decider = (
   item: ApprovalRow,
   input: DecideInput,
@@ -147,6 +161,10 @@ export class InboxService {
       GitHubPort,
       'listCheckRuns' | 'listWorkflowRuns' | 'rerunFailedJobs' | 'reopenPullRequest'
     > | null = null,
+    /** Job creation in a transaction, for a contract step's follow-up Job (#110). */
+    private readonly createJob: CreateJobIn = () => {
+      throw new Error('no Job creation configured');
+    },
   ) {}
 
   /** Open items not deferred, oldest first; `all` lists every item. */
@@ -165,7 +183,7 @@ export class InboxService {
   }
 
   get(id: string): Approval {
-    return this.toApproval(requireItem(this.db, id));
+    return this.toApproval(requireAnyItem(this.db, id));
   }
 
   /** The Job's audit log, oldest first (cap raises by Blocker Approvals, ADR-0026). */
@@ -194,16 +212,45 @@ export class InboxService {
 
   /** Decides an item, refused unless it names the open item's version and subject. */
   async decide(id: string, input: DecideInput, actor: string): Promise<Approval> {
-    const item = requireItem(this.db, id);
+    const item = requireAnyItem(this.db, id);
     const kind = ApprovalKindSchema.parse(item.kind);
     if (kind !== 'blocker' && input.grant !== undefined) {
       throw new ApiFailure(400, 'invalid_grant', `a ${kind} item takes no grant size`);
     }
-    return this.deciders[kind](item, input, actor);
+    if (kind === 'issue_job') return this.decideIssueJob(item, input, actor);
+    return this.deciders[kind](jobBound(item), input, actor);
   }
 
-  /** How each kind of item is decided. */
-  private readonly deciders: Readonly<Record<ApprovalKind, Decider>> = {
+  /**
+   * An `issue_job` item (#112, ADR-0072): `start_job` creates the Job from
+   * the issue, in the decision's transaction, by the human who decided;
+   * `decline` creates none. Either way the issue is never offered again.
+   */
+  private decideIssueJob(item: AnyApprovalRow, input: DecideInput, actor: string): Approval {
+    this.db.transaction(
+      (tx) => {
+        const row = requireAnyItem(tx, item.id);
+        refuseUnless(row, { actor, ...input });
+        const jobId = decideIssueJob(tx, {
+          approvalId: row.id,
+          option: input.option,
+          actor,
+          createJob: this.createJob,
+        });
+        markDecided(tx, row, actor, {
+          option: input.option,
+          comment: input.comment ?? null,
+          ...(jobId === undefined ? {} : { jobId }),
+        });
+      },
+      { behavior: 'immediate' },
+    );
+    this.onCommit();
+    return this.get(item.id);
+  }
+
+  /** How each kind of item of a Job is decided (`issue_job` has no Job yet: `decideIssueJob`). */
+  private readonly deciders: Readonly<Record<Exclude<ApprovalKind, 'issue_job'>, Decider>> = {
     blocker: (item, input, actor) => this.decideBlocker(item, input, actor),
     question: (item, input, actor) => {
       if (input.option === 'replan') return this.replanFromItem(item, input, actor);
@@ -268,6 +315,30 @@ export class InboxService {
       await this.cancelFromItem(item);
       return this.get(item.id);
     },
+    // The contract step's follow-up Job (#110, ADR-0052): `start_job` creates it with the
+    // decision, in one transaction; `decline` creates nothing.
+    contract_job: (item, input, actor) => {
+      changeJob(this.db, { jobId: item.jobId, expectedVersion: 'current', actor }, (tx) => {
+        const row = requireItem(tx, item.id);
+        refuseUnless(row, { actor, ...input });
+        const followUpJobId =
+          input.option === 'start_job'
+            ? startContractJob(tx, {
+                item: row,
+                actor,
+                readJson: (id) => this.artifacts.readJson(id),
+                createJob: this.createJob,
+              })
+            : undefined;
+        markDecided(tx, row, actor, {
+          option: input.option,
+          comment: input.comment ?? null,
+          ...(followUpJobId === undefined ? {} : { followUpJobId }),
+        });
+      });
+      this.onCommit();
+      return Promise.resolve(this.get(item.id));
+    },
     cleanup: (item, input, actor) => {
       if (item.questionsJson !== null) {
         throw new ApiFailure(
@@ -294,7 +365,15 @@ export class InboxService {
    * nothing here changes a scope, a cap or a policy.
    */
   answer(id: string, input: AnswerQuestionInput, actor: string): Approval {
-    const item = requireItem(this.db, id);
+    const any = requireAnyItem(this.db, id);
+    if (any.jobId === null) {
+      throw new ApiFailure(
+        409,
+        'decision_required',
+        'this item has no questions: decide it with POST /v1/inbox/:id/decide (factory inbox decide)',
+      );
+    }
+    const item = jobBound(any);
     changeJob(
       this.db,
       { jobId: item.jobId, expectedVersion: 'current', actor },
@@ -331,6 +410,11 @@ export class InboxService {
           throw new ApiFailure(ANSWER_STATUS[refusal.code], refusal.code, refusal.message);
         }
         markDecided(tx, row, actor, { option: 'answer', comment: null, answers: input.answers });
+        if (row.taskId === null && row.stageRunId !== null) {
+          // A proposal Stage's Question (ADR-0071): a new Stage Run reads the answers.
+          continueAfterAnswers(state, step, { itemId: id, stageRunId: row.stageRunId, actor }, tx);
+          return;
+        }
         const task =
           row.taskId === null
             ? undefined
@@ -388,6 +472,14 @@ export class InboxService {
     if (input.option === 'retry_merge') {
       this.decideOnly(item, input, actor, null, (_tx, state, step) => {
         retryMerge(state, step, actor);
+      });
+      return this.get(item.id);
+    }
+
+    if (input.option === 'retry_check') {
+      // The permission was fixed: check again (#108, ADR-0068).
+      this.decideOnly(item, input, actor, null, (tx, state, step) => {
+        retryWritabilityCheck(tx, { item, actor }, state, step);
       });
       return this.get(item.id);
     }
@@ -632,6 +724,17 @@ export class InboxService {
     try {
       this.decideOnly(item, input, actor, null, (tx) => {
         recordRerun(tx);
+        // A poll that read GitHub before this decision would record the old failure after it
+        // and raise a new ci_failed item: the bump makes the poller drop it, unrecorded.
+        tx.update(schema.pullRequests)
+          .set({ version: sql`${schema.pullRequests.version} + 1` })
+          .where(
+            inArray(
+              schema.pullRequests.id,
+              prs.map((p) => p.id),
+            ),
+          )
+          .run();
       });
     } catch (err) {
       // A poll may have seen the re-run queued and superseded the item meanwhile: the re-run
@@ -825,7 +928,7 @@ export class InboxService {
   defer(id: string, input: DeferInput, actor: string, deferred: boolean): Approval {
     this.db.transaction(
       (tx) => {
-        const row = requireItem(tx, id);
+        const row = requireAnyItem(tx, id);
         refuseUnless(row, { actor, expectedVersion: input.expectedVersion });
         if (row.deferred === deferred) {
           throw new ApiFailure(
@@ -838,7 +941,7 @@ export class InboxService {
         appendEvent(tx, {
           entityKind: 'approval',
           entityId: id,
-          jobId: row.jobId,
+          ...(row.jobId === null ? {} : { jobId: row.jobId }),
           type: deferred ? 'approval.deferred' : 'approval.undeferred',
           actor,
           payload: { kind: row.kind },
@@ -972,7 +1075,7 @@ export class InboxService {
         `Job ${jobId} has no Plan waiting for approval`,
       );
     }
-    return item;
+    return jobBound(item);
   }
 
   /** The plan approval view of the Job's newest Plan (PRODUCT_SPEC §7). */
@@ -1018,7 +1121,30 @@ export class InboxService {
           maxRetries: t.maxRetries,
         };
       });
-    const repoIds = [...new Set(tasks.map((t) => t.repositoryId))];
+    // The contract step (#110): in the stored Plan only, never Task rows.
+    const jobRepositories = this.db
+      .select({ id: schema.repositories.id, name: schema.repositories.name })
+      .from(schema.jobRepositories)
+      .innerJoin(
+        schema.repositories,
+        eq(schema.repositories.id, schema.jobRepositories.repositoryId),
+      )
+      .where(eq(schema.jobRepositories.jobId, jobId))
+      .all();
+    const deferredTasks = PlanProposalSchema.parse(this.artifacts.readJson(plan.id))
+      .tasks.filter((t) => t.deferred)
+      .map((t) => ({
+        key: t.key,
+        title: t.title,
+        objective: t.objective,
+        repositoryId:
+          jobRepositories.find((r) => r.id === t.repository || r.name === t.repository)?.id ??
+          t.repository,
+        dependsOn: t.dependsOn,
+        acceptance: t.acceptance,
+        writable: t.scope.writable,
+      }));
+    const repoIds = [...new Set([...tasks, ...deferredTasks].map((t) => t.repositoryId))];
     const repositories =
       repoIds.length === 0
         ? []
@@ -1026,7 +1152,15 @@ export class InboxService {
             .select({ id: schema.repositories.id, name: schema.repositories.name })
             .from(schema.repositories)
             .where(inArray(schema.repositories.id, repoIds))
+            .orderBy(asc(schema.repositories.name), asc(schema.repositories.id))
             .all();
+    // Who chose the Job's Repository set: a triage-chosen one of several waits for a human (ADR-0067).
+    const repositorySetBy = RepositorySetBySchema.parse(job.repositorySetBy);
+    const jobRepositoryCount = this.db
+      .select({ id: schema.jobRepositories.repositoryId })
+      .from(schema.jobRepositories)
+      .where(eq(schema.jobRepositories.jobId, jobId))
+      .all().length;
     const item = this.db
       .select()
       .from(schema.approvals)
@@ -1059,12 +1193,17 @@ export class InboxService {
       specificationArtifactId: spec?.id ?? null,
       triageRisk,
       repositories,
+      repositorySetBy,
       tasks,
       integrationTasks,
+      deferredTasks,
       parallel: parallelWaves(tasks),
       decisionPoints: humanDecisionPoints(
         WorkflowSnapshotSchema.parse(JSON.parse(job.workflowSnapshotJson)),
-        { planApproval: config.planApproval.value },
+        {
+          planApproval: config.planApproval.value,
+          confirmRepositorySet: repositorySetBy === 'triage' && jobRepositoryCount > 1,
+        },
       ),
       estimate: planEstimate(tasks, {
         maxQuestions: config.maxQuestions.value,
@@ -1074,13 +1213,18 @@ export class InboxService {
     };
   }
 
-  private toApproval(row: ApprovalRow): Approval {
-    const job = requireJob(this.db, row.jobId);
-    const link = this.db
-      .select()
-      .from(schema.jobRepositories)
-      .where(eq(schema.jobRepositories.jobId, row.jobId))
-      .get();
+  private toApproval(row: AnyApprovalRow): Approval {
+    const job = row.jobId === null ? undefined : requireJob(this.db, row.jobId);
+    // An issue_job item has no Job yet: its Repository is the issue's (#112).
+    const intake = row.jobId === null ? intakeOfItem(this.db, row.id) : undefined;
+    const link =
+      row.jobId === null
+        ? undefined
+        : this.db
+            .select()
+            .from(schema.jobRepositories)
+            .where(eq(schema.jobRepositories.jobId, row.jobId))
+            .get();
     const stage =
       row.stageRunId === null
         ? undefined
@@ -1092,9 +1236,9 @@ export class InboxService {
     return ApprovalSchema.parse({
       id: row.id,
       jobId: row.jobId,
-      jobTitle: job.title,
-      projectId: job.projectId,
-      repositoryId: link?.repositoryId ?? '',
+      jobTitle: job?.title ?? null,
+      projectId: job?.projectId ?? intake?.projectId ?? '',
+      repositoryId: link?.repositoryId ?? intake?.repositoryId ?? '',
       taskId: row.taskId,
       stageId: stage?.stageId ?? null,
       kind: row.kind,
@@ -1177,6 +1321,54 @@ function requireAttemptRow(tx: Tx, id: string): typeof schema.attempts.$inferSel
   const row = tx.select().from(schema.attempts).where(eq(schema.attempts.id, id)).get();
   if (row === undefined) throw new Error(`no Attempt ${id}`);
   return row;
+}
+
+/**
+ * `retry_check` on a `repository_not_writable` Blocker Approval (#108,
+ * ADR-0068). A refused push: `pull_request` is queued again (the PRs already
+ * open are left as they are). A Task the preflight blocked: it is readied, so
+ * the preflight runs again before its first Attempt, and its Stage queued
+ * again. Refused (409 `partial_delivery_started`) once `execution` went on
+ * without it: the other Repositories were delivered, and this Job can't bring
+ * the held one back in; cancelling the Job remains.
+ */
+function retryWritabilityCheck(
+  tx: Tx,
+  op: { item: ApprovalRow; actor: string },
+  state: JobState,
+  step: StageRunStepper,
+): void {
+  const { item, actor } = op;
+  const reason = `Blocker Approval ${item.id}: ${actor} asked to check again`;
+  const pr = state.stageRuns.filter((r) => r.stageId === 'pull_request').at(-1);
+  const prBlocker =
+    pr?.blockerJson == null ? undefined : BlockerSchema.parse(JSON.parse(pr.blockerJson));
+  if (
+    pr?.state === 'blocked' &&
+    prBlocker?.reason === 'repository_not_writable' &&
+    prBlocker.attemptId === item.subjectRef
+  ) {
+    step(pr, 'queued', { reason });
+    return;
+  }
+  const { task, blocker } = blockedTaskOf(tx, item);
+  if (blocker.reason !== 'repository_not_writable') {
+    throw new Error(`Blocker Approval ${item.id} holds no repository_not_writable Blocker`);
+  }
+  const stageId = stageIdOfTask(tx, task.id);
+  const stage = state.stageRuns.filter((r) => r.stageId === stageId).at(-1);
+  if (stage === undefined || !['running', 'blocked', 'waiting_human'].includes(stage.state)) {
+    throw new ApiFailure(
+      409,
+      'partial_delivery_started',
+      `the Job's other Repositories were delivered without Task ${task.key}'s (its ${stageId} Stage is ${stage?.state ?? 'missing'}), so checking again can't bring it back into this Job; cancel the Job and create a new one for that Repository`,
+    );
+  }
+  stepTask(tx, { jobId: item.jobId, actor }, task, 'ready', {
+    reason: 'retry_check',
+    payload: { approvalId: item.id },
+  });
+  requeueExecution(tx, state, step, reason, task);
 }
 
 /**
@@ -1443,7 +1635,7 @@ export function cancelOpenItems(tx: Tx, jobId: string, actor: string): void {
 }
 
 function refuseUnless(
-  row: ApprovalRow,
+  row: AnyApprovalRow,
   change: { actor: string; expectedVersion: number; subjectRef?: string; option?: string },
 ): void {
   const refusal = checkInboxChange(
@@ -1464,7 +1656,7 @@ function refuseUnless(
 /** Marks the open item `row` decided by `actor`, with its `approval.decided` event. */
 function markDecided(
   tx: Tx,
-  row: ApprovalRow,
+  row: AnyApprovalRow,
   actor: string,
   input: z.input<typeof InboxDecisionSchema>,
 ): void {
@@ -1478,7 +1670,7 @@ function markDecided(
   appendEvent(tx, {
     entityKind: 'approval',
     entityId: row.id,
-    jobId: row.jobId,
+    ...(row.jobId === null ? {} : { jobId: row.jobId }),
     type: 'approval.decided',
     actor,
     payload: { kind: row.kind, subjectRef: row.subjectRef, ...decision },
@@ -1487,7 +1679,7 @@ function markDecided(
 
 function bumpItem(
   tx: Tx,
-  row: ApprovalRow,
+  row: AnyApprovalRow,
   values: Partial<typeof schema.approvals.$inferInsert>,
 ): void {
   const updated = tx
@@ -1498,10 +1690,15 @@ function bumpItem(
   if (updated.changes !== 1) throw new Error(`Inbox Item ${row.id} changed under its own update`);
 }
 
-function requireItem(db: FactoryDb | Tx, id: string): ApprovalRow {
+function requireAnyItem(db: FactoryDb | Tx, id: string): AnyApprovalRow {
   const row = db.select().from(schema.approvals).where(eq(schema.approvals.id, id)).get();
   if (row === undefined) throw new ApiFailure(404, 'item_not_found', `no Inbox Item ${id}`);
   return row;
+}
+
+/** An item of a Job (never an `issue_job` item). */
+function requireItem(db: FactoryDb | Tx, id: string): ApprovalRow {
+  return jobBound(requireAnyItem(db, id));
 }
 
 function requireJob(db: FactoryDb | Tx, id: string): typeof schema.jobs.$inferSelect {

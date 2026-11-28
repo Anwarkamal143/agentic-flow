@@ -143,6 +143,44 @@ export async function currentBranch(repo: string): Promise<string> {
   return (await git(['-C', repo, 'symbolic-ref', '--short', 'HEAD'])).trim();
 }
 
+/**
+ * Every path tracked at `rev` (plumbing only: reads objects, never the index
+ * or the working tree, so it is safe in a source checkout). A `rev` that names
+ * no commit (an empty repository) has none.
+ */
+export async function committedPaths(repo: string, rev: string): Promise<string[]> {
+  try {
+    const out = await git(['-C', repo, 'ls-tree', '-r', '-z', '--name-only', rev]);
+    return out.split('\0').filter((p) => p !== '');
+  } catch (err) {
+    if (err instanceof GitError) return [];
+    throw err;
+  }
+}
+
+/**
+ * The content of `path` at `rev`, or undefined when it is absent, not a file,
+ * or larger than `maxBytes`. Plumbing only (`cat-file`, no filters applied).
+ */
+export async function committedFile(
+  repo: string,
+  rev: string,
+  path: string,
+  maxBytes: number,
+): Promise<string | undefined> {
+  const object = `${rev}:${path}`;
+  try {
+    if ((await git(['-C', repo, 'cat-file', '-t', object])).trim() !== 'blob') return undefined;
+    if (Number((await git(['-C', repo, 'cat-file', '-s', object])).trim()) > maxBytes) {
+      return undefined;
+    }
+    return await git(['-C', repo, 'cat-file', 'blob', object]);
+  } catch (err) {
+    if (err instanceof GitError) return undefined;
+    throw err;
+  }
+}
+
 // ---- Factory Clone and Worktree operations ----------------------------------
 // These run only in the factory's own clone and its Worktrees, never in a source checkout.
 // A Harness can change a Worktree's shared `.git` config, so every factory git call in

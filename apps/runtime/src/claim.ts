@@ -1,14 +1,21 @@
 /**
- * Claiming a ready Task (ARCHITECTURE §12 steps 1–3, ADR-0020). One
- * `BEGIN IMMEDIATE` transaction inserts the Task lease and one capacity token
- * per limit (global, per Repository, per Job), then moves the Task
- * `ready → claimed` (and its Stage, `execution`, `integration` or `integration_review`, `queued → running`). Any failure rolls
- * all of it back. The tokens share the Task lease's `lease_id`, so they are
- * released with it when the Attempt ends.
+ * Claiming a ready Task (ARCHITECTURE §12 steps 1–3, ADR-0020) or a queued
+ * proposal Stage Run (ADR-0050). Both take their candidates in the fair order
+ * (`dispatch.ts`) and take the Job's Project slot (`project-slot.ts`) in the
+ * claim's transaction when the Job has nothing else in flight; a Project at
+ * its `concurrency.perProjectJobs` refuses a Job not yet in flight.
  *
- * Exported for the integration tier (#40), which races two processes on one
- * database file through {@link claimNextTask}. In production only the
- * runtime's Task scheduler calls it: one writer.
+ * A Task's one `BEGIN IMMEDIATE` transaction inserts the Task lease and one
+ * capacity token per limit (global, per Repository, per Job), then moves the
+ * Task `ready → claimed` (and its Stage, `execution`, `integration` or
+ * `integration_review`, `queued → running`). Any failure rolls all of it back.
+ * The tokens share the Task lease's `lease_id`, so they are released with it
+ * when the Attempt ends; the Project slot is the Job's, released once the Job
+ * has nothing in flight.
+ *
+ * Exported for the integration tier (#40, #99), which races processes on one
+ * database file through {@link claimNextTask} and {@link claimNextProposalStage}.
+ * In production only the runtime's schedulers call them: one writer.
  */
 import { schema, type FactoryDb, type Tx } from '@factory/db';
 import {
@@ -18,10 +25,24 @@ import {
   type CapacityDecision,
   type HeldCapacityToken,
 } from '@factory/domain';
-import { and, eq, inArray, like, sql } from 'drizzle-orm';
-import { READY_TASK_ORDER } from './dispatch.js';
+import { and, asc, eq, inArray, like, sql } from 'drizzle-orm';
+import {
+  fairly,
+  jobPriorityWeight,
+  STAGE_QUEUED_SEQ,
+  STAGE_QUEUED_TS,
+  TASK_READY_SEQ,
+  TASK_READY_TS,
+} from './dispatch.js';
 import { changeJob, stepTask } from './engine.js';
 import { newId } from './ids.js';
+import {
+  holdProjectSlot,
+  releaseIdleProjectSlot,
+  takeProjectSlot,
+  type ProjectSlotClaim,
+} from './project-slot.js';
+import { PROPOSAL_STAGE_IDS } from './proposals.js';
 import { stageIdOfTask } from './task-stage.js';
 
 /** How long a lease lasts without a heartbeat (ARCHITECTURE §12 step 4). */
@@ -54,10 +75,19 @@ export function leaseExpiry(now = Date.now()): string {
 export interface ClaimOptions {
   /** The lease holder (`runtime:<pid>`). */
   holder: string;
-  /** `config.json` `concurrency.global`. */
+  /** The Factory Level's `concurrency.global`. */
   globalLimit: number;
   /** Recorded as the actor of `task.claimed`. */
   actor: string;
+}
+
+/**
+ * The Job's Project slot after a claim: `granted` when this claim took it (the
+ * Job had nothing in flight), `held` when the Job already held it.
+ */
+export interface ClaimedProjectSlot {
+  kind: 'granted' | 'held';
+  resourceId: string;
 }
 
 /** A successful claim: the Task lease and the capacity tokens taken with it. */
@@ -65,13 +95,16 @@ export interface Claim {
   jobId: string;
   taskId: string;
   leaseId: string;
+  /** Released with the Task lease. */
   tokens: HeldCapacityToken[];
+  /** The Job's; released once the Job has nothing in flight. */
+  projectSlot: ClaimedProjectSlot;
 }
 
-/** Why one Task was not claimed. Thrown inside the transaction, so nothing is written. */
+/** Why one claim was refused. Thrown inside the transaction, so nothing is written. */
 class ClaimRefused extends Error {
   constructor(
-    readonly why: 'not_ready' | 'leased' | 'token_taken' | 'full',
+    readonly why: 'not_ready' | 'leased' | 'token_taken' | 'full' | 'project_full',
     readonly decision?: Extract<CapacityDecision, { kind: 'full' }>,
   ) {
     super(`claim refused: ${why}`);
@@ -79,13 +112,20 @@ class ClaimRefused extends Error {
 }
 
 /**
- * Claims the first ready Task, by priority then time ready (ADR-0017), that
- * fits under every concurrency limit. `undefined` when none does (none is
- * ready, the limits are reached, or another dispatcher took it first).
+ * Claims the first ready Task, in the fair order (ADR-0050), that fits under
+ * every concurrency limit, its Project's Job limit included. `undefined` when
+ * none does (none is ready, the limits are reached, or another dispatcher took
+ * it first).
  */
 export function claimNextTask(db: FactoryDb, opts: ClaimOptions): Claim | undefined {
-  const candidates = db
-    .select({ jobId: schema.tasks.jobId, taskId: schema.tasks.id })
+  const rows = db
+    .select({
+      jobId: schema.tasks.jobId,
+      taskId: schema.tasks.id,
+      projectId: schema.jobs.projectId,
+      priorityWeight: schema.tasks.priority,
+      readyTs: TASK_READY_TS,
+    })
     .from(schema.tasks)
     // A Plan Task runs in `execution`; the Integration Task in `integration`, or in
     // `integration_review` once its Integration Review started (ADR-0034, ADR-0035). At most
@@ -106,8 +146,12 @@ export function claimNextTask(db: FactoryDb, opts: ClaimOptions): Claim | undefi
         eq(schema.jobs.replanRequested, false),
       ),
     )
-    .orderBy(...READY_TASK_ORDER)
+    .orderBy(asc(TASK_READY_SEQ), asc(sql`"tasks"."rowid"`))
     .all();
+  const candidates = fairly(
+    db,
+    rows.map((r) => ({ ...r, readyAt: r.readyTs ?? new Date(0).toISOString() })),
+  );
   for (const candidate of candidates) {
     try {
       return claimTask(db, candidate, opts);
@@ -147,6 +191,15 @@ function claimTask(
 
       const leaseId = newId('lse');
       const now = new Date().toISOString();
+      const projectSlot = projectSlotOf(
+        takeProjectSlot(tx, {
+          jobId,
+          projectId: state.job.projectId,
+          holder: opts.holder,
+          acquiredAt: now,
+          expiresAt: leaseExpiry(),
+        }),
+      );
       const lease = (resourceKind: string, resourceId: string) =>
         tx
           .insert(schema.leases)
@@ -169,13 +222,111 @@ function claimTask(
         payload: {
           leaseId,
           capacity: decision.tokens.map((t) => `${t.resourceKind}/${t.resourceId}`),
+          projectSlot: `${CAPACITY_RESOURCE.project}/${projectSlot.resourceId} (${projectSlot.kind})`,
         },
       });
       const stageId = stageIdOfTask(tx, task.id);
       const stage = state.stageRuns.filter((r) => r.stageId === stageId).at(-1);
       if (stage?.state === 'queued') step(stage, 'running');
-      return { jobId, taskId, leaseId, tokens: decision.tokens };
+      return { jobId, taskId, leaseId, tokens: decision.tokens, projectSlot };
     },
+  );
+}
+
+function projectSlotOf(slot: ProjectSlotClaim): ClaimedProjectSlot {
+  if (slot.kind === 'full') throw new ClaimRefused('project_full');
+  return slot;
+}
+
+export interface ProposalClaimOptions {
+  /** The holder of the Project slot a claim takes (`runtime:<pid>`). */
+  holder: string;
+  /** Recorded as the actor of `stage_run.running`. */
+  actor: string;
+}
+
+/** A queued proposal Stage Run moved to `running`, with its Job's Project slot. */
+export interface ProposalClaim {
+  jobId: string;
+  stageRunId: string;
+  projectSlot: ClaimedProjectSlot;
+}
+
+/**
+ * Moves the first queued proposal Stage Run, in the fair order (ADR-0050),
+ * whose Job fits under its Project's Job limit to `running`, taking the Job's
+ * Project slot in the same transaction. `undefined` when none fits. The
+ * proposal-Stage scheduler runs one Stage at a time, so no other token is taken.
+ */
+export function claimNextProposalStage(
+  db: FactoryDb,
+  opts: ProposalClaimOptions,
+): ProposalClaim | undefined {
+  const rows = db
+    .select({
+      jobId: schema.stageRuns.jobId,
+      stageRunId: schema.stageRuns.id,
+      projectId: schema.jobs.projectId,
+      jobPriority: schema.jobs.priority,
+      readyTs: STAGE_QUEUED_TS,
+      createdAt: schema.jobs.createdAt,
+    })
+    .from(schema.stageRuns)
+    .innerJoin(schema.jobs, eq(schema.jobs.id, schema.stageRuns.jobId))
+    .where(
+      and(
+        eq(schema.stageRuns.state, 'queued'),
+        inArray(schema.stageRuns.stageId, [...PROPOSAL_STAGE_IDS]),
+      ),
+    )
+    .orderBy(asc(STAGE_QUEUED_SEQ), asc(schema.jobs.createdAt), asc(schema.stageRuns.position))
+    .all();
+  const candidates = fairly(
+    db,
+    rows.map((r) => ({
+      ...r,
+      priorityWeight: jobPriorityWeight(r.jobPriority),
+      readyAt: r.readyTs ?? r.createdAt,
+    })),
+  );
+  for (const candidate of candidates) {
+    try {
+      return changeJob(
+        db,
+        { jobId: candidate.jobId, expectedVersion: 'current', actor: opts.actor },
+        (tx, state, step) => {
+          const run = state.stageRuns.find((r) => r.id === candidate.stageRunId);
+          if (run?.state !== 'queued') throw new ClaimRefused('not_ready');
+          const projectSlot = projectSlotOf(
+            takeProjectSlot(tx, {
+              jobId: candidate.jobId,
+              projectId: state.job.projectId,
+              holder: opts.holder,
+              acquiredAt: new Date().toISOString(),
+              expiresAt: leaseExpiry(),
+            }),
+          );
+          step(run, 'running');
+          return { jobId: candidate.jobId, stageRunId: run.id, projectSlot };
+        },
+      );
+    } catch (err) {
+      if (!(err instanceof ClaimRefused)) throw err;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Hands the Project slot of a Job whose proposal Stage Run a previous runtime
+ * left `running` to `holder`: the Stage resumes, so the Job stays in flight.
+ */
+export function resumeProposalSlot(db: FactoryDb, jobId: string, holder: string): void {
+  db.transaction(
+    (tx) => {
+      holdProjectSlot(tx, { jobId, holder, expiresAt: leaseExpiry() });
+    },
+    { behavior: 'immediate' },
   );
 }
 
@@ -197,10 +348,16 @@ function taskLeaseId(tx: Tx, taskId: string): string | undefined {
     .get()?.leaseId;
 }
 
-const CAPACITY_KINDS = Object.values(CAPACITY_RESOURCE);
+/** The tokens that share a Task lease's id (the Project slot is the Job's, never among them). */
+const CLAIM_TOKEN_KINDS = [
+  CAPACITY_RESOURCE.global,
+  CAPACITY_RESOURCE.repository,
+  CAPACITY_RESOURCE.job,
+];
 
 /**
- * Releases a Task's claim: its lease and the capacity tokens taken with it.
+ * Releases a Task's claim: its lease and the capacity tokens taken with it,
+ * and the Job's Project slot when that was the Job's last work in flight.
  * Call in the transaction that ends the Attempt (ARCHITECTURE §12 step 5).
  */
 export function releaseClaim(tx: Tx, taskId: string): void {
@@ -208,25 +365,43 @@ export function releaseClaim(tx: Tx, taskId: string): void {
   if (leaseId === undefined) return;
   tx.delete(schema.leases)
     .where(
-      and(eq(schema.leases.leaseId, leaseId), inArray(schema.leases.resourceKind, CAPACITY_KINDS)),
+      and(
+        eq(schema.leases.leaseId, leaseId),
+        inArray(schema.leases.resourceKind, CLAIM_TOKEN_KINDS),
+      ),
     )
     .run();
   tx.delete(schema.leases)
     .where(and(eq(schema.leases.resourceKind, 'task'), eq(schema.leases.resourceId, taskId)))
     .run();
+  const jobId = jobOfTask(tx, taskId);
+  if (jobId !== undefined) releaseIdleProjectSlot(tx, jobId);
 }
 
-/** Hands a Task's claim (its lease and tokens) to `holder`, renewed (recovery, ADR-0012). */
+function jobOfTask(tx: Tx, taskId: string): string | undefined {
+  return tx
+    .select({ jobId: schema.tasks.jobId })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .get()?.jobId;
+}
+
+/**
+ * Hands a Task's claim (its lease and tokens, and its Job's Project slot) to
+ * `holder`, renewed (recovery, ADR-0012).
+ */
 export function takeOverClaim(tx: Tx, taskId: string, holder: string): void {
   const leaseId = taskLeaseId(tx, taskId);
   if (leaseId === undefined) return;
+  const jobId = jobOfTask(tx, taskId);
+  if (jobId !== undefined) holdProjectSlot(tx, { jobId, holder, expiresAt: leaseExpiry() });
   const now = new Date().toISOString();
   tx.update(schema.leases)
     .set({ holder, heartbeatAt: now, expiresAt: leaseExpiry() })
     .where(
       and(
         eq(schema.leases.leaseId, leaseId),
-        inArray(schema.leases.resourceKind, ['task', ...CAPACITY_KINDS]),
+        inArray(schema.leases.resourceKind, ['task', ...CLAIM_TOKEN_KINDS]),
       ),
     )
     .run();

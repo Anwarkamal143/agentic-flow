@@ -14,7 +14,6 @@ import {
   RUNTIME_HOST,
   ensureHomeDirs,
   githubSettings,
-  globalConcurrency,
   isProcessAlive,
   readConfig,
   readRuntimeRecord,
@@ -43,11 +42,15 @@ import { GitHubPort, TokenSource } from '@factory/github';
 import { createApp, type RuntimeStatus } from './app.js';
 import { InboxService } from './inbox.js';
 import { ArtifactStore } from './artifacts.js';
-import { runDoctor } from './doctor.js';
+import { onboardingEnvironment, runDoctor, staleConfigKeys } from './doctor.js';
+import { OnboardingService } from './onboarding.js';
+import { ConfigImportService } from './config-import.js';
+import { FactoryLevelService } from './factory-level.js';
 import { JobService } from './jobs.js';
 import { jobLogs } from './logs.js';
 import { ActivityService } from './activity.js';
 import { Outbox } from './outbox.js';
+import { ProjectService } from './projects.js';
 import { RepositoryService } from './repositories.js';
 import { StageScheduler } from './scheduler.js';
 import { CRASH_POINTS, TaskScheduler } from './execution.js';
@@ -56,6 +59,7 @@ import { CleanupWorker, openMissingCleanupItems } from './cleanup.js';
 import { Merger } from './merger.js';
 import { GitHubPauseGate } from './github-pause.js';
 import { GitHubPoller } from './poller.js';
+import { createFromIssue, IssueIntakePoller } from './issue-intake.js';
 import { applyLeaseKnobs, parseLeaseKnobs } from './sweeper.js';
 
 const ACTOR = 'system:runtime';
@@ -199,6 +203,11 @@ if (harness !== undefined && detection !== undefined) {
 }
 
 const database = openDatabase(home.dbPath, { redact });
+// The Factory Level (ADR-0056): created on the first start, `config.json`'s concurrency.global copied in once.
+const factoryLevel = new FactoryLevelService(database.db, () => {
+  notify();
+});
+factoryLevel.ensure(config);
 const startedAt = new Date();
 let state: RuntimeStatus['state'] = 'running';
 let port = 0;
@@ -242,6 +251,7 @@ if (recipeEnv !== undefined && recipeVersion === undefined) {
 
 const scheduler = new StageScheduler({
   db: database.db,
+  holder,
   harness,
   artifacts,
   spoolRoot: home.spoolDir,
@@ -256,6 +266,7 @@ const githubPause = new GitHubPauseGate({
   onChange: () => {
     notify();
     poller.wake();
+    intake.wake();
   },
   log,
 });
@@ -278,7 +289,7 @@ const tasks = new TaskScheduler({
   db: database.db,
   harness,
   harnessVersion: detection?.version ?? null,
-  globalConcurrency: globalConcurrency(config),
+  globalConcurrency: () => factoryLevel.globalConcurrency(),
   artifacts,
   workspaceRoot: config.workspaceRoot,
   runtimeEnv: process.env,
@@ -303,6 +314,17 @@ const poller = new GitHubPoller({
   redact,
   pollIntervalMs: github.pollIntervalMs,
   checksGraceMs: github.checksGraceMs,
+  onCommit: () => {
+    notify();
+  },
+  log,
+});
+// Offers each newly labeled issue of an intake Repository as an issue_job item (#112, ADR-0072).
+const intake = new IssueIntakePoller({
+  db: database.db,
+  github: githubPort,
+  pause: githubPause,
+  pollIntervalMs: github.pollIntervalMs,
   onCommit: () => {
     notify();
   },
@@ -336,6 +358,23 @@ const jobs = new JobService(
   recipeVersion,
 );
 
+const repositories = new RepositoryService(database.db, config.workspaceRoot, notify);
+const doctor = () =>
+  runDoctor(
+    process.env,
+    { token: githubToken, apiBaseUrl: github.apiBaseUrl },
+    config.harness?.id === 'claude-code' ? config.harness.command : 'claude',
+    config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
+    staleConfigKeys(home, factoryLevel.show()),
+    repositories.undetectedProfiles(),
+  );
+// The onboarding wizard (ADR-0074): its finish checks read doctor's probes.
+const onboarding = new OnboardingService(
+  database.db,
+  async () => onboardingEnvironment(await doctor()),
+  notify,
+);
+onboarding.ensure();
 const app = createApp({
   token,
   status: () => ({
@@ -360,17 +399,28 @@ const app = createApp({
             billing: config.harness?.id === 'claude-code' ? config.harness.billing : null,
           },
     github: { pause: githubPause.state() },
+    onboarding: onboarding.show(),
   }),
   github: () => ({ pause: githubPause.state() }),
-  doctor: () =>
-    runDoctor(
-      process.env,
-      { token: githubToken, apiBaseUrl: github.apiBaseUrl },
-      config.harness?.id === 'claude-code' ? config.harness.command : 'claude',
-      config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
-    ),
-  repositories: new RepositoryService(database.db, config.workspaceRoot, notify),
+  doctor,
+  factoryLevel,
+  onboarding,
+  configImport: new ConfigImportService(database.db, notify),
+  projects: new ProjectService(database.db, notify),
+  repositories,
   jobs,
+  createJobFromIssue: async (input) => {
+    const id = await createFromIssue(
+      {
+        db: database.db,
+        github: githubPort,
+        createJob: (tx, job, opts) => jobs.createIn(tx, job, opts),
+      },
+      input,
+    );
+    notify();
+    return id;
+  },
   inbox: new InboxService(
     database.db,
     artifacts,
@@ -379,6 +429,8 @@ const app = createApp({
     // A Blocker Approval's "cancel the Job" is the cancel operation itself (ADR-0026).
     (jobId, input) => jobs.cancel(jobId, input),
     githubPort,
+    // A contract step's follow-up Job (#110): created with the decision, by its decider.
+    (tx, input, opts) => jobs.createIn(tx, input, opts),
   ),
   artifacts,
   logs: (jobId) => jobLogs(database.db, artifacts, jobId),
@@ -407,6 +459,7 @@ const server = serve({ fetch: app.fetch, hostname: RUNTIME_HOST, port: requested
   cleanup.start();
   githubPause.start();
   poller.start();
+  intake.start();
   merger.start();
   writeRuntimeRecord(home, {
     pid: process.pid,
@@ -443,6 +496,7 @@ function shutdown(reason: string): void {
     tasks.close(),
     cleanup.close(),
     poller.close(),
+    intake.close(),
     merger.close(),
   ]);
   server.close(() => {

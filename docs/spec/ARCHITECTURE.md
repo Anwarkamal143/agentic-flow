@@ -167,7 +167,7 @@ A **Replan** (GLOSSARY) is started by a human (`requestReplan`, or "request chan
 ```text
 projects(id, name, config_json, created_at)
 repositories(id, project_id, name, source /*path or URL given at registration*/,
-             remote_url?, clone_path /*factory clone*/, default_branch, profile_json,
+             remote_url?, clone_path /*factory clone*/, default_branch, profile_json /*Repository Profile v2, ADR-0060*/,
              github_owner?, github_name? /*Phase C, ADR-0033*/,
              merge_policy /*never_auto|human_approval*/, merge_method /*merge|squash|rebase; Phase C, ADR-0038*/)
 jobs(id, project_id, title, description, type, priority, status, workflow_snapshot_json,
@@ -188,8 +188,9 @@ attempts(id, task_id, n, state, harness_id, session_ref, worktree_id,
 leases(resource_kind, resource_id, holder, lease_id, expires_at, heartbeat_at)
          -- PK (resource_kind, resource_id)
 worktrees(id, repository_id, path, branch, base_sha, state /*active|preserved|quarantined|removed*/)
-verification_runs(id, attempt_id, command_key, command, head_sha, exit_code,
-                  started_at, duration_ms, output_artifact_id)
+verification_runs(id, attempt_id, command_key, command, command_name?, command_args_json?,
+                  head_sha, exit_code, started_at, duration_ms, output_artifact_id)
+         -- command: the shell that ran; command_name/args: the profile command it named [Phase D]
 evidence(id, attempt_id, criterion_id?, kind, verdict, head_sha, base_sha, artifact_id)
          -- verdict: pass | fail | blocked | not_tested | not_applicable(+justification)
 reviews(id, attempt_id, reviewer_harness_id, head_sha, outcome, artifact_id,
@@ -198,7 +199,7 @@ review_findings(id, review_id, severity, fault_origin, location, problem, why,
                 recommendation, blocking)
 approvals(id, job_id, task_id?, kind, subject_ref, question, options_json, recommended,
           state, deferred, decided_by, decided_at, decision_json, expires_policy, version)
-         -- kind: question | plan | spec_change | blocker | cleanup | merge [Phase C]   (an "Inbox Item")
+         -- kind: question | plan | spec_change | blocker | cleanup | merge [Phase C] | contract_job | issue_job [Phase D]   (an "Inbox Item"; job_id null only for issue_job, ADR-0072)
          --   a PR closed without merging: the `pr_closed` Blocker Approval [Phase C, ADR-0043]
          --   cleanup: questions worktrees | pull_request | remote_branch, each default keep [ADR-0043]
          -- state: open | decided | cancelled | superseded;  expires_policy: remain_pending
@@ -267,14 +268,18 @@ The packet is what the factory **sends**. It is versioned (`packet_version`), st
 
 ```ts
 TaskPacket = {
-  packet_version: 1,
+  packet_version: 4,                       // 2 since Phase D (#102); 3: verification is profile commands only (#104); 4: context.upstream (#105)
   job: { id, title, objective },
   task: { id, key, title, objective, role, risk: "low"|"medium"|"high" },
   repository: { id, worktree_path, base_branch, base_sha },
   scope: { writable: Glob[], forbidden: Glob[], read_hints: string[] },
   acceptance: { code: string, text: string, mandatory: boolean }[],
-  verification: { key: string, command: string, required: boolean }[],
-  context: { artifacts: ArtifactRef[], files: string[], prior_findings?: Finding[] },
+  verification: { key: string, command: string /* profile command name */, args?: string[],
+                  run: string /* the shell it resolves to */, required: boolean }[],
+  context: { artifacts: ArtifactRef[], files: string[], prior_findings?: Finding[],
+             instruction_files: string[] /* the frozen profile's; guidance only [Phase D] */,
+             upstream: { task, repository, base_sha, head_sha, summary, diff }[]
+               /* approved Tasks of other Repositories it depends on; read-only context [Phase D, ADR-0065] */ },
   skills: SkillRef[],
   limits: { max_turns, wall_clock_s, max_output_tokens? },
   protocol: { result_file: ".factory/result.json", may_ask_questions: boolean }
@@ -298,8 +303,8 @@ TaskResult = {
 **The factory trusts none of it.** After the agent exits:
 1. Check that the worktree is clean apart from the result file. If not, commit the leftovers as a `wip` commit on the task branch and flag them for review (never discard them).
 2. Read the actual `head_sha` from git. Commits that are listed but missing are a protocol violation.
-3. **Path gate:** `git diff --name-only base_sha..head_sha` must be inside `writable` and outside `forbidden`. A violation fails the gate, with the offending paths attached.
-4. Run every `verification` command in the worktree. [Phase D] Each entry names a Repository Profile command (with validated arguments when the command accepts them), resolved from the Job's frozen Effective Configuration, never a planner-written shell command (ADR-0051). Store the exit code and the redacted output as evidence tied to `head_sha`.
+3. **Path gate:** `git diff --name-only base_sha..head_sha` must be inside `writable` and outside `forbidden`. A violation fails the gate, with the offending paths attached A Task's `forbidden` includes its Repository's Sensitive Paths, frozen in the Job's per-Repository section; forbidden beats writable (ADR-0051, ADR-0061).
+4. Run every `verification` command in the worktree. [Phase D] Each entry names a Repository Profile command (with validated arguments when the command accepts them), resolved from the Job's frozen Effective Configuration, never a planner-written shell command: plan validation refuses an entry that names no profile command (`plan.verification_command`, ADR-0051, ADR-0064). Only a Plan accepted before that refusal can still hold free shell; it runs as written, since a stored Plan is never re-validated. Store the exit code and the redacted output as evidence tied to `head_sha`.
 5. Missing or invalid result → the attempt is `failed` with `invalid_output`. The commits are preserved.
 
 Question rules [Phase B]: the developer packet sets `may_ask_questions: true`; the reviewer can't ask. `needs_decision` without a blocking question, and `done` with a blocking question, are protocol violations that get the one re-prompt (ADR-0010). A `scope_change_request` is treated as `needs_decision` (§8); scope never changes mid-Plan ([Phase E] `scope_change` Approval).
@@ -331,6 +336,7 @@ Every human-kind Blocker opens an Inbox Approval (kind `blocker`) with fixed opt
 | `foreign_push_rewrite` [Phase C] | adopt the rewrite (audited; verified and reviewed like any foreign push, the dropped approved commits listed in the PR body and the Delivery Report), cancel the Job. No "restore our head": it would overwrite the foreign push (ADR-0042) |
 | `pr_closed` [Phase C] | reopen the PR (a refusal from GitHub is reported on the item, which stays open), cancel the Job. Held by `merge_approval`; raised by the poller when the PR is closed without merging, and closed by it when the PR is open again (ADR-0043). Never cancels the Job on its own |
 | `integration_rewrite` [Phase C] | force-push with lease (pinned to the last head the factory pushed; audited; the PR is updated in place), open a new PR on `factory/<job-id>/integration-<n>` (`integration-2` the first time; the old one closed with a marked comment), cancel the Job |
+| `repository_not_writable` [Phase D] | check again (a Task the preflight blocked is readied and checked again before its first Attempt; a refused push re-queues `pull_request`), cancel the Job. Kind `infrastructure`, so the Job is `blocked`. Raised by the preflight before a Task's first Attempt (the Factory Clone not writable, or the token without push permission on GitHub) and by a push GitHub refuses for lack of permission, with the exact reason. Checking again is refused once the other Repositories were delivered without it (ADR-0068) |
 
 "Retry now" re-checks the pid and start time first; if the process is still alive it offers "kill and retry" instead. A human's word alone never starts a second process. A "replan" option counts against `max_replans`. Raising a cap is written to `audit_log` (`decided_by user:local`). Approvals stay pending (`remain_pending`, §17) and never auto-approve; "defer" only hides an item from the default view and can be undone.
 
@@ -354,7 +360,7 @@ Independence means:
   - In Phase A, delivery is a branch **inside the factory clone**. The Delivery Report gives the clone path, branch name and a ready-to-run `git fetch <clone_path> <branch>` command, so the user can pull the result into their own checkout.
   - In Phase C, the factory pushes from its clone to the remote.
 - One worktree per task: `<workspace_root>/<repo>/<job-id>/<task-key>` on branch `factory/<job-id>/<task-key>-<slug>`, created from a freshly fetched `base_sha`.
-- **Dependency Base [Phase B].** A Task with dependencies starts from the approved heads of the Tasks it depends on: one dependency's head directly, several merged in Plan order into a local commit in the Factory Clone. `base_sha` is that exact commit. This is **not** the Integration Branch (§14). A merge conflict is a human Blocker `base_merge_conflict` (§8.1), never an automatic replan.
+- **Dependency Base [Phase B].** A Task with dependencies starts from the approved heads of the Tasks it depends on: one dependency's head directly, several merged in Plan order into a local commit in the Factory Clone. `base_sha` is that exact commit. This is **not** the Integration Branch (§14). A merge conflict is a human Blocker `base_merge_conflict` (§8.1), never an automatic replan. Only dependencies in the Task's own Repository make the base [Phase D]: a dependency in another Repository only orders the Task (it is `ready` once that Task is approved) and gives it that Task's result summary and diff as `context.upstream` (ADR-0052, ADR-0065).
 - **Port allocation:** each worktree leases a block of 10 ports. The factory exports `FACTORY_PORT_BASE` and `PORT`, and records the lease.
 - **Test databases and services:** export `FACTORY_TASK_ID` and recommend repo commands use it in DB names and container names. The repo profile can declare `services` that need serializing (`lock: shared-db`).
 - **Dependency installs:** use the shared package-manager store (pnpm store, npm cache, uv cache). Record disk usage per worktree. A cleanup job removes worktrees in `removed`-eligible states only.
@@ -378,7 +384,7 @@ The UI always shows the tier of every running attempt. Dangerous-operation polic
 
 Loop (every 1–2 s, plus a wake-up after any relevant event):
 1. Select `ready` tasks ordered by `effective_priority = priority_weight + aging(wait_time) − project_share_penalty`. [Phase B: task priority, then time ready. Phase D, ADR-0050: `priority_weight + 0.5 × floor(wait_s / 60) − in_flight ÷ project limit` (0 when unlimited), shared by the proposal-Stage scheduler; `concurrency.perProjectJobs` counts Jobs with work in flight.]
-2. For each, check the capacity counters (global, per-project, per-repo, per-harness, per-job) and the usage-window state (§13). [Phase B: global (factory `config.json` `concurrency.global`, default 3), per repo and per job (Effective Configuration `concurrency.perRepository` / `perJob`, default 2 each, Job overrides may raise or lower). Per-project waits for v1, per-harness for Phase E. The proposal Stages keep their own one-slot scheduler.]
+2. For each, check the capacity counters (global, per-project, per-repo, per-harness, per-job) and the usage-window state (§13). [Phase B: global (the Factory Level's `concurrency.global`, default 3; Phase D moved it out of `config.json`, ADR-0056), per repo and per job (Effective Configuration `concurrency.perRepository` / `perJob`, default 2 each, Job overrides may raise or lower). Phase D (ADR-0058): per project, `concurrency.perProjectJobs` (Factory Level, overridable per Project, read at each claim, default unlimited) as a `capacity.project` slot a Job holds while it has work in flight. Per-harness waits for Phase E. The proposal Stages keep their own one-slot scheduler.]
 3. Claim in one transaction: `INSERT INTO leases (...) ON CONFLICT DO NOTHING` for `('task', id)` plus the capacity tokens, then transition `ready → claimed` with an optimistic version check. If any step fails, roll back.
 4. Dispatch: create the worktree if needed, then `harness.start`. Heartbeat the lease every 15 s. A lease expires after 90 s without a heartbeat.
 5. On exit: release the lease and tokens in the same transaction as the attempt's state change.
@@ -401,14 +407,15 @@ Loop (every 1–2 s, plus a wake-up after any relevant event):
 - **Transport:** one GitHub port, REST over `fetch` at a configurable API base URL. Authentication is a **token reference** (`gh` or `env:NAME`) resolved for each request, never stored, and taught to redaction. A Repository's coordinates (`owner/name`) come from a github.com remote or `repo add --github` (ADR-0033).
 - **Local-first:** GitHub is **polled** (conditional requests with ETag, 30–60 s while a PR is open). Webhooks or a tunnel are optional [Later].
 - **Rate limits and backoff:** a rate limit is capacity, not failure. It sets a GitHub-wide `paused_until` (the `github_state` row, GitHub's reset), with `github.paused` and `github.resumed` events. No GitHub API call is made until the reset, no Stage Run changes, and no Blocker is raised. Transient failures (5xx, network) back the poller off exponentially from the poll interval, capped at 5 minutes (ADR-0045).
-- **Multi-repo:** one integration branch and one PR per repository. Each job has a `delivery_order` (from the DAG). The default contract strategy is **expand → migrate consumers → contract**, with feature flags where a change can't be made additive. Reports must say that multiple PRs are *not* atomic. [Phase D] Every PR opens when its integration is ready; a later Repository's Merge Gate waits until the earlier PR in the Delivery Order has merged. The contract step (removing the old interface) is never in the same Job: the planner marks it deferred, and once every PR has merged an Approval offers a follow-up Job for it (ADR-0052).
+- **Multi-repo:** one integration branch and one PR per repository. Each job has a `delivery_order` (from the DAG; `jobs.delivery_order_json`, written with the Plan's Tasks, ADR-0065). The default contract strategy is **expand → migrate consumers → contract**, with feature flags where a change can't be made additive. Reports must say that multiple PRs are *not* atomic. [Phase D] Every PR opens when its integration is ready; a later Repository's Merge Gate waits until the earlier PR in the Delivery Order has merged. The contract step (removing the old interface) is never in the same Job: the planner marks it deferred, and once every PR has merged an Approval offers a follow-up Job for it (ADR-0052). [Phase D, #106, ADR-0066] Each Repository's Integration Review gets the other Repositories' approved Plan Task diffs as read-only context (`otherRepositories`, `integration-review-packet@2`) and is tied to its own `(head, base)`. Each PR body has a "Part of a multi-repository Job" section (sibling PRs, the Delivery Order, the not-atomic sentence), re-rendered by the poller as siblings open and merge. The Merge Gate's `delivery_order` condition (only for a Repository with an `after` list) is pending until each earlier PR merged; under `human_approval` an earlier PR whose merge is approved also passes, because the merger merges a Job's PRs in Delivery Order and stops at the first it can't merge. A merge seen on GitHub while an earlier PR is unmerged is recorded on the row (`merged_before_json`, `pull_request.merged_out_of_order`) and flagged in the Delivery Report v7, which lists each Repository in Delivery Order with its status, Integration Branch and PR. [Phase D, #108, ADR-0068] When the only Blockers are `repository_not_writable` and every other Repository's Plan Tasks are approved, `execution` succeeds and only those Repositories are integrated and delivered; `closure` writes the report, then ends `blocked` on the held Repository's Blocker, so a Partial Completion is never `completed`. The report's `partialCompletion` ("partial completion: N of M delivered") and each Repository's `blocker` say what was not delivered and why, while blocked and after a cancel. [Phase D, #110, ADR-0070] A Plan Task marked `deferred` (the contract step) gets no Task row and is left out of the Delivery Order, the overlap check and mandatory coverage; no Task that runs may depend on one, and an upstream of another Repository's Task must cover Acceptance Criteria (the contract). The Delivery Report's `contractStep` lists the deferred Tasks as pending; when `closure` succeeds with every Repository's PR merged it opens a `contract_job` Approval, whose `start_job` creates the follow-up Job (same Project, the contract Repositories, the deferred Tasks as its description) in the decision's transaction.
 
 ## 15. Configuration [MVP minimal; v1 full hierarchy]
 
-- **The DB is authoritative at runtime.** `factory config export` / `import` gives a YAML GitOps path. An import is validated, diffed, and applied as one audited change.
+- **The DB is authoritative at runtime.** `factory config export` / `import` gives a YAML GitOps path. An import is validated, diffed, and applied as one audited change, at the configuration version its diff was shown at (ADR-0073).
 - Levels [Phase D, ADR-0049], from least to most specific: recipe defaults < **Factory** (the factory-wide level in the DB; "org" for a single-user factory) < project < repository < job overrides < task restrictions. The most specific level that sets a value wins; Immutable Invariants are a ceiling no level lifts. A level may only **narrow** anything permission-related relative to the level above it (also on import). The Factory's `config.json` is bootstrap-only (home, port, workspace root, the API token's location).
 - `resolveEffectiveConfig(job)` is a pure function. Its result is stored in `jobs.config_snapshot_json` at creation, so later config edits never change a running job. The snapshot holds Job-wide values plus a section for every Repository of the Project at creation; the Job uses the sections of its confirmed Repository set. (Re-snapshotting by a human is promised but deferred past Phase D, spec issue 46.)
-- Each effective value records its source level (for the "effective value" UI).
+- Each effective value records its source level (for the "effective value" UI); permission values (`mergePolicy`, `planApproval`, ADR-0057) also record their chain of narrowings. Every config write is checked against the whole stored tree and refused when it would leave a level wider than its parent.
+- The effective-config page [Phase D, ADR-0059]: a Job page shows its frozen snapshot; a Project page and a Repository page show a live preview, `GET /v1/projects/:ref/effective-config` and `GET /v1/repositories/:id/effective-config`, which resolve the stored levels at each read with no Job-level overrides (the reader `job create` uses) and store nothing.
 
 ## 16. Identity [MVP single user; v1 RBAC]
 

@@ -4,9 +4,10 @@
  * runtime record from the factory home (FACTORY_HOME, default `~/.factory`),
  * so the token never reaches the browser. Every response is parsed against
  * the `@factory/domain` contract, so the pages show only what was persisted
- * and understood. Reads are GET requests. The only writes are the Inbox's
- * ({@link changeInboxItem}), made as `user:local`, the actor the token stands
- * for (ADR-0022).
+ * and understood. Reads are GET requests (and the Repository inspection, a POST
+ * that writes nothing). The only writes are the Inbox's ({@link changeInboxItem})
+ * and the setup wizard's ({@link setupWrite}, ADR-0074), made as `user:local`,
+ * the actor the token stands for (ADR-0022).
  */
 import {
   AcceptanceCriterionSchema,
@@ -17,11 +18,19 @@ import {
   PlanViewSchema,
   PullRequestRecordSchema,
   ProjectSchema,
+  ProjectDetailSchema,
+  ProjectSummarySchema,
+  EffectiveConfigPreviewSchema,
   RepositorySchema,
   AttemptTailSchema,
   AttemptSchema,
   FactoryEventSchema,
   GitHubStateSchema,
+  FactoryLevelSchema,
+  OnboardingSchema,
+  OnboardingChecksSchema,
+  RepositoryInspectionSchema,
+  BillingSchema,
   JobSchema,
   JobSummarySchema,
   ReviewSchema,
@@ -32,11 +41,18 @@ import {
   type Artifact,
   type PlanView,
   type Project,
+  type ProjectDetail,
+  type ProjectSummary,
+  type EffectiveConfigPreview,
   type Repository,
   type AttemptTail,
   type Attempt,
   type FactoryEvent,
   type GitHubState,
+  type FactoryLevel,
+  type Onboarding,
+  type OnboardingChecks,
+  type RepositoryInspection,
   type Job,
   type JobSummary,
   type PullRequestRecord,
@@ -202,6 +218,31 @@ export function projects(): Promise<Project[]> {
   return get('/v1/projects', z.array(ProjectSchema));
 }
 
+/** Every Project with its Repositories and active Jobs (ADR-0055). */
+export function projectSummaries(): Promise<ProjectSummary[]> {
+  return get('/v1/projects', z.array(ProjectSummarySchema));
+}
+
+export function projectDetail(ref: string): Promise<ProjectDetail> {
+  return get(`/v1/projects/${encodeURIComponent(ref)}`, ProjectDetailSchema);
+}
+
+/** What a new Job of the Project would freeze now, resolved by the runtime at this read (ADR-0059). */
+export function projectConfigPreview(ref: string): Promise<EffectiveConfigPreview> {
+  return get(
+    `/v1/projects/${encodeURIComponent(ref)}/effective-config`,
+    EffectiveConfigPreviewSchema,
+  );
+}
+
+/** The same for one Repository: the Job-wide values and its section only. */
+export function repositoryConfigPreview(id: string): Promise<EffectiveConfigPreview> {
+  return get(
+    `/v1/repositories/${encodeURIComponent(id)}/effective-config`,
+    EffectiveConfigPreviewSchema,
+  );
+}
+
 export function repositories(): Promise<Repository[]> {
   return get('/v1/repositories', z.array(RepositorySchema));
 }
@@ -265,7 +306,9 @@ export interface InboxContext {
 }
 
 export async function inboxContext(items: readonly Approval[]): Promise<InboxContext> {
-  const planJobs = [...new Set(items.filter((i) => i.kind === 'plan').map((i) => i.jobId))];
+  const planJobs = [
+    ...new Set(items.flatMap((i) => (i.kind === 'plan' && i.jobId !== null ? [i.jobId] : []))),
+  ];
   const [ps, rs, plans] = await Promise.all([
     projects(),
     repositories(),
@@ -276,4 +319,121 @@ export async function inboxContext(items: readonly Approval[]): Promise<InboxCon
     repositories: new Map(rs.map((r) => [r.id, r.name])),
     plans: new Map(plans),
   };
+}
+
+// ---- The setup wizard (ADR-0074) ---------------------------------------------
+
+/** What the wizard's basics and harnesses steps show of `GET /v1/status`. */
+const RuntimeStatusSchema = z.object({
+  version: z.string(),
+  home: z.string(),
+  workspaceRoot: z.string(),
+  host: z.string(),
+  port: z.number(),
+  database: z.object({ journalMode: z.string(), migrations: z.number() }),
+  harness: z
+    .object({
+      id: z.string(),
+      version: z.string().nullable(),
+      installed: z.boolean(),
+      credentials: z.string(),
+      billing: BillingSchema.nullable(),
+    })
+    .nullable(),
+});
+export type RuntimeStatus = z.infer<typeof RuntimeStatusSchema>;
+
+export function runtimeStatus(): Promise<RuntimeStatus> {
+  return get('/v1/status', RuntimeStatusSchema);
+}
+
+/** What the wizard shows of `GET /v1/doctor`: the tools, credential presence, GitHub. */
+const DoctorSchema = z.object({
+  tools: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      status: z.enum(['ok', 'missing', 'failed']),
+      version: z.string().optional(),
+      fix: z.string().optional(),
+    }),
+  ),
+  credentials: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      source: z.string(),
+      present: z.boolean(),
+      detected: z.literal(false).optional(),
+    }),
+  ),
+  github: z.object({
+    tokenReference: z.string(),
+    apiBaseUrl: z.string(),
+    resolves: z.boolean(),
+    problem: z.string().optional(),
+  }),
+});
+export type Doctor = z.infer<typeof DoctorSchema>;
+
+export function doctor(): Promise<Doctor> {
+  return get('/v1/doctor', DoctorSchema);
+}
+
+export function onboarding(): Promise<Onboarding> {
+  return get('/v1/onboarding', OnboardingSchema);
+}
+
+export function onboardingChecks(): Promise<OnboardingChecks> {
+  return get('/v1/onboarding/checks', OnboardingChecksSchema);
+}
+
+export function factoryConfig(): Promise<FactoryLevel> {
+  return get('/v1/factory/config', FactoryLevelSchema);
+}
+
+/** Profile Detection's proposal for a checkout (ADR-0060). Writes nothing. */
+export async function inspectRepository(
+  path: string,
+): Promise<{ ok: true; inspection: RepositoryInspection } | { ok: false; message: string }> {
+  const res = await call('/v1/repositories/inspect', { method: 'POST', body: { path } });
+  const json: unknown = await res.json();
+  if (res.ok) return { ok: true, inspection: RepositoryInspectionSchema.parse(json) };
+  return { ok: false, message: refusalMessage(res.status, json) };
+}
+
+/** What the runtime said to a wizard write: done, or its refusal. */
+export type SetupWriteResult =
+  { ok: true } | { ok: false; status: number; error: string; message: string };
+
+/**
+ * One of the wizard's writes, through the runtime API as `user:local`:
+ * creating a Project, registering a Repository, a preset, concurrency, or Next.
+ */
+export async function setupWrite(
+  path:
+    | '/v1/projects'
+    | '/v1/repositories'
+    | '/v1/factory/config/preset'
+    | '/v1/factory/config/set-many'
+    | '/v1/onboarding/complete',
+  body: unknown,
+): Promise<SetupWriteResult> {
+  const res = await call(path, { method: 'POST', body });
+  const json: unknown = await res.json();
+  if (res.ok) return { ok: true };
+  const err = ApiErrorSchema.safeParse(json);
+  return {
+    ok: false,
+    status: res.status,
+    error: err.success ? err.data.error : 'unknown',
+    message: refusalMessage(res.status, json),
+  };
+}
+
+function refusalMessage(status: number, json: unknown): string {
+  const err = ApiErrorSchema.safeParse(json);
+  return err.success && err.data.message !== undefined
+    ? err.data.message
+    : `the runtime answered HTTP ${String(status)}`;
 }

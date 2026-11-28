@@ -9,7 +9,12 @@ import {
   resolveHome,
   runtimeUrl,
 } from '@factory/home';
-import { API_KEY_BILLING_NOTE, type Billing, type GitHubState } from '@factory/domain';
+import {
+  API_KEY_BILLING_NOTE,
+  type Billing,
+  type GitHubState,
+  type Onboarding,
+} from '@factory/domain';
 import { findRuntime, RuntimeClient } from '../client.js';
 
 /** Exit code for `status` when the runtime is not running (LSB convention). */
@@ -26,6 +31,7 @@ interface StatusBody {
   database: { journalMode: string; migrations: number };
   harness: { id: string; version: string | null; billing: Billing | null } | null;
   github: GitHubState;
+  onboarding: Pick<Onboarding, 'steps' | 'lastCompleted' | 'next' | 'finished'>;
 }
 
 export async function start(): Promise<number> {
@@ -112,9 +118,17 @@ export async function status(opts: { json: boolean }): Promise<number> {
         : body.harness?.billing === 'subscription'
           ? '  billing:        your subscription login (no credential passed)\n'
           : '') +
-      `  github:         ${describePause(body.github)}\n`,
+      `  github:         ${describePause(body.github)}\n` +
+      `  setup:          ${describeOnboarding(body.onboarding)}\n`,
   );
   return 0;
+}
+
+/** The onboarding wizard's progress (ADR-0074): the last step completed, and where it resumes. */
+export function describeOnboarding(o: StatusBody['onboarding']): string {
+  if (o.finished) return 'finished';
+  const done = o.lastCompleted === null ? 0 : o.steps.indexOf(o.lastCompleted) + 1;
+  return `${String(done)} of ${String(o.steps.length)} steps completed, resumes at ${String(o.next)} (the dashboard's /setup)`;
 }
 
 /** The GitHub-wide pause (ADR-0045): a rate limit is capacity; calls resume at the reset. */

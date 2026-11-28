@@ -347,7 +347,9 @@ pnpm factory init                      # optional: --workspace-root <dir>
 pnpm factory start
 pnpm factory doctor                    # tools found, credentials present (values are never read)
 
-# 4. Register a repository. The factory makes its own clone; your checkout is left alone.
+# 4. Create a project, then register a repository in it.
+#    The factory makes its own clone; your checkout is left alone.
+pnpm factory project create my-app
 pnpm factory repo add ~/code/my-app \
   --project my-app \
   --test-command "npm test" --typecheck-command "npm run typecheck" \
@@ -444,7 +446,7 @@ Each job freezes its **effective configuration** when it is created (`maxAttempt
 
 | Concurrency limit | Default | Set by |
 |---|---|---|
-| global | 3 | `config.json` `concurrency.global` |
+| global | 3 | the Factory Level: `factory config set concurrency.global <n>` (a `config.json` value is copied in once, on the first start, then ignored) |
 | per repository | 2 | effective config, or `job create --per-repository` |
 | per job | 2 | effective config, or `job create --per-job` |
 
@@ -484,8 +486,13 @@ Run commands with `pnpm factory <cmd>` (or `node apps/cli/dist/main.js <cmd>`). 
 | `init [--workspace-root <dir>]` | Create the factory home, the API token and the config |
 | `start` / `stop` / `status` | Start the runtime in the background, stop it cleanly, or report whether it is running |
 | `doctor` | Check the tools and whether credentials are present (it never reads their values) |
-| `repo add <path> [options]` | Register a repository: make its factory clone and save its confirmed commands. Options: `--project`, `--test-command`, `--typecheck-command`, `--setup`, `--github owner/name`, `--required-check <name>`…, `--merge-policy never_auto\|human_approval`, `--merge-method merge\|squash\|rebase`, `--yes` |
-| `job create --repo <id\|name> --title <t> [--description <d>]` | Create a job. `--per-repository`/`--per-job` override the concurrency limits. `--merge-policy` may only be stricter than the repository's |
+| `config show` / `config set <key> <value> [--expect-version <n>]` | Show or change the Factory Level, the factory-wide configuration in the database (today `concurrency.global`). Each change bumps its version and is audited |
+| `project create <name>` / `project list` / `project show <project>` | Create a project (the only way one comes to exist), list projects with their repositories and active jobs, or show one with the config set on it |
+| `project config set <project> <key> <value>` | Set one project config key, dotted when nested (`concurrency.perJob`). New jobs use it; jobs already created keep their frozen configuration |
+| `repo add <path> [options]` | Register a repository in an existing project (`--project`; unset: the only project; an unknown one is refused): make its factory clone and save its confirmed Repository Profile (Profile Detection proposes the package manager, named commands, CI files with candidate checks, instruction files and Sensitive Paths from the checkout's HEAD; setup is never detected). Options: `--project`, `--test-command`, `--typecheck-command`, `--setup`, `--github owner/name`, `--required-check <name>`…, `--merge-policy never_auto\|human_approval`, `--merge-method merge\|squash\|rebase`, `--yes` |
+| `repo profile detect <repo> [--yes]` | Re-run Profile Detection and show the diff against the saved profile; saved once confirmed |
+| `repo profile set <repo> <key> <value>` | Set one profile field: `commands.<name>`, `commands.<name>.acceptsArgs`, `packageManager`, `sensitivePaths`, `instructionFiles`, `requiredChecks`, `setup` |
+| `job create --title <t> [--project <p>] [--repo <id\|name>] [--description <d>]` | Create a job. Without `--project`, the only project; without `--repo`, the project's only repository. `--per-repository`/`--per-job` override the concurrency limits. `--merge-policy` may only be stricter than the repository's |
 | `job list` / `job show <id>` | List jobs (newest first), or show one job: status, stages, workflow snapshot, config |
 | `job cancel <id> [--reason <t>]` | Cancel a job. Prints its cleanup approval and the questions it asks |
 | `job replan <id> --feedback <t>` | Request a replan during execution. Unaffected tasks keep their work |
@@ -649,7 +656,7 @@ These are highlights. The full, current list is in [`PROGRESS.md`](PROGRESS.md#k
 
 - Single local user only (no RBAC). The actors are `user:local`, `agent:<harness>/<attempt>` and `system:<component>`.
 - The harness is chosen by editing `config.json` by hand. Without one, jobs wait at `triage`.
-- `repo add` takes a local path only (registering by URL isn't built). Command detection covers `package.json` projects only. There is no `repo list` CLI command (the API has one).
+- `repo add` takes a local path only (registering by URL isn't built). Profile Detection covers `package.json` projects and GitHub Actions workflows only. There is no `repo list` CLI command (the API has one).
 - Single-repository jobs only, until Phase D.
 - Phase C GitHub behavior is tested against a fake GitHub. Only C7 (and the check re-run test) ran against the real GitHub. A real `git push` uses git's own credentials (for example `gh auth setup-git`).
 - Tier 0 is a guardrail: the network isn't restricted, and the setup command runs on the host as your user.
