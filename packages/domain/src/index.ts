@@ -96,6 +96,7 @@ export * from './config-import.js';
 export * from './scheduling.js';
 export * from './profile.js';
 export * from './writability.js';
+export * from './onboarding.js';
 
 /** Operator-set Project configuration. Every field is optional: unset means inherit. */
 export const ProjectConfigSchema = z

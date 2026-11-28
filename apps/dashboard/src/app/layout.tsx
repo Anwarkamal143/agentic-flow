@@ -36,10 +36,13 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               >
                 Live activity
               </Link>
+              <Link href="/setup" className="text-sm text-muted-foreground hover:text-foreground">
+                Setup
+              </Link>
             </nav>
             <span className="ml-auto text-xs text-muted-foreground">
-              Decisions are made in the Inbox; everything else goes through the <code>factory</code>{' '}
-              CLI.
+              Decisions are made in the Inbox and setup in the wizard; everything else goes through
+              the <code>factory</code> CLI.
             </span>
           </div>
         </header>

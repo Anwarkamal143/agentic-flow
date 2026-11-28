@@ -42,7 +42,8 @@ import { GitHubPort, TokenSource } from '@factory/github';
 import { createApp, type RuntimeStatus } from './app.js';
 import { InboxService } from './inbox.js';
 import { ArtifactStore } from './artifacts.js';
-import { runDoctor, staleConfigKeys } from './doctor.js';
+import { onboardingEnvironment, runDoctor, staleConfigKeys } from './doctor.js';
+import { OnboardingService } from './onboarding.js';
 import { ConfigImportService } from './config-import.js';
 import { FactoryLevelService } from './factory-level.js';
 import { JobService } from './jobs.js';
@@ -358,6 +359,22 @@ const jobs = new JobService(
 );
 
 const repositories = new RepositoryService(database.db, config.workspaceRoot, notify);
+const doctor = () =>
+  runDoctor(
+    process.env,
+    { token: githubToken, apiBaseUrl: github.apiBaseUrl },
+    config.harness?.id === 'claude-code' ? config.harness.command : 'claude',
+    config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
+    staleConfigKeys(home, factoryLevel.show()),
+    repositories.undetectedProfiles(),
+  );
+// The onboarding wizard (ADR-0074): its finish checks read doctor's probes.
+const onboarding = new OnboardingService(
+  database.db,
+  async () => onboardingEnvironment(await doctor()),
+  notify,
+);
+onboarding.ensure();
 const app = createApp({
   token,
   status: () => ({
@@ -382,18 +399,12 @@ const app = createApp({
             billing: config.harness?.id === 'claude-code' ? config.harness.billing : null,
           },
     github: { pause: githubPause.state() },
+    onboarding: onboarding.show(),
   }),
   github: () => ({ pause: githubPause.state() }),
-  doctor: () =>
-    runDoctor(
-      process.env,
-      { token: githubToken, apiBaseUrl: github.apiBaseUrl },
-      config.harness?.id === 'claude-code' ? config.harness.command : 'claude',
-      config.harness?.id === 'claude-code' ? config.harness.billing : undefined,
-      staleConfigKeys(home, factoryLevel.show()),
-      repositories.undetectedProfiles(),
-    ),
+  doctor,
   factoryLevel,
+  onboarding,
   configImport: new ConfigImportService(database.db, notify),
   projects: new ProjectService(database.db, notify),
   repositories,

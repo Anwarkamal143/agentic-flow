@@ -18,6 +18,7 @@ import {
   staleBootstrapKeys,
   type Billing,
   type FactoryLevel,
+  type OnboardingCheckInput,
 } from '@factory/domain';
 import { readConfig, type FactoryHome } from '@factory/home';
 import type { TokenSource } from '@factory/github';
@@ -49,6 +50,8 @@ export interface CredentialCheck {
   /** Where presence was looked for: an environment variable name, or a command. */
   source: string;
   present: boolean;
+  /** `false` when presence could not be detected safely (then `present` is false too). */
+  detected?: false;
 }
 
 /**
@@ -190,6 +193,8 @@ export async function runDoctor(
       source: 'claude auth status',
       // Exit code only; the output is discarded.
       present: probe.loggedIn === true,
+      // `claude auth status` could not run to an exit code, so the login is unknown (#114).
+      ...(probe.loggedIn === null ? { detected: false } : {}),
     });
   }
   const gh = tools.find((t) => t.id === 'gh');
@@ -307,4 +312,22 @@ function run(file: string, args: string[], env: NodeJS.ProcessEnv): Promise<RunR
       },
     );
   });
+}
+
+/**
+ * What the onboarding finish checks read from a doctor report (ADR-0074):
+ * node, git and Claude Code's statuses, its login (`null`: not detected
+ * safely), and its billing.
+ */
+export function onboardingEnvironment(
+  report: DoctorReport,
+): Omit<OnboardingCheckInput, 'repositories'> {
+  const status = (id: ToolCheck['id']) =>
+    report.tools.find((t) => t.id === id)?.status ?? 'missing';
+  const login = report.credentials.find((c) => c.id === 'claude_login');
+  return {
+    tools: { node: status('node'), git: status('git'), claude: status('claude') },
+    claudeLogin: login === undefined || login.detected === false ? null : login.present,
+    billing: report.billing?.mode ?? null,
+  };
 }

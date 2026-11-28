@@ -17,6 +17,10 @@ import {
   type FactoryLevelConfig,
   type SetFactoryConfigInput,
   setFactoryConfigKey,
+  presetChanges,
+  type ApplyPresetInput,
+  type FactoryConfigChange,
+  type SetFactoryConfigManyInput,
 } from '@factory/domain';
 import { asc, eq, sql } from 'drizzle-orm';
 import { assertNarrowing, bumpConfigVersion } from './config-tree.js';
@@ -79,6 +83,43 @@ export class FactoryLevelService {
 
   /** `factory config set`: one key, validated, refused on a stale `expectedVersion`. */
   setKey(input: SetFactoryConfigInput, actor: string): FactoryLevel {
+    return this.setKeys(
+      { changes: [{ key: input.key, value: input.value }], expectedVersion: input.expectedVersion },
+      actor,
+      { action: 'factory_config.set', payload: { key: input.key } },
+    );
+  }
+
+  /**
+   * Several keys in one transaction, with one audit row and one event (the
+   * wizard's concurrency step, ADR-0074): all of them or none.
+   */
+  setMany(input: SetFactoryConfigManyInput, actor: string): FactoryLevel {
+    return this.setKeys(input, actor, {
+      action: 'factory_config.set',
+      payload: { keys: input.changes.map((c) => c.key) },
+    });
+  }
+
+  /** A policy preset (ADR-0053): its keys in one transaction; Controlled autonomy is refused. */
+  applyPreset(input: ApplyPresetInput, actor: string): FactoryLevel {
+    const preset = presetChanges(input);
+    if (!preset.ok) throw new ApiFailure(400, preset.code, preset.message);
+    return this.setKeys(
+      { changes: preset.changes, expectedVersion: input.expectedVersion },
+      actor,
+      {
+        action: 'factory_config.preset',
+        payload: { preset: input.preset, keys: preset.changes.map((c) => c.key) },
+      },
+    );
+  }
+
+  private setKeys(
+    input: { changes: readonly FactoryConfigChange[]; expectedVersion?: number | undefined },
+    actor: string,
+    audit: { action: string; payload: Record<string, unknown> },
+  ): FactoryLevel {
     const updated = this.db.transaction(
       (tx) => {
         const current = read(tx);
@@ -90,11 +131,15 @@ export class FactoryLevelService {
             `the Factory Level is at version ${String(current.version)}, not ${String(input.expectedVersion)}`,
           );
         }
-        const change = setFactoryConfigKey(current.config, input.key, input.value);
-        if (!change.ok) throw new ApiFailure(400, change.code, change.message);
-        assertNarrowing(tx, { factory: change.config });
+        let config = current.config;
+        for (const { key, value } of input.changes) {
+          const change = setFactoryConfigKey(config, key, value);
+          if (!change.ok) throw new ApiFailure(400, change.code, change.message);
+          config = change.config;
+        }
+        assertNarrowing(tx, { factory: config });
         const level: FactoryLevel = {
-          config: change.config,
+          config,
           version: current.version + 1,
           updatedAt: new Date().toISOString(),
         };
@@ -109,10 +154,10 @@ export class FactoryLevelService {
         bumpConfigVersion(tx);
         record(tx, {
           actor,
-          action: 'factory_config.set',
+          action: audit.action,
           before: current.config,
           level,
-          payload: { key: input.key },
+          payload: audit.payload,
         });
         return level;
       },
