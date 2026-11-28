@@ -165,9 +165,8 @@ Source: relayed from another Claude session (s-factory-dc) on the user's behalf,
 
 <!-- owner → globs; clear when the workstream is merged -->
 
-- 2026-11-28, Phase D (spec #93), two parallel workstreams:
+- 2026-11-28, Phase D (spec #93), one parallel workstream (#114 merged):
   - **C4 race fix** → `apps/runtime/src/inbox.ts`, `apps/runtime/src/poller.ts`, `tests/scenarios/ci-failure.test.ts`, `tests/support/github.ts`.
-  - **#114 onboarding wizard** → everything else (it owns `packages/domain`, `packages/db`, the rest of `apps/**`).
 
 ## Human decisions (outside CLAUDE.md §7)
 
