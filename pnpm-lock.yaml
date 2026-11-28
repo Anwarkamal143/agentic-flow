@@ -68,6 +68,9 @@ importers:
       '@factory/runtime':
         specifier: workspace:*
         version: link:../runtime
+      yaml:
+        specifier: 2.9.1
+        version: 2.9.1
 
   apps/dashboard:
     dependencies:

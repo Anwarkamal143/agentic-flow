@@ -43,6 +43,7 @@ import { createApp, type RuntimeStatus } from './app.js';
 import { InboxService } from './inbox.js';
 import { ArtifactStore } from './artifacts.js';
 import { runDoctor, staleConfigKeys } from './doctor.js';
+import { ConfigImportService } from './config-import.js';
 import { FactoryLevelService } from './factory-level.js';
 import { JobService } from './jobs.js';
 import { jobLogs } from './logs.js';
@@ -393,6 +394,7 @@ const app = createApp({
       repositories.undetectedProfiles(),
     ),
   factoryLevel,
+  configImport: new ConfigImportService(database.db, notify),
   projects: new ProjectService(database.db, notify),
   repositories,
   jobs,

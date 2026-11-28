@@ -19,7 +19,7 @@ import {
   setFactoryConfigKey,
 } from '@factory/domain';
 import { asc, eq, sql } from 'drizzle-orm';
-import { assertNarrowing } from './config-tree.js';
+import { assertNarrowing, bumpConfigVersion } from './config-tree.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 
@@ -106,6 +106,7 @@ export class FactoryLevelService {
           })
           .where(eq(schema.factoryLevel.id, ROW_ID))
           .run();
+        bumpConfigVersion(tx);
         record(tx, {
           actor,
           action: 'factory_config.set',

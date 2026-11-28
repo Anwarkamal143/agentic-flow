@@ -1,9 +1,15 @@
+import { readFileSync } from 'node:fs';
+import YAML from 'yaml';
 import {
   factoryConfigKeys,
   factoryGlobalConcurrency,
   FAIRNESS_DEFAULTS,
   RECIPE_DEFAULTS,
+  type ConfigDiffEntry,
+  type ConfigExport,
+  type ConfigImportResult,
   type FactoryLevel,
+  type ImportConfigInput,
   type SetFactoryConfigInput,
 } from '@factory/domain';
 import { EXIT_NOT_RUNNING } from './lifecycle.js';
@@ -83,4 +89,89 @@ export async function configSet(
         : 'Jobs created from now on use it; existing Jobs keep the value they froze.\n'),
   );
   return 0;
+}
+
+/**
+ * `factory config export` (ADR-0073): the Factory Level, the Projects and their
+ * Repositories as YAML on stdout, keyed by name. No token value is in it: no
+ * level stores one.
+ */
+export async function configExport(): Promise<number> {
+  const api = client();
+  if (api === undefined) return EXIT_NOT_RUNNING;
+  const exported = await api.json<ConfigExport>('GET', '/v1/config/export');
+  const doc = new YAML.Document(exported.document);
+  doc.commentBefore =
+    ` factory config export, configuration version ${String(exported.configVersion)}.\n` +
+    ' Re-apply with: factory config import <file>. Holds no token values.';
+  process.stdout.write(doc.toString());
+  return 0;
+}
+
+/**
+ * `factory config import <file> [--apply --expect-version <n>]` (ADR-0073):
+ * prints the diff; applies it only with `--apply` at the version the diff was
+ * shown at.
+ */
+export async function configImport(
+  file: string,
+  opts: { apply: boolean; expectVersion?: number; json: boolean },
+): Promise<number> {
+  let document: unknown;
+  try {
+    document = YAML.parse(readFileSync(file, 'utf8'));
+  } catch (err) {
+    process.stderr.write(
+      `factory: cannot read ${file} as YAML: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return 1;
+  }
+  const api = client();
+  if (api === undefined) return EXIT_NOT_RUNNING;
+  const body: ImportConfigInput = {
+    document,
+    apply: opts.apply,
+    ...(opts.expectVersion === undefined ? {} : { expectedVersion: opts.expectVersion }),
+  };
+  const result = await api.json<ConfigImportResult>('POST', '/v1/config/import', { body });
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    return 0;
+  }
+  const version = String(result.configVersion);
+  if (result.changes.length === 0) {
+    process.stdout.write(`No changes: ${file} matches the configuration (version ${version}).\n`);
+    return 0;
+  }
+  const out = [
+    result.applied
+      ? `Applied ${String(result.changes.length)} change(s) in one transaction (configuration version ${version}):`
+      : `${String(result.changes.length)} change(s) against configuration version ${version}:`,
+    ...result.changes.map(diffLine),
+  ];
+  if (result.applied) {
+    out.push('Jobs created from now on use it; existing Jobs keep the value they froze.');
+  } else {
+    out.push(
+      'Nothing was applied. To apply exactly this diff:',
+      `  factory config import ${file} --apply --expect-version ${version}`,
+    );
+  }
+  process.stdout.write(out.join('\n') + '\n');
+  return 0;
+}
+
+function diffLine(change: ConfigDiffEntry): string {
+  if (change.kind === 'create_project') return `  + Project ${change.project} (created)`;
+  const where =
+    change.level === 'factory'
+      ? 'Factory Level'
+      : change.level === 'project'
+        ? `Project ${change.project ?? ''}`
+        : `Repository ${change.project ?? ''}/${change.repository ?? ''}`;
+  const value = (v: unknown) => (v === null ? '(unset)' : JSON.stringify(v));
+  return (
+    `  ${where}: ${change.key}: ${value(change.from)} -> ${value(change.to)}` +
+    (change.widens ? '  [widens a permission value at its own level]' : '')
+  );
 }

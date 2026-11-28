@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { MergePolicySchema } from '@factory/domain';
 import { activity, DEFAULT_TAIL_LINES } from './commands/activity.js';
-import { configSet, configShow } from './commands/config.js';
+import { configExport, configImport, configSet, configShow } from './commands/config.js';
 import { doctor } from './commands/doctor.js';
 import {
   inboxAnswer,
@@ -40,6 +40,12 @@ Commands:
   config set <key> <value> [--expect-version <n>]
                                   Set one Factory Level key (for example
                                   concurrency.global); a stale version is refused
+  config export                   Print the Factory Level, Projects and Repositories as
+                                  YAML, keyed by name (no token values)
+  config import <file> [--apply --expect-version <n>] [--json]
+                                  Validate a YAML export and print its diff; --apply
+                                  applies exactly that diff in one audited change (it
+                                  may create Projects, never registers a Repository)
   project create <name> [--json] Create a Project (the only way one comes to exist)
   project list [--json]           List Projects with their Repositories and active Jobs
   project show <project> [--json] Show a Project: the config set on it, its Repositories
@@ -248,11 +254,26 @@ function config(argv: string[]): Promise<number> | number {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
-    options: { json: { type: 'boolean' }, 'expect-version': { type: 'string' } },
+    options: {
+      json: { type: 'boolean' },
+      'expect-version': { type: 'string' },
+      apply: { type: 'boolean' },
+    },
   });
+  const raw = values['expect-version'];
+  const expectVersion = raw === undefined ? undefined : Number(raw);
+  if (expectVersion !== undefined && (!Number.isInteger(expectVersion) || expectVersion < 1)) {
+    process.stderr.write(`factory: --expect-version takes a version number\n\n${USAGE}`);
+    return 2;
+  }
+  const apply = values.apply === true;
+  if (apply && sub !== 'import') {
+    process.stderr.write(`factory: --apply is for config import\n\n${USAGE}`);
+    return 2;
+  }
   switch (sub) {
     case 'show':
-      if (positionals.length > 0 || values['expect-version'] !== undefined) {
+      if (positionals.length > 0 || expectVersion !== undefined) {
         process.stderr.write(`factory: config show takes no arguments\n\n${USAGE}`);
         return 2;
       }
@@ -263,13 +284,31 @@ function config(argv: string[]): Promise<number> | number {
         process.stderr.write(`factory: config set takes <key> <value>\n\n${USAGE}`);
         return 2;
       }
-      const raw = values['expect-version'];
-      const expectVersion = raw === undefined ? undefined : Number(raw);
-      if (expectVersion !== undefined && (!Number.isInteger(expectVersion) || expectVersion < 1)) {
-        process.stderr.write(`factory: --expect-version takes a version number\n\n${USAGE}`);
+      return configSet(key, value, expectVersion === undefined ? {} : { expectVersion });
+    }
+    case 'export':
+      if (positionals.length > 0 || expectVersion !== undefined || values.json === true) {
+        process.stderr.write(`factory: config export takes no arguments\n\n${USAGE}`);
         return 2;
       }
-      return configSet(key, value, expectVersion === undefined ? {} : { expectVersion });
+      return configExport();
+    case 'import': {
+      const [file, ...extra] = positionals;
+      if (file === undefined || extra.length > 0) {
+        process.stderr.write(`factory: config import takes <file>\n\n${USAGE}`);
+        return 2;
+      }
+      if (apply !== (expectVersion !== undefined)) {
+        process.stderr.write(
+          `factory: --apply takes --expect-version <n>, the version its diff was shown at\n\n${USAGE}`,
+        );
+        return 2;
+      }
+      return configImport(file, {
+        apply,
+        json: values.json === true,
+        ...(expectVersion === undefined ? {} : { expectVersion }),
+      });
     }
     default:
       process.stderr.write(`factory: unknown config command '${sub ?? ''}'\n\n${USAGE}`);

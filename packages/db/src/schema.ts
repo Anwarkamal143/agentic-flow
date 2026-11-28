@@ -40,6 +40,12 @@ export const factoryLevel = sqliteTable('factory_level', {
   configJson: text('config_json').notNull(),
   version: integer('version').notNull(),
   updatedAt: text('updated_at').notNull(),
+  /**
+   * The configuration version (#113, ADR-0073): bumped by every change to the
+   * Factory Level, a Project or a Repository's configuration, so a
+   * `config import --apply --expect-version` sees any change since its diff.
+   */
+  configVersion: integer('config_version').notNull().default(1),
 });
 
 /** A product or initiative that owns Repositories and Jobs. ARCHITECTURE §5. */

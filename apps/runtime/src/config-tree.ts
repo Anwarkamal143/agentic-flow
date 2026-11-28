@@ -15,7 +15,7 @@ import {
   type MergePolicy,
   type ProjectConfig,
 } from '@factory/domain';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { ApiFailure } from './errors.js';
 
 /** A proposed change, applied over the stored levels before the check. */
@@ -65,4 +65,26 @@ export function assertNarrowing(db: FactoryDb | Tx, change: ConfigChange): void 
   };
   const violation = configTreeViolation(tree);
   if (violation !== undefined) throw new ApiFailure(409, violation.code, violation.message);
+}
+
+/**
+ * Bumps the configuration version (ADR-0073), in the transaction of a change
+ * to the Factory Level, a Project or a Repository's configuration, so a
+ * `config import --apply --expect-version` refuses a diff shown before it.
+ */
+export function bumpConfigVersion(tx: Tx): void {
+  tx.update(schema.factoryLevel)
+    .set({ configVersion: sql`${schema.factoryLevel.configVersion} + 1` })
+    .where(eq(schema.factoryLevel.id, 'factory'))
+    .run();
+}
+
+/** The configuration version; 1 before the Factory Level exists. */
+export function configVersion(db: FactoryDb | Tx): number {
+  const row = db
+    .select({ configVersion: schema.factoryLevel.configVersion })
+    .from(schema.factoryLevel)
+    .where(eq(schema.factoryLevel.id, 'factory'))
+    .get();
+  return row?.configVersion ?? 1;
 }
