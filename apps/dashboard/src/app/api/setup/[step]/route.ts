@@ -121,6 +121,7 @@ async function handle(step: OnboardingStep, fields: Record<string, string>): Pro
   }
   const order = completeOnboardingStep(current.lastCompleted, step);
   if (!order.ok) return refusal(409, 'The step was refused', order.message, step);
+  let wrote = false;
   if (step === 'preset') {
     const preset = PresetForm.safeParse(fields);
     if (!preset.success) return invalid();
@@ -130,6 +131,7 @@ async function handle(step: OnboardingStep, fields: Record<string, string>): Pro
       id === 'advanced' ? { preset: id, planApproval, mergePolicy } : { preset: id },
     );
     if (!applied.ok) return refused(step, applied);
+    wrote = true;
   }
   if (step === 'concurrency') {
     const limits = ConcurrencyForm.safeParse(fields);
@@ -142,13 +144,19 @@ async function handle(step: OnboardingStep, fields: Record<string, string>): Pro
     if (changes.length > 0) {
       const set = await setupWrite('/v1/factory/config/set-many', { changes });
       if (!set.ok) return refused(step, set);
+      wrote = true;
     }
   }
   const done = await setupWrite('/v1/onboarding/complete', {
     step,
     expectedVersion: form.data.expectedVersion,
   });
-  if (!done.ok) return refused(step, done);
+  if (!done.ok) {
+    const saved = wrote
+      ? "This step's configuration was saved; the step was not recorded as completed."
+      : undefined;
+    return refused(step, done, saved);
+  }
   const after = nextOnboardingStep(step);
   return redirect(after === null ? '/setup' : `/setup/${after}`);
 }

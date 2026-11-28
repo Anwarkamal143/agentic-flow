@@ -83,6 +83,7 @@ pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | 
                    #   a multi-repo Job prefixes each key with the repo: --answer web.pull_request=close)
 pnpm fixtures      # generate fixtures/repos/tiny-ts (gitignored; tests make their own)
 pnpm dev           # factory start + the dashboard (next dev) on http://127.0.0.1:7421 (FACTORY_DASHBOARD_PORT); needs `factory init`
+                   #   the onboarding wizard is the dashboard's /setup (resumes at the first step not completed; `factory status` shows its progress)
 ```
 
 Scenario tests spawn the built runtime and CLI as child processes against a temporary `FACTORY_HOME`
