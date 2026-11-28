@@ -19,7 +19,7 @@ import {
   type SetProjectConfigInput,
 } from '@factory/domain';
 import { asc, eq } from 'drizzle-orm';
-import { assertNarrowing } from './config-tree.js';
+import { assertNarrowing, bumpConfigVersion } from './config-tree.js';
 import { resolveProjectConfig } from './effective-config.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
@@ -63,6 +63,7 @@ export class ProjectService {
             createdAt: created.createdAt,
           })
           .run();
+        bumpConfigVersion(tx);
         appendEvent(tx, {
           entityKind: 'project',
           entityId: created.id,
@@ -202,6 +203,7 @@ function writeConfig(
     .set({ configJson: JSON.stringify(config) })
     .where(eq(schema.projects.id, project.id))
     .run();
+  bumpConfigVersion(tx);
   appendEvent(tx, {
     entityKind: 'project',
     entityId: project.id,

@@ -13,6 +13,7 @@ import {
   CreateProjectInputSchema,
   ProjectConfigSchema,
   SetFactoryConfigInputSchema,
+  ImportConfigInputSchema,
   SetProjectConfigInputSchema,
   RegisterRepositoryInputSchema,
   ApplyProfileDetectionInputSchema,
@@ -38,6 +39,7 @@ import { ApiFailure } from './errors.js';
 import type { InboxService } from './inbox.js';
 import type { JobService } from './jobs.js';
 import type { ProjectService } from './projects.js';
+import type { ConfigImportService } from './config-import.js';
 import type { FactoryLevelService } from './factory-level.js';
 import type { RepositoryService } from './repositories.js';
 
@@ -74,6 +76,8 @@ export interface AppDeps {
   doctor(): Promise<DoctorReport>;
   /** The Factory Level: factory-wide configuration (ADR-0056). */
   factoryLevel: FactoryLevelService;
+  /** `config export | import` (ADR-0073). */
+  configImport: ConfigImportService;
   projects: ProjectService;
   repositories: RepositoryService;
   jobs: JobService;
@@ -117,6 +121,13 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(deps.factoryLevel.setKey(input, OPERATOR));
   });
   app.get('/v1/factory/config/audit', (c) => c.json(deps.factoryLevel.audit()));
+
+  app.get('/v1/config/export', (c) => c.json(deps.configImport.export()));
+  app.post('/v1/config/import', async (c) => {
+    const input = await parseBody(c, ImportConfigInputSchema);
+    return c.json(deps.configImport.import(input));
+  });
+  app.get('/v1/config/audit', (c) => c.json(deps.configImport.audit()));
 
   app.get('/v1/projects', (c) => c.json(deps.projects.list()));
   app.post('/v1/projects', async (c) => {

@@ -69,6 +69,7 @@ pnpm test:real     # on demand only, never CI: [real] tests with the real Claude
 pnpm format        # Prettier --write
 pnpm --filter @factory/db db:generate   # write a migration after editing packages/db/src/schema.ts
 pnpm factory <cmd> # run the built CLI: init | start | status | stop | doctor | config show | config set <key> <value> [--expect-version <n>]
+                   #   | config export | config import <file> [--apply --expect-version <n>]   (YAML of every level by name; diff first, then one audited apply)
                    #   | project create <name> | project list | project show <project> | project config set <project> <key> <value>
                    #   | repo add [--project <existing>] [--github owner/name] [--required-check <name>]... [--merge-policy never_auto|human_approval] [--merge-method merge|squash|rebase] [--setup <cmd>] [--intake-label <label>] [--yes] | repo profile detect <repo> [--yes] | repo profile set <repo> <key> <value>
                    #   | repo intake set <repo> <label> | repo intake off <repo>   (GitHub Issues intake: labeled issues become issue_job Inbox items)

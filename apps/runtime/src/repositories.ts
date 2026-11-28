@@ -53,7 +53,7 @@ import {
   workTreeRoot,
 } from '@factory/git';
 import { and, eq, or } from 'drizzle-orm';
-import { assertNarrowing } from './config-tree.js';
+import { assertNarrowing, bumpConfigVersion } from './config-tree.js';
 import { ApiFailure } from './errors.js';
 import { newId } from './ids.js';
 import { cancelOpenOffers } from './issue-intake.js';
@@ -183,6 +183,7 @@ export class RepositoryService {
             createdAt: now,
           })
           .run();
+        bumpConfigVersion(tx);
         appendEvent(tx, {
           entityKind: 'repository',
           entityId: id,
@@ -305,6 +306,7 @@ export class RepositoryService {
           .set({ intakeLabel: input.label })
           .where(eq(schema.repositories.id, row.id))
           .run();
+        bumpConfigVersion(tx);
         if (input.label === null) cancelOpenOffers(tx, row.id, ACTOR);
         tx.insert(schema.auditLog)
           .values({
@@ -362,6 +364,7 @@ export class RepositoryService {
         .set({ profileJson: JSON.stringify(after) })
         .where(eq(schema.repositories.id, row.id))
         .run();
+      bumpConfigVersion(tx);
       tx.insert(schema.auditLog)
         .values({
           id: newId('aud'),
