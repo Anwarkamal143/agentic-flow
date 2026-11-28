@@ -92,6 +92,7 @@ export * from './setup.js';
 export * from './projects.js';
 export * from './factory-level.js';
 export * from './config-levels.js';
+export * from './config-import.js';
 export * from './scheduling.js';
 export * from './profile.js';
 export * from './writability.js';
