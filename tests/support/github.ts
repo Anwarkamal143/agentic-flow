@@ -915,6 +915,11 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
       }
     });
   });
+  // No idle timeout on kept-alive sockets: the server runs in the test's own process, so a
+  // synchronous git call longer than the timeout (5 s, under load) leaves the timer due, and the
+  // next fetch reuses the socket before the timer closes it under that request (ECONNRESET).
+  // Every connection is closed when the test finishes.
+  server.keepAliveTimeout = 0;
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`;
   onTestFinished(
