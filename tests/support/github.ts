@@ -56,7 +56,13 @@ export type Fault =
   | { kind: 'forbidden' }
   | { kind: 'server_error'; status: 500 | 502 | 503 | 504 }
   /** The connection is dropped with no response. */
-  | { kind: 'network' };
+  | { kind: 'network' }
+  /**
+   * The request is answered as usual, from the state then, once `release`
+   * resolves: a test holds one read of a poll to act between the poll's reads
+   * and its write.
+   */
+  | { kind: 'held'; release: Promise<void> };
 
 export interface CheckRunInput {
   name: string;
@@ -852,8 +858,30 @@ export async function fakeGitHub(): Promise<FakeGitHub> {
         case 'server_error':
           send(res, fault.status, { message: 'Server Error' });
           return;
+        case 'held':
+          void fault.release.then(() => {
+            try {
+              answer(res, method, target, headers, body);
+            } catch (err) {
+              send(res, 500, {
+                message: `fake GitHub error: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            }
+          });
+          return;
       }
     }
+    answer(res, method, target, headers, body);
+  };
+
+  /** Answers a request from the state now. */
+  const answer = (
+    res: ServerResponse,
+    method: string,
+    target: URL,
+    headers: Record<string, string | undefined>,
+    body: unknown,
+  ) => {
     if (!/^Bearer \S+$/.test(headers['authorization'] ?? '')) {
       send(res, 401, { message: 'Requires authentication' });
       return;
