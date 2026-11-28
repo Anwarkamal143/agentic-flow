@@ -3,7 +3,8 @@
  * ADR-0058): five Jobs in three Projects under `concurrency.perProjectJobs: 1`,
  * with the Fake Harness at fixed durations. Every Project makes progress: each
  * has a Job executing before any Project starts executing its second, and the
- * longest mean ready-wait of any Project is at most twice the shortest.
+ * longest mean ready-wait of any Project is at most twice the shortest, a wait
+ * counted in the claims of other Projects' work made meanwhile (see below).
  * Asserted through the CLI and the runtime API (the event log) only.
  */
 import { describe, expect, it } from 'vitest';
@@ -58,29 +59,40 @@ async function projectWithRepo(rt: RunningRuntime, name: string): Promise<string
   return repo.id;
 }
 
-/** Each claim of the Job's work, and how long it waited to be claimed after it became ready. */
-function readyWaits(events: TimedEvent[]): number[] {
-  const waits: number[] = [];
-  const readySince = new Map<string, number>();
+/** One claim of a Job's work: when it became ready and when it was claimed, by event `seq` and time. */
+interface ReadyClaim {
+  readySeq: number;
+  readyMs: number;
+  claimSeq: number;
+  claimMs: number;
+}
+
+/**
+ * Each claim of the Job's work, from when it became ready: `task.ready|created`
+ * to `task.claimed`, or `stage_run.queued` to `stage_run.running` (a proposal Stage).
+ */
+function readyClaims(events: TimedEvent[]): ReadyClaim[] {
+  const claims: ReadyClaim[] = [];
+  const readySince = new Map<string, { seq: number; ms: number }>();
   for (const e of events) {
-    const at = Date.parse(e.ts);
+    const at = { seq: e.seq, ms: Date.parse(e.ts) };
     const stageId = typeof e.payload['stageId'] === 'string' ? e.payload['stageId'] : '';
+    const claim = () => {
+      const since = readySince.get(e.entityId);
+      if (since !== undefined) {
+        claims.push({ readySeq: since.seq, readyMs: since.ms, claimSeq: at.seq, claimMs: at.ms });
+      }
+    };
     if (e.entityKind === 'stage_run' && PROPOSAL_STAGES.includes(stageId)) {
       if (e.type === 'stage_run.queued') readySince.set(e.entityId, at);
-      if (e.type === 'stage_run.running') {
-        const since = readySince.get(e.entityId);
-        if (since !== undefined) waits.push(at - since);
-      }
+      if (e.type === 'stage_run.running') claim();
     }
     if (e.entityKind === 'task') {
       if (e.type === 'task.created' || e.type === 'task.ready') readySince.set(e.entityId, at);
-      if (e.type === 'task.claimed') {
-        const since = readySince.get(e.entityId);
-        if (since !== undefined) waits.push(at - since);
-      }
+      if (e.type === 'task.claimed') claim();
     }
   }
-  return waits;
+  return claims;
 }
 
 const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
@@ -149,16 +161,34 @@ describe('D2: five Jobs across three Projects, perProjectJobs 1', { timeout: 90_
     expect(new Set(started.slice(0, 3).map((s) => s.project))).toEqual(
       new Set(['alpha', 'beta', 'gamma']),
     );
-    // No Project starves: the longest mean ready-wait is at most twice the shortest.
-    const byProject = new Map<string, number[]>();
-    for (const job of jobs) {
-      const waits = readyWaits(logs.get(job.id) ?? []);
-      byProject.set(job.project, [...(byProject.get(job.project) ?? []), ...waits]);
-    }
-    const means = [...byProject.entries()].map(([project, waits]) => ({
-      project,
-      mean: mean(waits),
-    }));
+    // No Project starves: the longest mean ready-wait is at most twice the shortest. A wait is
+    // counted in the claims of other Projects' work made while it was ready (event `seq` is the
+    // global commit order), not in milliseconds: the wall-clock wait also holds the time a
+    // Project's Job waits on its own limit, for its other Job's whole Attempt, and Attempt
+    // overhead (Worktrees, verification, review) stretches with machine load while the Fake
+    // Harness durations stay fixed, so a millisecond ratio flakes under load although the
+    // scheduler makes the same choices. Being passed over for other Projects is what starving is.
+    const claims = jobs.flatMap((job) =>
+      readyClaims(logs.get(job.id) ?? []).map((c) => ({ ...c, project: job.project })),
+    );
+    const passedOver = (c: (typeof claims)[number]) =>
+      claims.filter(
+        (o) => o.project !== c.project && o.claimSeq > c.readySeq && o.claimSeq < c.claimSeq,
+      ).length;
+    const means = [...new Set(order)].map((project) => {
+      const own = claims.filter((c) => c.project === project);
+      return {
+        project,
+        claims: own.length,
+        mean: mean(own.map(passedOver)),
+        // For the record only: the wall-clock mean, which load stretches.
+        meanMs: Math.round(mean(own.map((c) => c.claimMs - c.readyMs))),
+      };
+    });
+    expect(
+      means.every((m) => m.claims > 0),
+      JSON.stringify(means),
+    ).toBe(true);
     const longest = Math.max(...means.map((m) => m.mean));
     const shortest = Math.min(...means.map((m) => m.mean));
     expect(shortest, JSON.stringify(means)).toBeGreaterThan(0);
